@@ -493,6 +493,17 @@ CV__DNN_INLINE_NS_BEGIN
         explicit Layer(const LayerParams &params);      //!< Initializes only #name, #type and #blobs fields.
         void setParamsFrom(const LayerParams &params);  //!< Initializes only #name, #type and #blobs fields.
         virtual ~Layer();
+
+        #ifdef HAVE_CUDA
+        /** @brief Given GPU Mats, computes outputs on device. Default falls back to CPU forward.
+         *  @param[in]  inputs  GPU input blobs
+         *  @param[out] outputs GPU output blobs
+         *  @param[out] internals GPU internal blobs
+         */
+        virtual void forwardCuda(const std::vector<cv::cuda::GpuMat>& inputs,
+                                 std::vector<cv::cuda::GpuMat>& outputs,
+                                 std::vector<cv::cuda::GpuMat>& internals);
+        #endif
     };
 
     /** @brief Represents graph or subgraph of a model.
@@ -1019,7 +1030,7 @@ CV__DNN_INLINE_NS_BEGIN
     enum EngineType
     {
         ENGINE_CLASSIC=1, //!< Force use the old dnn engine similar to 4.x branch
-        ENGINE_NEW=2,     //!< Force use the new dnn engine. The engine does not support non CPU back-ends for now.
+        ENGINE_NEW=2,     //!< Force use the new DNN engine. Experimental support for non-CPU back-ends (e.g., CUDA).
         ENGINE_AUTO=3     //!< Try to use the new engine and then fall back to the classic version.
     };
 

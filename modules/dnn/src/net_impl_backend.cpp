@@ -222,34 +222,36 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
     {
         if (mainGraph)
         {
-            CV_LOG_WARNING(NULL, "Back-ends are not supported by the new graph engine for now");
+            // Allow back-ends for the new graph engine; just log for visibility
+            CV_LOG_INFO(NULL, "DNN: Switching backend for the new graph engine");
             preferableBackend = backendId;
-            return;
-        }
-
-        clear();
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
-        {
-#if defined(HAVE_INF_ENGINE)
-            switchToOpenVINOBackend(net);
-#elif defined(ENABLE_PLUGINS)
-            auto& networkBackend = dnn_backend::createPluginDNNNetworkBackend("openvino");
-            networkBackend.switchBackend(net);
-#else
-            CV_Error(Error::StsNotImplemented, "OpenVINO backend is not available in the current OpenCV build");
-#endif
-        }
-        else if (backendId == DNN_BACKEND_CANN)
-        {
-#ifdef HAVE_CANN
-            switchToCannBackend(net);
-#else
-            CV_Error(Error::StsNotImplemented, "CANN backend is not availlable in the current OpenCV build");
-#endif
         }
         else
         {
-            preferableBackend = backendId;
+            clear();
+            if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
+            {
+#if defined(HAVE_INF_ENGINE)
+                switchToOpenVINOBackend(net);
+#elif defined(ENABLE_PLUGINS)
+                auto& networkBackend = dnn_backend::createPluginDNNNetworkBackend("openvino");
+                networkBackend.switchBackend(net);
+#else
+                CV_Error(Error::StsNotImplemented, "OpenVINO backend is not available in the current OpenCV build");
+#endif
+            }
+            else if (backendId == DNN_BACKEND_CANN)
+            {
+#ifdef HAVE_CANN
+                switchToCannBackend(net);
+#else
+                CV_Error(Error::StsNotImplemented, "CANN backend is not availlable in the current OpenCV build");
+#endif
+            }
+            else
+            {
+                preferableBackend = backendId;
+            }
         }
     }
 }
@@ -258,8 +260,9 @@ void Net::Impl::setPreferableTarget(int targetId)
 {
     if (mainGraph)
     {
-        CV_LOG_WARNING(NULL, "Targets are not supported by the new graph engine for now");
-        return;
+        // Allow targets for the new graph engine; just log for visibility
+        CV_LOG_INFO(NULL, "DNN: Switching target for the new graph engine");
+        // continue without early return
     }
     if (netWasQuantized && targetId != DNN_TARGET_CPU &&
         targetId != DNN_TARGET_OPENCL && targetId != DNN_TARGET_OPENCL_FP16 && targetId != DNN_TARGET_NPU)
@@ -306,7 +309,10 @@ void Net::Impl::setPreferableTarget(int targetId)
         }
 #endif
 
-        clear();
+        if (!mainGraph)
+        {
+            clear();
+        }
 
         if (targetId == DNN_TARGET_CPU_FP16)
         {

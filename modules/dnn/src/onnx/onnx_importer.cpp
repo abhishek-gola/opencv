@@ -4079,7 +4079,20 @@ Net readNetFromONNX(const String& onnxFile, int engine)
         case ENGINE_CLASSIC:
             return detail::readNetDiagnostic<ONNXImporter>(onnxFile.c_str());
         case ENGINE_NEW:
-            return readNetFromONNX2(onnxFile);
+        {
+            // Mirror diagnostic behavior for the new engine
+            extern bool DNN_DIAGNOSTICS_RUN; // defined in debug_utils.cpp
+            extern bool DNN_SKIP_REAL_IMPORT; // defined in debug_utils.cpp
+            Net maybeNet = readNetFromONNX2(onnxFile);
+            if (DNN_DIAGNOSTICS_RUN && !DNN_SKIP_REAL_IMPORT)
+            {
+                enableModelDiagnostics(false);
+                Net releaseNet = readNetFromONNX2(onnxFile);
+                enableModelDiagnostics(true);
+                return releaseNet;
+            }
+            return maybeNet;
+        }
         case ENGINE_AUTO:
         {
             Net net = readNetFromONNX2(onnxFile);
@@ -4104,7 +4117,20 @@ Net readNetFromONNX(const char* buffer, size_t sizeBuffer, int engine)
         case ENGINE_CLASSIC:
             return detail::readNetDiagnostic<ONNXImporter>(buffer, sizeBuffer);
         case ENGINE_NEW:
-            return readNetFromONNX2(buffer, sizeBuffer);
+        {
+            // Mirror diagnostic behavior for the new engine
+            extern bool DNN_DIAGNOSTICS_RUN; // defined in debug_utils.cpp
+            extern bool DNN_SKIP_REAL_IMPORT; // defined in debug_utils.cpp
+            Net maybeNet = readNetFromONNX2(buffer, sizeBuffer);
+            if (DNN_DIAGNOSTICS_RUN && !DNN_SKIP_REAL_IMPORT)
+            {
+                enableModelDiagnostics(false);
+                Net releaseNet = readNetFromONNX2(buffer, sizeBuffer);
+                enableModelDiagnostics(true);
+                return releaseNet;
+            }
+            return maybeNet;
+        }
         case ENGINE_AUTO:
         {
             Net net = readNetFromONNX2(buffer, sizeBuffer);
@@ -4129,7 +4155,20 @@ Net readNetFromONNX(const std::vector<uchar>& buffer, int engine)
         case ENGINE_CLASSIC:
             return readNetFromONNX(reinterpret_cast<const char*>(buffer.data()), buffer.size());
         case ENGINE_NEW:
-            return readNetFromONNX2(buffer);
+        {
+            // Mirror diagnostic behavior for the new engine
+            extern bool DNN_DIAGNOSTICS_RUN; // defined in debug_utils.cpp
+            extern bool DNN_SKIP_REAL_IMPORT; // defined in debug_utils.cpp
+            Net maybeNet = readNetFromONNX2(buffer);
+            if (DNN_DIAGNOSTICS_RUN && !DNN_SKIP_REAL_IMPORT)
+            {
+                enableModelDiagnostics(false);
+                Net releaseNet = readNetFromONNX2(buffer);
+                enableModelDiagnostics(true);
+                return releaseNet;
+            }
+            return maybeNet;
+        }
         case ENGINE_AUTO:
         {
             Net net = readNetFromONNX2(buffer);

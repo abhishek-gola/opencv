@@ -26,6 +26,9 @@
 #include "legacy_backend.hpp"  // wrapMat BlobManager OpenCLBackendWrapper
 
 #include <unordered_map>
+#ifdef HAVE_CUDA
+#include <opencv2/core/cuda.hpp>
+#endif
 
 namespace cv {
 namespace dnn {
@@ -85,6 +88,9 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<int> bufidxs;
     std::vector<Mat> buffers;
     std::vector<Mat> scratchBufs;
+#ifdef HAVE_CUDA
+    std::vector<cv::cuda::GpuMat> scratchGpuBufs;
+#endif
     std::vector<Ptr<Graph> > allgraphs;
 
     Ptr<Graph> mainGraph;
@@ -371,6 +377,20 @@ struct Net::Impl : public detail::NetImplBase
                               std::vector<Mat>& globalTemps,
                               bool useBufferPool
                               );
+#ifdef HAVE_CUDA
+    // GPU-specific pre-allocation of outputs and temps on device memory
+    void allocateLayerGpuOutputs(const Ptr<Layer>& layer,
+                                 const std::vector<int>& inpTypes,
+                                 const std::vector<MatShape>& inpShapes,
+                                 std::vector<int>& outTypes,
+                                 std::vector<MatShape>& outShapes,
+                                 std::vector<std::pair<uchar*, size_t> >& outOrigData,
+                                 std::vector<cv::cuda::GpuMat>& outputs,
+                                 std::vector<int>& tempTypes,
+                                 std::vector<MatShape>& tempShapes,
+                                 std::vector<cv::cuda::GpuMat>& temps,
+                                 std::vector<cv::cuda::GpuMat>& globalTemps);
+#endif
 
     // set input of the model before running it
     void setMainGraphInput(InputArray blob, const std::string& name);

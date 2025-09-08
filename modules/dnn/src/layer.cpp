@@ -43,6 +43,11 @@ int Layer::outputNameToIndex(const String&)
 
 bool Layer::supportBackend(int backendId)
 {
+#ifdef HAVE_CUDA
+    // allow CUDA backend in the new engine
+    if (backendId == DNN_BACKEND_CUDA)
+        return true;
+#endif
     return backendId == DNN_BACKEND_OPENCV;
 }
 
@@ -164,13 +169,32 @@ void Layer::forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_a
 
     Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
 }
+#ifdef HAVE_CUDA
+ // New GPU hook: override in layers to implement CUDA kernels, default falls back to CPU
+void cv::dnn::Layer::forwardCuda(const std::vector<cv::cuda::GpuMat>& inputs,
+                                 std::vector<cv::cuda::GpuMat>& outputs,
+                                 std::vector<cv::cuda::GpuMat>& internals)
+{
+    // Download GPU inputs to CPU mats
+    std::vector<cv::Mat> cpuIn(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i)
+        inputs[i].download(cpuIn[i]);
+    // Prepare CPU outputs and temps
+    std::vector<cv::Mat> cpuOut(outputs.size()), cpuTmp(internals.size());
+    // Run CPU fallback (handles FP16<->FP32 conversion)
+    forward_fallback(cv::InputArrayOfArrays(cpuIn), cv::OutputArrayOfArrays(cpuOut), cv::OutputArrayOfArrays(cpuTmp));
+    // Upload results back to GPU mats
+    for (size_t i = 0; i < outputs.size(); ++i)
+        outputs[i].upload(cpuOut[i]);
+}
+#endif
 
 void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr)
 {
     CV_TRACE_FUNCTION();
     CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-    if (preferableTarget == DNN_TARGET_OPENCL_FP16 && inputs_arr.depth() == CV_16F)
+    if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_CUDA_FP16) && inputs_arr.depth() == CV_16F)
     {
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
@@ -267,11 +291,11 @@ void Layer::getTypes(const std::vector<MatType>&inputs,
     for (auto input : inputs)
     {
         if (preferableTarget == DNN_TARGET_CUDA_FP16 || preferableTarget == DNN_TARGET_CUDA)
-            CV_CheckTypeEQ(input, CV_32F, "");
+            CV_CheckType(input, input == CV_32F || input == CV_8U, "");
         else if (preferableTarget == DNN_TARGET_OPENCL_FP16)
             CV_CheckType(input, input == CV_16F || input == CV_8S, "");
         else
-            CV_CheckType(input, input == CV_32F || input == CV_8S, "");
+            CV_CheckType(input, input == CV_32F || input == CV_8U || input == CV_8S, "");
     }
 
     outputs.assign(requiredOutputs, inputs[0]);

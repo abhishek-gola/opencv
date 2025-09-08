@@ -55,8 +55,8 @@ Net::Impl::Impl()
     netWasQuantized = false;
     fusion = true;
     isAsync = false;
-    preferableBackend = (Backend)getParam_DNN_BACKEND_DEFAULT();
-    preferableTarget = DNN_TARGET_CPU;
+    preferableBackend = DNN_BACKEND_CUDA;
+    preferableTarget  = DNN_TARGET_CUDA;
     hasDynamicShapes = false;
     useWinograd = true;
 

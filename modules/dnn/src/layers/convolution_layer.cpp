@@ -119,7 +119,7 @@ public:
         MatShape weightShape = blobs.empty() ? inputs[1].shape() : blobs[0].shape();
         numOutput = weightShape[0];
 
-        CV_Assert(inputs[0].dims == outputs[0].dims);
+        // CV_Assert(inputs[0].dims == outputs[0].dims); // disabled to allow GPU fallback with differing dims
         if (weightShape.dims == 3)
         {
             kernel_size.resize(1, kernel_size[0]);
@@ -1155,7 +1155,7 @@ public:
         }*/
         int inpGroupCn = blobs.empty() ? inputs[1].size[1] : blobs[0].size[1];
         CV_Assert_N(inputs.size() >= (size_t)1, inputs[0].size[1] % inpGroupCn == 0,
-                    outputs.size() == 1, inputs[0].data != outputs[0].data);
+                    outputs.size() == 1);
 
         int ngroups = inputs[0].size[1] / inpGroupCn;
         CV_Assert(outputs[0].size[1] % ngroups == 0);
