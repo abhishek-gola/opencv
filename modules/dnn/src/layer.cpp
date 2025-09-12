@@ -171,21 +171,11 @@ void Layer::forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_a
 }
 #ifdef HAVE_CUDA
  // New GPU hook: override in layers to implement CUDA kernels, default falls back to CPU
-void cv::dnn::Layer::forwardCuda(const std::vector<cv::cuda::GpuMat>& inputs,
-                                 std::vector<cv::cuda::GpuMat>& outputs,
-                                 std::vector<cv::cuda::GpuMat>& internals)
+void cv::dnn::Layer::forwardCuda(const std::vector<cv::cuda::GpuMat>& /*inputs*/,
+                                 std::vector<cv::cuda::GpuMat>& /*outputs*/,
+                                 std::vector<cv::cuda::GpuMat>& /*internals*/)
 {
-    // Download GPU inputs to CPU mats
-    std::vector<cv::Mat> cpuIn(inputs.size());
-    for (size_t i = 0; i < inputs.size(); ++i)
-        inputs[i].download(cpuIn[i]);
-    // Prepare CPU outputs and temps
-    std::vector<cv::Mat> cpuOut(outputs.size()), cpuTmp(internals.size());
-    // Run CPU fallback (handles FP16<->FP32 conversion)
-    forward_fallback(cv::InputArrayOfArrays(cpuIn), cv::OutputArrayOfArrays(cpuOut), cv::OutputArrayOfArrays(cpuTmp));
-    // Upload results back to GPU mats
-    for (size_t i = 0; i < outputs.size(); ++i)
-        outputs[i].upload(cpuOut[i]);
+    CV_Error(Error::StsNotImplemented, "CUDA forward is not implemented for this layer");
 }
 #endif
 

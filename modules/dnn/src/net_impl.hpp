@@ -90,6 +90,9 @@ struct Net::Impl : public detail::NetImplBase
     std::vector<Mat> scratchBufs;
 #ifdef HAVE_CUDA
     std::vector<cv::cuda::GpuMat> scratchGpuBufs;
+    // per-Arg device buffers and validity flags
+    std::vector<cv::cuda::GpuMat> gputensors;
+    std::vector<bool> hostValid, gpuValid;
 #endif
     std::vector<Ptr<Graph> > allgraphs;
 
