@@ -293,7 +293,64 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
 void Net::Impl::prepareForInference()
 {
     if (!prepared) {
+        if (dumpLevel && networkDumpCounter == 0)
+        {
+            dumpNetworkToFile();
+        }
+
         validateBackendAndTarget();
+
+        // Auto-fallbacks similar to the old engine's setUpNet()
+        if (preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget))
+#ifndef HAVE_OPENCL
+        {
+            CV_LOG_WARNING(NULL, "DNN: OpenCL target is not available in this OpenCV build, switching to CPU.");
+            preferableTarget = DNN_TARGET_CPU;
+        }
+#else
+        {
+            if (!getParam_DNN_OPENCL_ALLOW_ALL_DEVICES())
+            {
+                // Current implementation is only valid for GPU (#11494)
+                if (ocl::Device::getDefault().type() != ocl::Device::TYPE_GPU)
+                {
+                    CV_LOG_WARNING(NULL, "DNN: OpenCL target is not supported with current OpenCL device (tested with GPUs only), switching to CPU.");
+                    preferableTarget = DNN_TARGET_CPU;
+                }
+                else if (preferableTarget == DNN_TARGET_OPENCL_FP16 && !ocl::Device::getDefault().isIntel())
+                {
+                    CV_LOG_WARNING(NULL,
+                            "DNN: OpenCL target with fp16 precision is not supported "
+                            "with current OpenCL device (tested with Intel GPUs only), "
+                            "switching to OpenCL with fp32 precision.");
+                    preferableTarget = DNN_TARGET_OPENCL;
+                }
+            }
+        }
+#endif
+        if (preferableBackend == DNN_BACKEND_VKCOM && !haveVulkan())
+        {
+            preferableBackend = DNN_BACKEND_OPENCV;
+            preferableTarget = DNN_TARGET_CPU;
+        }
+
+        if (preferableBackend == DNN_BACKEND_CUDA && !haveCUDA())
+        {
+#ifdef HAVE_CUDA
+            CV_LOG_WARNING(NULL, "unable to use CUDA backend; switching to CPU");
+#else
+            CV_LOG_WARNING(NULL, "DNN module was not built with CUDA backend; switching to CPU");
+#endif
+            preferableBackend = DNN_BACKEND_OPENCV;
+            preferableTarget = DNN_TARGET_CPU;
+        }
+
+        if (preferableBackend == DNN_BACKEND_TIMVX && !haveTimVX())
+        {
+            preferableBackend = DNN_BACKEND_OPENCV;
+            preferableTarget = DNN_TARGET_CPU;
+        }
+
         // Initialize CUDA backend (streams, handles, workspace, nodes, background D2H plan)
         if (preferableBackend == DNN_BACKEND_CUDA)
             initCUDABackend(blobsToKeep);
@@ -308,10 +365,13 @@ void Net::Impl::prepareForInference()
         assignBuffers();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
         // Build and cache CUDA backend nodes for the new engine
-        if (preferableBackend == DNN_BACKEND_CUDA)
-            initBackend2();
         prepared = true;
         finalizeLayers = true;
+
+        if (dumpLevel)
+        {
+            dumpNetworkToFile();
+        }
     }
 }
 
@@ -459,94 +519,6 @@ void Net::Impl::allocateLayerGpuOutputs(
     }
 }
 
-void Net::Impl::initBackend2()
-{
-    if (!mainGraph)
-        return;
-
-    graphBackendNodes.clear();
-    graphBackendNodes.resize(totalLayers + 1);
-
-    if (cudaInfo)
-        cudaInfo->workspace = cuda4dnn::csl::Workspace();
-
-    // Clear any prior per-op D2H marks if we add them later
-    // (new engine uses isGraphOutput computed per forwardGraph call)
-
-    size_t graph_ofs = 0;
-    for (const Ptr<Graph>& graph : allgraphs)
-    {
-        const std::vector<Ptr<Layer> >& prog = graph->prog();
-        for (size_t opidx = 0; opidx < prog.size(); opidx++)
-        {
-            Ptr<Layer> layer = prog[opidx];
-            if (!layer)
-                continue;
-            if (!layer->supportBackend(DNN_BACKEND_CUDA))
-                continue;
-
-            const std::vector<Arg>& inputs = layer->inputs;
-            const std::vector<Arg>& outputs = layer->outputs;
-
-            std::vector<Ptr<BackendWrapper>> inWrappers(inputs.size());
-            for (size_t i = 0; i < inputs.size(); i++)
-            {
-                Mat& m = argTensor(inputs[i]);
-                inWrappers[i] = wrap(m);
-            }
-
-            std::vector<int> inTypes(inputs.size());
-            std::vector<MatShape> inShapes(inputs.size());
-            for (size_t i = 0; i < inputs.size(); i++)
-            {
-                const Mat& m = argTensor(inputs[i]);
-                inTypes[i] = m.type();
-                inShapes[i] = m.shape();
-            }
-
-            std::vector<int> outTypes; std::vector<MatShape> outShapes;
-            std::vector<std::pair<uchar*, size_t>> outOrig;
-            std::vector<int> tempTypes; std::vector<MatShape> tempShapes;
-            std::vector<Mat> temps; std::vector<Mat> globalTemps;
-            std::vector<Mat> hostOuts;
-            allocateLayerOutputs(layer, inTypes, inShapes,
-                                 outTypes, outShapes, outOrig,
-                                 hostOuts, tempTypes, tempShapes, temps, scratchBufs, true);
-
-            std::vector<Ptr<BackendWrapper>> outWrappers(outputs.size());
-            for (size_t i = 0; i < outputs.size(); i++)
-                outWrappers[i] = wrap(hostOuts[i]);
-
-            if (cudaInfo)
-            {
-                for (auto& w : inWrappers) if (!w.empty())
-                    w.dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
-                for (auto& w : outWrappers) if (!w.empty())
-                    w.dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
-            }
-
-            Ptr<BackendNode> node;
-            if (cudaInfo)
-            {
-                auto context = cudaInfo->context;
-                node = layer->initCUDA(&context, inWrappers, outWrappers);
-            }
-
-            if (!node.empty())
-            {
-                size_t global_idx = graph_ofs + opidx + 1;
-                if (global_idx >= graphBackendNodes.size())
-                    graphBackendNodes.resize(global_idx + 1);
-                graphBackendNodes[global_idx] = node;
-
-                Ptr<CUDABackendNode> cudaNode = node.dynamicCast<CUDABackendNode>();
-                if (!cudaNode.empty() && cudaInfo)
-                    cudaInfo->workspace.require(cudaNode->get_workspace_memory_in_bytes());
-            }
-        }
-        graph_ofs += prog.size();
-    }
-}
 #endif
 
 void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays outputs)
@@ -962,18 +934,11 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                     // Execute CUDA node
                     cudaNode->forward(inWrappers, outWrappers, cudaInfo->workspace);
 
-                    // Schedule background D2H only for outputs the caller will read on CPU
-                    if (wantCpuOutputs)
+                    // Schedule background D2H for CUDA outputs (align with legacy engine behavior)
+                    for (size_t oi = 0; oi < outWrappers.size(); ++oi)
                     {
-                        for (size_t oi = 0; oi < outputs.size(); ++oi)
-                        {
-                            const int argIdx = outputs[oi].idx;
-                            if (isGraphOutput[argIdx])
-                            {
-                                auto w = outWrappers[oi].dynamicCast<CUDABackendWrapper>();
-                                if (!w.empty()) w->copyToHostInBackground();
-                            }
-                        }
+                        auto w = outWrappers[oi].dynamicCast<CUDABackendWrapper>();
+                        if (!w.empty()) w->copyToHostInBackground();
                     }
 
                     gpuDone = true;

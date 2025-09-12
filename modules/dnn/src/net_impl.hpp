@@ -249,8 +249,7 @@ struct Net::Impl : public detail::NetImplBase
 
     // Cached CUDA backend nodes for the new engine (indexed by global op index = graph_ofs + opidx)
     std::vector<Ptr<BackendNode>> graphBackendNodes;
-    // Build backend nodes for graphs (new engine)
-    void initBackend2();
+
 #endif
 
     void allocateLayer(int lid, const LayersShapesMap& layersShapes);
