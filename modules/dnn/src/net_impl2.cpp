@@ -7,6 +7,7 @@
 #include "net_impl.hpp"
 #ifdef HAVE_CUDA
 #include "opencv2/core/cuda.hpp"
+#include "cuda4dnn/init.hpp"
 #endif
 
 namespace cv {
@@ -292,6 +293,11 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
 void Net::Impl::prepareForInference()
 {
     if (!prepared) {
+        validateBackendAndTarget();
+        // Initialize CUDA backend (streams, handles, workspace, nodes, background D2H plan)
+        if (preferableBackend == DNN_BACKEND_CUDA)
+            initCUDABackend(blobsToKeep);
+
         constFold();
         //inferTypes();
         //constArgs();
@@ -301,6 +307,9 @@ void Net::Impl::prepareForInference()
         //inferShapes(true);
         assignBuffers();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
+        // Build and cache CUDA backend nodes for the new engine
+        if (preferableBackend == DNN_BACKEND_CUDA)
+            initBackend2();
         prepared = true;
         finalizeLayers = true;
     }
@@ -449,6 +458,95 @@ void Net::Impl::allocateLayerGpuOutputs(
         temps[i] = globalTemps[i];
     }
 }
+
+void Net::Impl::initBackend2()
+{
+    if (!mainGraph)
+        return;
+
+    graphBackendNodes.clear();
+    graphBackendNodes.resize(totalLayers + 1);
+
+    if (cudaInfo)
+        cudaInfo->workspace = cuda4dnn::csl::Workspace();
+
+    // Clear any prior per-op D2H marks if we add them later
+    // (new engine uses isGraphOutput computed per forwardGraph call)
+
+    size_t graph_ofs = 0;
+    for (const Ptr<Graph>& graph : allgraphs)
+    {
+        const std::vector<Ptr<Layer> >& prog = graph->prog();
+        for (size_t opidx = 0; opidx < prog.size(); opidx++)
+        {
+            Ptr<Layer> layer = prog[opidx];
+            if (!layer)
+                continue;
+            if (!layer->supportBackend(DNN_BACKEND_CUDA))
+                continue;
+
+            const std::vector<Arg>& inputs = layer->inputs;
+            const std::vector<Arg>& outputs = layer->outputs;
+
+            std::vector<Ptr<BackendWrapper>> inWrappers(inputs.size());
+            for (size_t i = 0; i < inputs.size(); i++)
+            {
+                Mat& m = argTensor(inputs[i]);
+                inWrappers[i] = wrap(m);
+            }
+
+            std::vector<int> inTypes(inputs.size());
+            std::vector<MatShape> inShapes(inputs.size());
+            for (size_t i = 0; i < inputs.size(); i++)
+            {
+                const Mat& m = argTensor(inputs[i]);
+                inTypes[i] = m.type();
+                inShapes[i] = m.shape();
+            }
+
+            std::vector<int> outTypes; std::vector<MatShape> outShapes;
+            std::vector<std::pair<uchar*, size_t>> outOrig;
+            std::vector<int> tempTypes; std::vector<MatShape> tempShapes;
+            std::vector<Mat> temps; std::vector<Mat> globalTemps;
+            std::vector<Mat> hostOuts;
+            allocateLayerOutputs(layer, inTypes, inShapes,
+                                 outTypes, outShapes, outOrig,
+                                 hostOuts, tempTypes, tempShapes, temps, scratchBufs, true);
+
+            std::vector<Ptr<BackendWrapper>> outWrappers(outputs.size());
+            for (size_t i = 0; i < outputs.size(); i++)
+                outWrappers[i] = wrap(hostOuts[i]);
+
+            if (cudaInfo)
+            {
+                for (auto& w : inWrappers) if (!w.empty())
+                    w.dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
+                for (auto& w : outWrappers) if (!w.empty())
+                    w.dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
+            }
+
+            Ptr<BackendNode> node;
+            if (cudaInfo)
+            {
+                auto context = cudaInfo->context;
+                node = layer->initCUDA(&context, inWrappers, outWrappers);
+            }
+
+            if (!node.empty())
+            {
+                size_t global_idx = graph_ofs + opidx + 1;
+                if (global_idx >= graphBackendNodes.size())
+                    graphBackendNodes.resize(global_idx + 1);
+                graphBackendNodes[global_idx] = node;
+
+                Ptr<CUDABackendNode> cudaNode = node.dynamicCast<CUDABackendNode>();
+                if (!cudaNode.empty() && cudaInfo)
+                    cudaInfo->workspace.require(cudaNode->get_workspace_memory_in_bytes());
+            }
+        }
+        graph_ofs += prog.size();
+    }
+}
 #endif
 
 void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays outputs)
@@ -466,6 +564,10 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
 
     forwardGraph(mainGraph, inputs, outputs, true);
 
+#ifdef HAVE_CUDA
+    if (preferableBackend == DNN_BACKEND_CUDA && cudaInfo)
+        cudaInfo->context.stream.synchronize();
+#endif
     // reset finalizeLayer so that layers are only initialized once.
     // [TODO] if a target or backend change or there are some other important
     // global changes in configuration, finalizeLayers should be set to 'true' again
@@ -708,6 +810,18 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
     const std::vector<Arg>& gr_inputs = graph->inputs();
     const std::vector<Arg>& gr_outputs = graph->outputs();
     size_t n_gr_inputs = gr_inputs.size(), n_gr_outputs = gr_outputs.size();
+
+    // Determine which Arg indices correspond to final graph outputs for background D2H planning
+    std::vector<char> isGraphOutput(args.size(), 0);
+    for (const Arg& a : gr_outputs) if ((size_t)a.idx < isGraphOutput.size()) isGraphOutput[a.idx] = 1;
+    bool wantCpuOutputs = true;
+#ifdef HAVE_CUDA
+    {
+        _InputArray::KindFlag outKindProbe = outputs_.kind();
+        if (outKindProbe == _InputArray::STD_VECTOR_CUDA_GPU_MAT || outKindProbe == _InputArray::CUDA_GPU_MAT)
+            wantCpuOutputs = false;
+    }
+#endif
     std::vector<Mat> inpMats, outMats, tempMats;
 #ifdef HAVE_CUDA
     std::vector<cv::cuda::GpuMat> inpGpuMats, outGpuMats, tempGpuMats;
@@ -806,44 +920,66 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         bool dynamicOutShapes = layer->dynamicOutputShapes();
         if (!dynamicOutShapes) {
 #ifdef HAVE_CUDA
-                // Use registered CUDA backend nodes if available (avoid default forwardCuda fallback)
-                Ptr<BackendNode> bn = ld.backendNodes.count(DNN_BACKEND_CUDA) ? ld.backendNodes[DNN_BACKEND_CUDA] : Ptr<BackendNode>();
-                if (supportGPU && bn && !bn.empty()) {
+                // Try to use a cached CUDA backend node for this op
+                Ptr<BackendNode> bn;
+                if (preferableBackend == DNN_BACKEND_CUDA && graphBackendNodes.size() > graph_ofs + opidx + 1)
+                    bn = graphBackendNodes[graph_ofs + opidx + 1];
+
+                if (supportGPU && !bn.empty())
+                {
                     Ptr<CUDABackendNode> cudaNode = bn.dynamicCast<CUDABackendNode>();
                     CV_Assert(!cudaNode.empty());
-                    // Prepare InputWrappers
+
+                    // Prepare input wrappers: ensure host tensors are valid then wrap them.
                     std::vector<Ptr<BackendWrapper>> inWrappers(inputs.size());
-                    for (size_t i = 0; i < inputs.size(); ++i) {
-                        int argIdx = inputs[i].idx;
-                        // wrap host tensor if needed
-                        if (!gputensors[argIdx].empty()) {
-                            inWrappers[i] = Ptr<BackendWrapper>(new CUDABackendWrapper(preferableTarget));
-                            inWrappers[i]->copyToDevice(); // assume wrapper knows how
-                        } else {
-                            inWrappers[i] = wrap(__tensors__[argIdx]);
+                    for (size_t i = 0; i < inputs.size(); ++i)
+                    {
+                        const int argIdx = inputs[i].idx;
+                        if (!hostValid[argIdx] && gpuValid[argIdx]) {
+                            gputensors[argIdx].download(__tensors__[argIdx]);
+                            hostValid[argIdx] = true;
+                        }
+                        inWrappers[i] = wrap(__tensors__[argIdx]);
+                        if (cudaInfo) inWrappers[i].dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
+                    }
+
+                    // Allocate outputs on host first (so we always have a place for results)
+                    allocateLayerOutputs(layer, inpTypes, inpShapes, outTypes, outShapes,
+                                         outOrigData, outMats, tempTypes, tempShapes,
+                                         tempMats, scratchBufs, true);
+
+                    // Wrap the output Mats so the backend can write into them
+                    std::vector<Ptr<BackendWrapper>> outWrappers(outputs.size());
+                    for (size_t i = 0; i < outputs.size(); ++i)
+                    {
+                        const int argIdx = outputs[i].idx;
+                        outWrappers[i] = wrap(outMats[i]);
+                        if (cudaInfo) outWrappers[i].dynamicCast<CUDABackendWrapper>()->setStream(cudaInfo->context.stream, cudaInfo->d2h_stream);
+                        hostValid[argIdx] = true;
+                        gpuValid[argIdx]  = false;
+                    }
+
+                    // Execute CUDA node
+                    cudaNode->forward(inWrappers, outWrappers, cudaInfo->workspace);
+
+                    // Schedule background D2H only for outputs the caller will read on CPU
+                    if (wantCpuOutputs)
+                    {
+                        for (size_t oi = 0; oi < outputs.size(); ++oi)
+                        {
+                            const int argIdx = outputs[oi].idx;
+                            if (isGraphOutput[argIdx])
+                            {
+                                auto w = outWrappers[oi].dynamicCast<CUDABackendWrapper>();
+                                if (!w.empty()) w->copyToHostInBackground();
+                            }
                         }
                     }
-                    // Allocate output wrappers
-                    std::vector<Ptr<BackendWrapper>> outWrappers(outputs.size());
-                    for (size_t i = 0; i < outputs.size(); ++i) {
-                        outWrappers[i] = Ptr<BackendWrapper>(new CUDABackendWrapper(preferableTarget));
-                    }
-                    // Call CUDA graph node
-                    cudaNode->forward(inWrappers, outWrappers, cudaInfo->workspace);
-                    // Copy outputs back to host
-                    outMats.resize(outputs.size());
-                    for (size_t i = 0; i < outputs.size(); ++i) {
-                        int argIdx = outputs[i].idx;
-                        outWrappers[i]->copyToHost();
-                        outWrappers[i]->setHostDirty();
-                        outMats[i] = __tensors__[argIdx];
-                        // mark valid
-                        hostValid[argIdx] = true;
-                        gpuValid[argIdx] = false;
-                    }
+
                     gpuDone = true;
-                } else
-#endif
+                }
+                else
+#endif // HAVE_CUDA
                 {
                     // CPU path: ensure any GPU-only results are downloaded
                     for (size_t idx = 0; idx < inputs.size(); ++idx) {
@@ -1370,24 +1506,6 @@ std::ostream& Net::Impl::dump(std::ostream& strm)
     return strm;
 }
 
-#ifdef HAVE_CUDA
-void Net::Impl::initCUDABackend(const std::vector<LayerPin>& blobsToKeep_)
-{
-    // existing CUDA backend init
-    // ... existing code ...
-
-    // Initialize per-Arg GPU buffering
-    gputensors.resize(args.size());
-    hostValid.assign(args.size(), false);
-    gpuValid.assign(args.size(), false);
-    // Mark all Const and Input args as host-valid
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i].kind == DNN_ARG_CONST || args[i].kind == DNN_ARG_INPUT) {
-            hostValid[i] = true;
-        }
-    }
-}
-#endif
 
 CV__DNN_INLINE_NS_END
 }}  // namespace cv::dnn

@@ -293,12 +293,19 @@ void Net::Impl::setPreferableTarget(int targetId)
 
         if (IS_DNN_CUDA_TARGET(targetId))
         {
-            preferableTarget = DNN_TARGET_CPU;
 #ifdef HAVE_CUDA
             if (cuda4dnn::doesDeviceSupportFP16() && targetId == DNN_TARGET_CUDA_FP16)
                 preferableTarget = DNN_TARGET_CUDA_FP16;
             else
                 preferableTarget = DNN_TARGET_CUDA;
+            // Ensure backend matches CUDA target
+            if (preferableBackend != DNN_BACKEND_CUDA)
+            {
+                CV_LOG_INFO(NULL, "DNN: Switching backend to CUDA to match CUDA target");
+                preferableBackend = DNN_BACKEND_CUDA;
+            }
+#else
+            preferableTarget = DNN_TARGET_CPU;
 #endif
         }
 #if !defined(__arm64__) || !__arm64__

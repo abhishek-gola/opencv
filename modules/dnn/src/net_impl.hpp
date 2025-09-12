@@ -246,6 +246,11 @@ struct Net::Impl : public detail::NetImplBase
     std::unique_ptr<CudaInfo_t> cudaInfo;
 
     void initCUDABackend(const std::vector<LayerPin>& blobsToKeep_);
+
+    // Cached CUDA backend nodes for the new engine (indexed by global op index = graph_ofs + opidx)
+    std::vector<Ptr<BackendNode>> graphBackendNodes;
+    // Build backend nodes for graphs (new engine)
+    void initBackend2();
 #endif
 
     void allocateLayer(int lid, const LayersShapesMap& layersShapes);

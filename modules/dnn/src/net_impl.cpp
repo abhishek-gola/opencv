@@ -154,6 +154,13 @@ void Net::Impl::validateBackendAndTarget()
 {
     CV_TRACE_FUNCTION();
 
+    // Auto-adjust: if a CUDA target is requested with OpenCV backend, switch to CUDA backend
+    if (preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_CUDA_TARGET(preferableTarget))
+    {
+        CV_LOG_INFO(NULL, "DNN: Switching backend to CUDA to match requested CUDA target");
+        preferableBackend = DNN_BACKEND_CUDA;
+    }
+
     CV_Assert(preferableBackend != DNN_BACKEND_OPENCV ||
               preferableTarget == DNN_TARGET_CPU ||
               preferableTarget == DNN_TARGET_CPU_FP16 ||
