@@ -783,17 +783,6 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
     const std::vector<Arg>& gr_outputs = graph->outputs();
     size_t n_gr_inputs = gr_inputs.size(), n_gr_outputs = gr_outputs.size();
 
-    // Determine which Arg indices correspond to final graph outputs for background D2H planning
-    std::vector<char> isGraphOutput(args.size(), 0);
-    for (const Arg& a : gr_outputs) if ((size_t)a.idx < isGraphOutput.size()) isGraphOutput[a.idx] = 1;
-    bool wantCpuOutputs = true;
-#ifdef HAVE_CUDA
-    {
-        _InputArray::KindFlag outKindProbe = outputs_.kind();
-        if (outKindProbe == _InputArray::STD_VECTOR_CUDA_GPU_MAT || outKindProbe == _InputArray::CUDA_GPU_MAT)
-            wantCpuOutputs = false;
-    }
-#endif
     std::vector<Mat> inpMats, outMats, tempMats;
 #ifdef HAVE_CUDA
     std::vector<cv::cuda::GpuMat> inpGpuMats, outGpuMats, tempGpuMats;

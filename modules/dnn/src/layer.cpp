@@ -169,15 +169,6 @@ void Layer::forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_a
 
     Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
 }
-#ifdef HAVE_CUDA
- // New GPU hook: override in layers to implement CUDA kernels, default falls back to CPU
-void cv::dnn::Layer::forwardCuda(const std::vector<cv::cuda::GpuMat>& /*inputs*/,
-                                 std::vector<cv::cuda::GpuMat>& /*outputs*/,
-                                 std::vector<cv::cuda::GpuMat>& /*internals*/)
-{
-    CV_Error(Error::StsNotImplemented, "CUDA forward is not implemented for this layer");
-}
-#endif
 
 void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr)
 {

@@ -494,16 +494,6 @@ CV__DNN_INLINE_NS_BEGIN
         void setParamsFrom(const LayerParams &params);  //!< Initializes only #name, #type and #blobs fields.
         virtual ~Layer();
 
-        #ifdef HAVE_CUDA
-        /** @brief Given GPU Mats, computes outputs on device. Default falls back to CPU forward.
-         *  @param[in]  inputs  GPU input blobs
-         *  @param[out] outputs GPU output blobs
-         *  @param[out] internals GPU internal blobs
-         */
-        virtual void forwardCuda(const std::vector<cv::cuda::GpuMat>& inputs,
-                                 std::vector<cv::cuda::GpuMat>& outputs,
-                                 std::vector<cv::cuda::GpuMat>& internals);
-        #endif
     };
 
     /** @brief Represents graph or subgraph of a model.
