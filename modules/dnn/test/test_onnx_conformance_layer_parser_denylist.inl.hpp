@@ -404,9 +404,9 @@
 "test_hannwindow_expanded",
 "test_hannwindow_symmetric",
 "test_hannwindow_symmetric_expanded",
-"test_hardsigmoid_default_expanded_ver18",
-"test_hardsigmoid_example_expanded_ver18",
-"test_hardsigmoid_expanded_ver18",
+// "test_hardsigmoid_default_expanded_ver18",
+// "test_hardsigmoid_example_expanded_ver18",
+// "test_hardsigmoid_expanded_ver18",
 "test_identity_opt",  //  23221 illegal hardware instruction
 "test_identity_sequence",  // Issue:: Unkonwn error
 "test_if_opt",  // Issue::Failed to allocate 17059022683624350 bytes in function 'OutOfMemoryError'
