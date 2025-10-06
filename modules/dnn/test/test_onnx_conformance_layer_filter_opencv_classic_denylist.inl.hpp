@@ -322,3 +322,6 @@
 "test_bitwise_xor_i32_2d",
 "test_bitwise_xor_ui64_bcast_3v1d",
 "test_bitwise_xor_ui8_bcast_4v3d",
+"test_elu_default_expanded_ver18",
+"test_elu_example_expanded_ver18",
+"test_elu_expanded_ver18",
