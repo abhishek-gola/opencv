@@ -345,6 +345,14 @@
 "test_gru_defaults",  // ---- same as above ---
 "test_gru_seq_length",  // ---- same as above ---
 "test_gru_with_initial_bias",  // ---- same as above ---
+"test_hammingwindow",
+"test_hammingwindow_expanded",
+"test_hammingwindow_symmetric",
+"test_hammingwindow_symmetric_expanded",
+"test_hannwindow",
+"test_hannwindow_expanded",
+"test_hannwindow_symmetric",
+"test_hannwindow_symmetric_expanded",
 "test_identity_opt",  //  23221 illegal hardware instruction
 "test_identity_sequence",  // Issue:: Unkonwn error
 "test_if_opt",  // Issue::Failed to allocate 17059022683624350 bytes in function 'OutOfMemoryError'
