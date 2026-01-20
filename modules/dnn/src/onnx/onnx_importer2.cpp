@@ -4,6 +4,7 @@
 
 #include "../precomp.hpp"
 #include "../net_impl.hpp"
+#include "../layer_data_wrapper.hpp"
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/dnn/layer_reg.private.hpp>
@@ -693,9 +694,9 @@ Net ONNXImporter2::parseModel()
         CV_LOG_WARNING(NULL, sstrm.str());
         return Net();
     }
-    netimpl->prepareForInference();
-    // ************ uncomment for debugging **********
-    //net.dumpToStream(std::cout);
+    // Note: We intentionally don't call netimpl->prepareForInference() here.
+    // Import builds an abstract graph (DataOnlyLayer nodes). The graph is finalized later
+    // after the user selects backend/target (see Net::finalize()) or on the first forward().
     return net;
 }
 
@@ -941,11 +942,20 @@ void ONNXImporter2::addLayer(LayerParams& layerParams,
                              const opencv_onnx::NodeProto& node_proto,
                              int max_inputs)
 {
-    Ptr<Layer> layer = LayerFactory::createLayerInstance(layerParams.type, layerParams);
-    if (!layer) {
-        rememberMissingOp(layerParams.type);
-        return;
+    Ptr<LayerHelper> layerHelper = LayerFactory::createLayerHelperInstance(layerParams.type, layerParams);
+    if (!layerHelper)
+    {
+        // If there is no specialized LayerData registered, fall back to a data node which
+        // delegates shape/type inference to a temporary executable layer instance.
+        if (!LayerFactory::isLayerRegistered(layerParams.type))
+        {
+            rememberMissingOp(layerParams.type);
+            return;
+        }
+        layerHelper = makePtr<detail::FallbackLayerHelper>(layerParams);
     }
+
+    Ptr<Layer> layer = makePtr<detail::DataOnlyLayer>(layerHelper);
     size_t actual_inputs = std::min((size_t)max_inputs, node_inputs.size());
     layer->inputs = node_inputs;
     layer->inputs.resize(actual_inputs);

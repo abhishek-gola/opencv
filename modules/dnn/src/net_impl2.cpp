@@ -5,6 +5,12 @@
 #include "precomp.hpp"
 
 #include "net_impl.hpp"
+#include "layer_data_wrapper.hpp"
+#ifdef HAVE_CUDA
+#include "cuda/layer_cudnn.hpp"
+#include <cuda_runtime.h>
+#include <cudnn.h>
+#endif
 
 namespace cv {
 namespace dnn {
@@ -289,6 +295,43 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
 void Net::Impl::prepareForInference()
 {
     if (!prepared) {
+        // Instantiate executable layers for the abstract graph nodes (DataOnlyLayer).
+        // This is the "finalize" step for the new engine: it happens after backend/target selection,
+        // either explicitly via Net::finalize() or lazily on the first forward().
+        if (mainGraph)
+        {
+            const std::vector<Ptr<Layer> >& prog0 = mainGraph->prog();
+            std::vector<Ptr<Layer> > newprog;
+            newprog.reserve(prog0.size());
+            for (const Ptr<Layer>& l : prog0)
+            {
+                Ptr<detail::DataOnlyLayer> dl = l.dynamicCast<detail::DataOnlyLayer>();
+                if (!dl)
+                {
+                    newprog.push_back(l);
+                    continue;
+                }
+                Ptr<LayerHelper> lh = dl->getLayerHelper();
+                CV_Assert(lh);
+
+                LayerParams lp = lh->getParams();
+                if (lp.type.empty()) lp.type = lh->type();
+                if (lp.name.empty()) lp.name = lh->name();
+
+                Ptr<Layer> exec = LayerFactory::createLayerInstance(lp.type, lp);
+                if (!exec)
+                {
+                    CV_Error_(Error::StsError, ("Can't create layer '%s' of type '%s' during finalization",
+                                                lp.name.c_str(), lp.type.c_str()));
+                }
+                exec->inputs = dl->inputs;
+                exec->outputs = dl->outputs;
+                exec->netimpl = this;
+                newprog.push_back(exec);
+            }
+            mainGraph->setProg(newprog);
+        }
+
         constFold();
         //inferTypes();
         //constArgs();
@@ -367,6 +410,7 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     if (!mainGraph) {
         CV_Error(Error::StsNullPtr, "the model was not loaded");
     }
+    prepareForInference();
     // ************ uncomment one of the lines below for debugging **********
     //tracingMode = DNN_TRACE_OP;
     //tracingMode = DNN_TRACE_ALL;

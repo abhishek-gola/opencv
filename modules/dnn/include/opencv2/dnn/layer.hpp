@@ -59,15 +59,24 @@ public:
 
     //! Each Layer class must provide this function to the factory
     typedef Ptr<Layer>(*Constructor)(LayerParams &params);
+    //! Each LayerHelper class must provide this function to the factory
+    typedef Ptr<LayerHelper>(*HelperConstructor)(LayerParams &params);
 
     //! Registers the layer class with typename @p type and specified @p constructor. Thread-safe.
     static void registerLayer(const String &type, Constructor constructor);
 
+    //! Registers the layer-helper class with typename @p type and specified @p constructor. Thread-safe.
+    static void registerLayerHelper(const String& type, HelperConstructor constructor);
+
     //! Unregisters registered layer with specified type name. Thread-safe.
     static void unregisterLayer(const String &type);
 
+    //! Unregisters registered layer-helper with specified type name. Thread-safe.
+    static void unregisterLayerHelper(const String& type);
+
     //! Check if layer is registered.
     static bool isLayerRegistered(const std::string& type);
+    static bool isLayerHelperRegistered(const std::string& type);
 
     /** @brief Creates instance of registered layer.
      *  @param type type name of creating layer.
@@ -75,6 +84,13 @@ public:
      *  @note Thread-safe.
      */
     static Ptr<Layer> createLayerInstance(const String &type, LayerParams& params);
+
+    /** @brief Creates instance of registered layer-data.
+     *  @param type type name of creating layer-data.
+     *  @param params parameters which will be used for layer-data initialization.
+     *  @note Thread-safe.
+     */
+    static Ptr<LayerHelper> createLayerHelperInstance(const String& type, LayerParams& params);
 
 private:
     LayerFactory();

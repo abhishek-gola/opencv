@@ -161,6 +161,42 @@ CV__DNN_INLINE_NS_BEGIN
         String type; //!< Type name which was used for creating layer by layer factory (optional).
     };
 
+    /** @brief Abstract, data-only representation of an operation/layer.
+     *
+     * During model import we can build an abstract graph of LayerData nodes which supports
+     * shape/type inference and dumping but has no forward implementation.
+     *
+     * Executable Layer instances are created later (e.g. in Net::finalize()) according to
+     * the chosen backend/target.
+     */
+    class CV_EXPORTS LayerHelper
+    {
+    public:
+        virtual ~LayerHelper() {}
+
+        /** Type name used for factory lookup (e.g. "Convolution"). */
+        virtual String type() const = 0;
+
+        /** Optional human-readable name. */
+        virtual String name() const { return String(); }
+
+        /** Infer output and internal tensor shapes. */
+        virtual bool getMemoryShapes(const std::vector<MatShape>& inputs,
+                                     const int requiredOutputs,
+                                     std::vector<MatShape>& outputs,
+                                     std::vector<MatShape>& internals) const = 0;
+
+        /** Infer output and internal tensor types. */
+        virtual void getTypes(const std::vector<MatType>& inputs,
+                              const int requiredOutputs,
+                              const int requiredInternals,
+                              std::vector<MatType>& outputs,
+                              std::vector<MatType>& internals) const = 0;
+
+        /** Return underlying params (optional; used for fallback instantiation). */
+        virtual LayerParams getParams() const { return LayerParams(); }
+    };
+
    /**
     * @brief Derivatives of this class encapsulates functions of certain backends.
     */
@@ -691,6 +727,29 @@ CV__DNN_INLINE_NS_BEGIN
          *  @details By default runs forward pass for the whole network.
          */
         CV_WRAP Mat forward(const String& outputName = String());
+
+        /** @brief Explicitly initialize the network for inference.
+         *
+         * This method performs network setup steps which are normally triggered lazily
+         * on the first call to forward(): layers allocation, backend/target initialization,
+         * and any backend-specific preparation.
+         *
+         * @details The initialization is performed for the same default output as in forward()
+         * (i.e. the last network output when @p outputName is empty). If you later call forward()
+         * with a different set of requested outputs, the network may need to re-allocate/re-initialize.
+         */
+        /** @brief Explicitly initialize the network for inference (C++ API).
+         *
+         * @note This method is intentionally not exposed to Java bindings because Java uses
+         * `finalize()` for object cleanup and binding generation would conflict.
+         */
+        void finalize();
+
+        /** @brief Explicitly initialize the network for inference (bindings-friendly alias).
+         *
+         * Same as finalize(), but with a name that doesn't conflict with Java's finalize().
+         */
+        CV_WRAP_AS(finalizeNet) void finalizeNet();
 
         /** @brief Runs forward pass to compute output of layer with name @p outputName.
          *  @param outputName name for layer which output is needed to get

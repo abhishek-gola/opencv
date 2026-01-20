@@ -81,6 +81,37 @@ Mat Net::forward(const String& outputName)
     return impl->forward(outputName);
 }
 
+void Net::finalize()
+{
+    CV_TRACE_FUNCTION();
+    CV_Assert(impl);
+    CV_Assert(!empty());
+
+    // New graph engine: do the "compile"/buffer assignment stage early.
+    // Per-layer Layer::finalize() is still executed lazily on the first forward.
+    if (impl->mainGraph)
+    {
+        impl->prepareForInference();
+        return;
+    }
+
+    // Old engine: mirror Net::Impl::forward() default output selection to avoid
+    // re-allocation on the subsequent forward() call in the common case.
+    String layerName;
+    {
+        std::vector<String> layerNames = impl->getLayerNames();
+        CV_Assert(!layerNames.empty());
+        layerName = layerNames.back();
+    }
+    std::vector<detail::LayerPin> pins(1, impl->getPinByAlias(layerName));
+    impl->setUpNet(pins);
+}
+
+void Net::finalizeNet()
+{
+    finalize();
+}
+
 AsyncArray Net::forwardAsync(const String& outputName)
 {
     CV_TRACE_FUNCTION();

@@ -34,6 +34,11 @@ CV__DNN_INLINE_NS_BEGIN
 using std::make_pair;
 using std::string;
 
+// Explicitly import internal LayerData into this header's scope.
+// This avoids any dependency on inline-namespace name injection and also prevents
+// confusion with the public "abstract op data" concept (LayerHelper).
+using detail::LayerData;
+
 typedef std::unordered_map<std::string, int64_t> NamesHash;
 
 // NB: Implementation is divided between of multiple .cpp files
