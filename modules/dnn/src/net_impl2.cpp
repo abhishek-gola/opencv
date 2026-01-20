@@ -297,10 +297,14 @@ void Net::Impl::prepareForInference()
     if (!prepared) {
         // Instantiate executable layers for the abstract graph nodes (DataOnlyLayer).
         // This is the "finalize" step for the new engine: it happens after backend/target selection,
-        // either explicitly via Net::finalize() or lazily on the first forward().
-        if (mainGraph)
+        // either explicitly via Net::finalize()/finalizeNet() or lazily on the first forward().
+        auto finalizeGraphProg = [&](const Ptr<Graph>& g)
         {
-            const std::vector<Ptr<Layer> >& prog0 = mainGraph->prog();
+            if (!g)
+                return;
+            const std::vector<Ptr<Layer> >& prog0 = g->prog();
+            if (prog0.empty())
+                return;
             std::vector<Ptr<Layer> > newprog;
             newprog.reserve(prog0.size());
             for (const Ptr<Layer>& l : prog0)
@@ -311,6 +315,7 @@ void Net::Impl::prepareForInference()
                     newprog.push_back(l);
                     continue;
                 }
+
                 Ptr<LayerHelper> lh = dl->getLayerHelper();
                 CV_Assert(lh);
 
@@ -324,13 +329,30 @@ void Net::Impl::prepareForInference()
                     CV_Error_(Error::StsError, ("Can't create layer '%s' of type '%s' during finalization",
                                                 lp.name.c_str(), lp.type.c_str()));
                 }
+
                 exec->inputs = dl->inputs;
                 exec->outputs = dl->outputs;
                 exec->netimpl = this;
+
+                if (auto* dl_sg = dl->subgraphs())
+                {
+                    if (!dl_sg->empty())
+                    {
+                        auto* exec_sg = exec->subgraphs();
+                        CV_Assert(exec_sg && "Layer with subgraphs must override Layer::subgraphs()");
+                        *exec_sg = *dl_sg;
+                    }
+                }
+
                 newprog.push_back(exec);
             }
-            mainGraph->setProg(newprog);
-        }
+            g->setProg(newprog);
+        };
+
+        // Finalize main graph and all nested graphs (e.g. If branches are separate graphs).
+        finalizeGraphProg(mainGraph);
+        for (const Ptr<Graph>& g : allgraphs)
+            finalizeGraphProg(g);
 
         constFold();
         //inferTypes();

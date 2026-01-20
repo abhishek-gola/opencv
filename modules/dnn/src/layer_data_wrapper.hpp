@@ -65,6 +65,13 @@ public:
         type = helper_->type();
     }
 
+    std::vector<Ptr<Graph> >* subgraphs() const CV_OVERRIDE
+    {
+        // Some ONNX ops (e.g. If) store subgraphs in the layer instance.
+        // DataOnlyLayer must support it during import before executable layers are instantiated.
+        return &subgraphs_;
+    }
+
     bool getMemoryShapes(const std::vector<MatShape>& inputs,
                          const int requiredOutputs,
                          std::vector<MatShape>& outputs,
@@ -92,6 +99,7 @@ public:
 
 private:
     Ptr<cv::dnn::LayerHelper> helper_;
+    mutable std::vector<Ptr<Graph> > subgraphs_;
 };
 
 }  // namespace detail

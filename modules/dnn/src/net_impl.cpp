@@ -2533,6 +2533,9 @@ void Net::Impl::getLayerTypes(std::vector<String>& layersTypes) const
 {
     layersTypes.clear();
     if (mainGraph) {
+        // New engine graph may be unprepared right after import (before Net::finalize()/forward()).
+        // Ensure program is available for introspection APIs like getLayerTypes().
+        const_cast<Net::Impl*>(this)->prepareForInference();
         std::set<std::string> layersTypesSet;
         for (const Ptr<Graph>& g: allgraphs) {
             const std::vector<Ptr<Layer> >& prog = g->prog();

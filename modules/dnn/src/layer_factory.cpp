@@ -59,7 +59,9 @@ LayerHelperFactory_Impl& getLayerHelperFactoryImpl()
         if (instance == NULL)
         {
             instance = &getLayerHelperFactoryImpl_();
-            initializeLayerFactory();
+            // Ensure the legacy Layer factory is initialized exactly once.
+            // (initializeLayerFactory() registers layers and is not idempotent.)
+            (void)getLayerFactoryImpl();
         }
     }
     return *instance;
