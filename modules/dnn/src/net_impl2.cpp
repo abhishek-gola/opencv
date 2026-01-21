@@ -105,7 +105,70 @@ static inline bool engine2_canInferStaticInput(const ArgData& adata)
     return true;
 }
 
-static bool engine2_preFinalizeGraph(Net::Impl* netimpl, const Ptr<Graph>& graph)
+// Shared helper: gather input tensors and prepare output/temp tensors for a layer.
+// If allowDynamicOutputs==false and the layer reports dynamic output shapes, returns false.
+static bool prepareLayerIO(Net::Impl* netimpl,
+                           const Ptr<Layer>& layer,
+                           std::vector<Mat>& inpMats,
+                           std::vector<int>& inpTypes,
+                           std::vector<MatShape>& inpShapes,
+                           std::vector<Mat>& outMats,
+                           std::vector<int>& outTypes,
+                           std::vector<MatShape>& outShapes,
+                           std::vector<std::pair<uchar*, size_t> >& outOrigData,
+                           std::vector<Mat>& tempMats,
+                           std::vector<int>& tempTypes,
+                           std::vector<MatShape>& tempShapes,
+                           bool allowDynamicOutputs)
+{
+    CV_Assert(netimpl);
+    CV_Assert(layer);
+
+    const std::vector<Arg>& inputs = layer->inputs;
+    const std::vector<Arg>& outputs = layer->outputs;
+    const size_t ninputs = inputs.size();
+    const size_t noutputs = outputs.size();
+
+    inpMats.resize(ninputs);
+    inpTypes.resize(ninputs);
+    inpShapes.resize(ninputs);
+    for (size_t i = 0; i < ninputs; ++i)
+    {
+        Arg inp = inputs[i];
+        const Mat& m = netimpl->argTensor(inp);
+        inpMats[i] = m;
+        inpTypes[i] = m.type();
+        inpShapes[i] = m.shape();
+    }
+
+    outMats.clear();
+    outOrigData.clear();
+
+    const bool dynamicOutShapes = layer->dynamicOutputShapes();
+    if (!dynamicOutShapes)
+    {
+        netimpl->allocateLayerOutputs(layer, inpTypes, inpShapes,
+                                      outTypes, outShapes, outOrigData, outMats,
+                                      tempTypes, tempShapes, tempMats, netimpl->scratchBufs,
+                                      true);
+        return true;
+    }
+
+    if (!allowDynamicOutputs)
+        return false;
+
+    outMats.resize(noutputs);
+    for (size_t i = 0; i < noutputs; ++i)
+    {
+        Arg out = outputs[i];
+        outMats[i] = netimpl->argTensor(out);
+    }
+    tempMats = netimpl->scratchBufs;
+    return true;
+}
+
+
+static bool prewarmGraphForInference(Net::Impl* netimpl, const Ptr<Graph>& graph)
 {
     CV_Assert(netimpl);
     if (!graph)
@@ -140,48 +203,32 @@ static bool engine2_preFinalizeGraph(Net::Impl* netimpl, const Ptr<Graph>& graph
         if (!layer)
             continue;
 
-        const std::vector<Arg>& inputs = layer->inputs;
         const std::vector<Arg>& outputs = layer->outputs;
-        const size_t ninputs = inputs.size();
         const size_t noutputs = outputs.size();
 
-        inpMats.resize(ninputs);
-        inpTypes.resize(ninputs);
-        inpShapes.resize(ninputs);
-
-        for (size_t i = 0; i < ninputs; ++i)
-        {
-            Arg inp = inputs[i];
-            const Mat& m = netimpl->argTensor(inp);
-            inpMats[i] = m;
-            inpTypes[i] = m.type();
-            inpShapes[i] = m.shape();
-        }
-
-        const bool dynamicOutShapes = layer->dynamicOutputShapes();
-        if (!dynamicOutShapes)
-        {
-            netimpl->allocateLayerOutputs(layer, inpTypes, inpShapes,
-                                          outTypes, outShapes, outOrigData, outMats,
-                                          tempTypes, tempShapes, tempMats, netimpl->scratchBufs,
-                                          true);
-            if (netimpl->finalizeLayers)
-                layer->finalize(inpMats, outMats);
-
-            for (size_t i = 0; i < noutputs; ++i)
-            {
-                Arg out = outputs[i];
-                ArgData& odata = netimpl->args[out.idx];
-                const Mat& m = outMats[i];
-                odata.type = m.type();
-                odata.shape = m.shape();
-            }
-        }
-        else
+        const bool ok = prepareLayerIO(netimpl, layer,
+                                       inpMats, inpTypes, inpShapes,
+                                       outMats, outTypes, outShapes, outOrigData,
+                                       tempMats, tempTypes, tempShapes,
+                                       false /*allowDynamicOutputs*/);
+        if (!ok)
         {
             // Can't pre-finalize layers with dynamic output shapes without running them.
             // We'll leave them to be finalized during the first forward.
             allFinalized = false;
+            continue;
+        }
+
+        if (netimpl->finalizeLayers)
+            layer->finalize(inpMats, outMats);
+
+        for (size_t i = 0; i < noutputs; ++i)
+        {
+            Arg out = outputs[i];
+            ArgData& odata = netimpl->args[out.idx];
+            const Mat& m = outMats[i];
+            odata.type = m.type();
+            odata.shape = m.shape();
         }
     }
     return allFinalized;
@@ -560,7 +607,7 @@ void Net::Impl::finalize()
 
     prepareForInference();
 
-    const bool allFinalized = engine2_preFinalizeGraph(this, mainGraph);
+    const bool allFinalized = prewarmGraphForInference(this, mainGraph);
     finalizeLayers = !allFinalized;
 }
 
@@ -911,20 +958,12 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
         const std::vector<Arg>& outputs = layer->outputs;
         size_t ninputs = inputs.size(), noutputs = outputs.size();
 
-        inpMats.resize(ninputs);
-        inpTypes.resize(ninputs);
-        inpShapes.resize(ninputs);
-        outMats.clear();
-        outOrigData.clear();
-
-        for (i = 0; i < ninputs; i++) {
-            Arg inp = inputs[i];
-            //const ArgData& adata = args[inp.idx];
-            const Mat& m = argTensor(inp);
-            inpMats[i] = m;
-            inpTypes[i] = m.type();
-            inpShapes[i] = m.shape();
-        }
+        const bool ok = prepareLayerIO(this, layer,
+                                       inpMats, inpTypes, inpShapes,
+                                       outMats, outTypes, outShapes, outOrigData,
+                                       tempMats, tempTypes, tempShapes,
+                                       true /*allowDynamicOutputs*/);
+        CV_Assert(ok);
 
         if (tracingMode != DNN_TRACE_NONE) {
             strm_ << "-----------\n";
@@ -934,18 +973,7 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                 traceArg(strm_, "Input", i, inp, false);
             }
         }
-        bool dynamicOutShapes = layer->dynamicOutputShapes();
-        if (!dynamicOutShapes) {
-            allocateLayerOutputs(layer, inpTypes, inpShapes, outTypes, outShapes, outOrigData, outMats,
-                                 tempTypes, tempShapes, tempMats, scratchBufs, true);
-        } else {
-            outMats.resize(noutputs);
-            for (i = 0; i < noutputs; i++) {
-                Arg out = outputs[i];
-                outMats[i] = argTensor(out);
-            }
-            tempMats = scratchBufs;
-        }
+        const bool dynamicOutShapes = layer->dynamicOutputShapes();
 
         timestamp = getTickCount();
 
