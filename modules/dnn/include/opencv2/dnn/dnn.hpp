@@ -261,7 +261,7 @@ CV__DNN_INLINE_NS_BEGIN
 
     class CV_EXPORTS Net;
     class CV_EXPORTS Graph;
-    class CV_EXPORTS_W_SIMPLE OpData;
+    class CV_EXPORTS_W_SIMPLE LayerOpData;
     class CV_EXPORTS ActivationLayer;
 
     /** @brief This interface class allows to build new Layers - are building blocks of networks.
@@ -521,10 +521,10 @@ CV__DNN_INLINE_NS_BEGIN
         virtual const std::vector<Ptr<Layer> >& prog() const = 0;
         virtual void setProg(const std::vector<Ptr<Layer> >& newprog) = 0;
 
-        // ENGINE_NEW: optional OpData program storage.
+        // ENGINE_NEW: optional LayerOpData program storage.
         // When present, Net::finalize() can compile this op program into executable Layers (prog()).
-        virtual const std::vector<Ptr<OpData> >& opProg() const = 0;
-        virtual void setOpProg(const std::vector<Ptr<OpData> >& newprog) = 0;
+        virtual const std::vector<Ptr<LayerOpData> >& opProg() const = 0;
+        virtual void setOpProg(const std::vector<Ptr<LayerOpData> >& newprog) = 0;
     };
 
     /**
@@ -535,11 +535,11 @@ CV__DNN_INLINE_NS_BEGIN
      *
      * Note: this class name intentionally differs from legacy internal detail::LayerData.
      */
-    class CV_EXPORTS_W_SIMPLE OpData
+    class CV_EXPORTS_W_SIMPLE LayerOpData
     {
     public:
-        CV_WRAP OpData();
-        virtual ~OpData();
+        CV_WRAP LayerOpData();
+        virtual ~LayerOpData();
 
         String name;
         String type;

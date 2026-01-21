@@ -153,7 +153,7 @@ protected:
     Ptr<Graph> curr_graph;
     opencv_onnx::GraphProto* curr_graph_proto;
     std::vector<Ptr<Layer> > curr_prog;
-    std::vector<Ptr<OpData> > curr_op_prog;
+    std::vector<Ptr<LayerOpData> > curr_op_prog;
     std::vector<Arg> node_inputs, node_outputs;
 
     std::string framework_name;
@@ -760,7 +760,7 @@ ONNXImporter2::ParsedGraphs ONNXImporter2::parseGraph(opencv_onnx::GraphProto* g
     opencv_onnx::GraphProto* saved_graph_proto = curr_graph_proto;
     Ptr<Graph> saved_graph = curr_graph;
     std::vector<Ptr<Layer> > saved_prog;
-    std::vector<Ptr<OpData> > saved_op_prog;
+    std::vector<Ptr<LayerOpData> > saved_op_prog;
 
     curr_graph_proto = graph_proto;
     std::vector<Arg> inputs, outputs;
@@ -956,7 +956,7 @@ void ONNXImporter2::addLayer(LayerParams& layerParams,
                              int max_inputs)
 {
     CV_Assert(netimpl);
-    Ptr<OpData> op = makePtr<OpData>();
+    Ptr<LayerOpData> op = makePtr<LayerOpData>();
     op->name = layerParams.name;
     op->type = layerParams.type;
     op->params = layerParams;
@@ -1584,9 +1584,9 @@ void ONNXImporter2::parseIf(LayerParams& layerParams,
             opencv_onnx::GraphProto branch = attr.g();
             ParsedGraphs parsed = parseGraph(&branch, false);
             thenelse[(int)(attr.name() == "else_branch")] = parsed.exec;
-            // Store subgraphs in the last created OpData
+            // Store subgraphs in the last created LayerOpData
             CV_Assert(!curr_op_prog.empty());
-            Ptr<OpData> op = curr_op_prog.back();
+            Ptr<LayerOpData> op = curr_op_prog.back();
             CV_Assert(op);
             op->subgraphs.resize(2);
             op->subgraphs[(int)(attr.name() == "else_branch")] = parsed.exec;
@@ -1594,7 +1594,7 @@ void ONNXImporter2::parseIf(LayerParams& layerParams,
     }
 
     CV_Assert_N(!thenelse[0].empty(), !thenelse[1].empty());
-    // Executable subgraphs are attached during Net::finalize() when OpData is compiled into IfLayer.
+    // Executable subgraphs are attached during Net::finalize() when LayerOpData is compiled into IfLayer.
 }
 
 // https://github.com/onnx/onnx/blob/master/docs/Operators.md#Resize

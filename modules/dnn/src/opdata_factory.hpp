@@ -7,19 +7,19 @@ namespace cv {
 namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-typedef Ptr<OpData> (*OpDataConstructor)(
+typedef Ptr<LayerOpData> (*OpDataConstructor)(
         const LayerParams& params,
         const std::vector<Arg>& inputs,
         const std::vector<Arg>& outputs);
 
-// Internal registry for typed OpData creation (ENGINE_NEW).
+// Internal registry for typed LayerOpData creation (ENGINE_NEW).
 void registerOpData(const String& type, OpDataConstructor constructor);
 
-// Create a typed OpData instance if registered, otherwise returns a plain OpData.
-Ptr<OpData> createOpData(const String& type,
-                         const LayerParams& params,
-                         const std::vector<Arg>& inputs,
-                         const std::vector<Arg>& outputs);
+// Create a typed LayerOpData instance if registered, otherwise returns a plain LayerOpData.
+Ptr<LayerOpData> createOpData(const String& type,
+                              const LayerParams& params,
+                              const std::vector<Arg>& inputs,
+                              const std::vector<Arg>& outputs);
 
 CV__DNN_INLINE_NS_END
 }} // namespace cv::dnn

@@ -11,8 +11,8 @@ namespace cv {
 namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-OpData::OpData() {}
-OpData::~OpData() {}
+LayerOpData::LayerOpData() {}
+LayerOpData::~LayerOpData() {}
 
 namespace {
 
@@ -47,10 +47,10 @@ void registerOpData(const String& type, OpDataConstructor constructor)
         registry.insert(std::make_pair(type, std::vector<OpDataConstructor>(1, constructor)));
 }
 
-Ptr<OpData> createOpData(const String& type,
-                         const LayerParams& params,
-                         const std::vector<Arg>& inputs,
-                         const std::vector<Arg>& outputs)
+Ptr<LayerOpData> createOpData(const String& type,
+                              const LayerParams& params,
+                              const std::vector<Arg>& inputs,
+                              const std::vector<Arg>& outputs)
 {
     OpDataConstructor ctor = nullptr;
     {
@@ -61,11 +61,11 @@ Ptr<OpData> createOpData(const String& type,
             ctor = it->second.back();
     }
 
-    Ptr<OpData> op = ctor ? ctor(params, inputs, outputs) : Ptr<OpData>();
+    Ptr<LayerOpData> op = ctor ? ctor(params, inputs, outputs) : Ptr<LayerOpData>();
     if (!op)
-        op = makePtr<OpData>();
+        op = makePtr<LayerOpData>();
 
-    // Ensure the core OpData fields are always set, even if ctor didn't.
+    // Ensure the core LayerOpData fields are always set, even if ctor didn't.
     op->type = type;
     op->params = params;
     op->inputs = inputs;
@@ -73,7 +73,7 @@ Ptr<OpData> createOpData(const String& type,
     return op;
 }
 
-std::ostream& OpData::dump(std::ostream& strm, int indent, bool comma) const
+std::ostream& LayerOpData::dump(std::ostream& strm, int indent, bool comma) const
 {
     auto prindent_ = [&strm](int n) -> std::ostream& {
         for (int i = 0; i < n; ++i) strm << ' ';
@@ -383,8 +383,8 @@ public:
     virtual const std::vector<Ptr<Layer> >& prog() const override { return prog_; }
     virtual void setProg(const std::vector<Ptr<Layer> >& newprog) override { prog_ = newprog; }
 
-    virtual const std::vector<Ptr<OpData> >& opProg() const override { return op_prog_; }
-    virtual void setOpProg(const std::vector<Ptr<OpData> >& newprog) override { op_prog_ = newprog; }
+    virtual const std::vector<Ptr<LayerOpData> >& opProg() const override { return op_prog_; }
+    virtual void setOpProg(const std::vector<Ptr<LayerOpData> >& newprog) override { op_prog_ = newprog; }
 
 protected:
     Net::Impl* netimpl_;
@@ -392,7 +392,7 @@ protected:
     std::vector<Arg> inputs_;
     std::vector<Arg> outputs_;
     std::vector<Ptr<Layer> > prog_;
-    std::vector<Ptr<OpData> > op_prog_;
+    std::vector<Ptr<LayerOpData> > op_prog_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -520,13 +520,13 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
 void Net::Impl::compileGraphOpProg(const Ptr<Graph>& graph)
 {
     CV_Assert(graph);
-    const std::vector<Ptr<OpData> >& ops = graph->opProg();
+    const std::vector<Ptr<LayerOpData> >& ops = graph->opProg();
     std::vector<Ptr<Layer> > prog;
     prog.reserve(ops.size());
 
     for (size_t i = 0; i < ops.size(); ++i)
     {
-        const Ptr<OpData>& op = ops[i];
+        const Ptr<LayerOpData>& op = ops[i];
         CV_Assert(op);
         LayerParams lp = op->params;
         lp.name = op->name;
@@ -556,19 +556,19 @@ void Net::Impl::compileGraphOpProg(const Ptr<Graph>& graph)
         prog.push_back(layer);
     }
     graph->setProg(prog);
-    graph->setOpProg(std::vector<Ptr<OpData> >());
+    graph->setOpProg(std::vector<Ptr<LayerOpData> >());
 }
 
-Ptr<OpData> Net::Impl::newOpData(const LayerParams& params,
-                                 const std::vector<Arg>& inputs,
-                                 const std::vector<Arg>& outputs,
-                                 const std::vector<Ptr<Graph> >& subgraphs)
+Ptr<LayerOpData> Net::Impl::newOpData(const LayerParams& params,
+                                      const std::vector<Arg>& inputs,
+                                      const std::vector<Arg>& outputs,
+                                      const std::vector<Ptr<Graph> >& subgraphs)
 {
     const String type = params.type;
     if (type.empty())
-        CV_Error(Error::StsBadArg, "DNN: OpData node type is empty");
+        CV_Error(Error::StsBadArg, "DNN: LayerOpData node type is empty");
 
-    Ptr<OpData> op = createOpData(type, params, inputs, outputs);
+    Ptr<LayerOpData> op = createOpData(type, params, inputs, outputs);
     op->name = params.name;
     op->subgraphs = subgraphs;
     return op;
@@ -603,7 +603,7 @@ void Net::Impl::finalize()
 
     validateBackendAndTarget();
 
-    // ENGINE_NEW: if we have OpData program, compile it into executable Layers first.
+    // ENGINE_NEW: if we have LayerOpData program, compile it into executable Layers first.
     if (!mainGraph->opProg().empty())
         compileGraphOpProg(mainGraph);
 
@@ -690,7 +690,7 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     if (!mainGraph) {
         CV_Error(Error::StsNullPtr, "the model was not loaded");
     }
-    // If the model was imported as OpData program, compile it on-demand.
+    // If the model was imported as LayerOpData program, compile it on-demand.
     if (mainGraph->prog().empty() && !mainGraph->opProg().empty())
         finalize();
     // ************ uncomment one of the lines below for debugging **********

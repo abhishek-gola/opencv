@@ -325,11 +325,11 @@ struct Net::Impl : public detail::NetImplBase
                         const std::vector<Arg>& inputs,
                         bool isMainGraph);
 
-    // ENGINE_NEW: compile OpData program of the graph (fills Graph::prog()).
+    // ENGINE_NEW: compile LayerOpData program of the graph (fills Graph::prog()).
     void compileGraphOpProg(const Ptr<Graph>& graph);
 
-    // ENGINE_NEW: create a typed OpData node (or plain OpData as fallback).
-    Ptr<OpData> newOpData(const LayerParams& params,
+    // ENGINE_NEW: create a typed LayerOpData node (or plain LayerOpData as fallback).
+    Ptr<LayerOpData> newOpData(const LayerParams& params,
                           const std::vector<Arg>& inputs,
                           const std::vector<Arg>& outputs,
                           const std::vector<Ptr<Graph> >& subgraphs = std::vector<Ptr<Graph> >());
