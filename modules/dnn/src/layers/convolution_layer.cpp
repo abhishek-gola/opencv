@@ -79,8 +79,8 @@ namespace dnn
 
 namespace {
 
-// Data-only op descriptor (ENGINE_NEW): ConvOpData : LayerOpData
-class ConvOpData CV_FINAL : public LayerOpData
+// Data-only op descriptor (ENGINE_NEW): ConvLayerData : LayerOpData
+class ConvLayerData CV_FINAL : public LayerOpData
 {
 public:
     std::vector<size_t> kernel_size, pads_begin, pads_end, strides, dilations, adjust_pads;
@@ -131,11 +131,11 @@ public:
     }
 };
 
-static Ptr<LayerOpData> createConvOpData(const LayerParams& lp,
-                                        const std::vector<Arg>& inputs,
-                                        const std::vector<Arg>& outputs)
+static Ptr<LayerOpData> createConvLayerData(const LayerParams& lp,
+                                           const std::vector<Arg>& inputs,
+                                           const std::vector<Arg>& outputs)
 {
-    Ptr<ConvOpData> d = makePtr<ConvOpData>();
+    Ptr<ConvLayerData> d = makePtr<ConvLayerData>();
     d->name = lp.name;
     d->type = "Convolution";
     d->params = lp;
@@ -145,15 +145,15 @@ static Ptr<LayerOpData> createConvOpData(const LayerParams& lp,
     return d;
 }
 
-struct ConvOpDataRegister
+struct ConvLayerDataRegister
 {
-    ConvOpDataRegister()
+    ConvLayerDataRegister()
     {
-        registerOpData("Convolution", createConvOpData);
+        registerLayerData("Convolution", createConvLayerData);
     }
 };
 
-static ConvOpDataRegister g_registerConvOpData;
+static ConvLayerDataRegister g_registerConvLayerData;
 
 }  // namespace
 

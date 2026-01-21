@@ -13,7 +13,7 @@ typedef Ptr<LayerOpData> (*OpDataConstructor)(
         const std::vector<Arg>& outputs);
 
 // Internal registry for typed LayerOpData creation (ENGINE_NEW).
-void registerOpData(const String& type, OpDataConstructor constructor);
+void registerLayerData(const String& type, OpDataConstructor constructor);
 
 // Create a typed LayerOpData instance if registered, otherwise returns a plain LayerOpData.
 Ptr<LayerOpData> createOpData(const String& type,

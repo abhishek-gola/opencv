@@ -191,10 +191,8 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
         if (mainGraph)
         {
             preferableBackend = backendId;
-            // ENGINE_NEW: backend change invalidates any cached plan and requires re-finalization.
             prepared = false;
             finalizeLayers = true;
-            engine2PlanPrepared = false;
             return;
         }
 
@@ -258,7 +256,6 @@ void Net::Impl::setPreferableTarget(int targetId)
 
         prepared = false;
         finalizeLayers = true;
-        engine2PlanPrepared = false;
         return;
     }
     if (netWasQuantized && targetId != DNN_TARGET_CPU &&

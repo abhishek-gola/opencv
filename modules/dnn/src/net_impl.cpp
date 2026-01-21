@@ -145,12 +145,6 @@ void Net::Impl::clear()
     prepared = false;
     finalizeLayers = true;
 
-    engine2PlanPrepared = false;
-    engine2PlanPreferableBackend = DNN_BACKEND_OPENCV;
-    engine2PlanPreferableTarget = DNN_TARGET_CPU;
-    engine2MinCudaSegmentLen = 5;
-    engine2OpBackends.clear();
-    engine2SwitchOpIdxs.clear();
 }
 
 

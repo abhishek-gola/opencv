@@ -36,7 +36,7 @@ static std::map<String, std::vector<OpDataConstructor> >& getOpDataFactoryImpl()
 
 }  // namespace
 
-void registerOpData(const String& type, OpDataConstructor constructor)
+void registerLayerData(const String& type, OpDataConstructor constructor)
 {
     cv::AutoLock lock(getOpDataFactoryMutex());
     auto& registry = getOpDataFactoryImpl();
@@ -103,55 +103,6 @@ static inline bool engine2_canInferStaticInput(const ArgData& adata)
             return false;
     }
     return true;
-}
-
-static void engine2_computeCudaPartitionPlan(const std::vector<Ptr<Layer> >& prog,
-                                            int preferableBackend,
-                                            int minSegmentLen,
-                                            std::vector<int>& opBackends,
-                                            std::vector<int>& switchOpIdxs)
-{
-    const int nops = (int)prog.size();
-    opBackends.assign(nops, DNN_BACKEND_OPENCV);
-    switchOpIdxs.clear();
-
-    if (preferableBackend != DNN_BACKEND_CUDA || nops == 0)
-        return;
-
-    std::vector<uchar> canCuda(nops, 0);
-    for (int i = 0; i < nops; ++i)
-    {
-        const Ptr<Layer>& layer = prog[i];
-        if (!layer)
-            continue;
-        // For now, we use Layer::supportBackend() as the capability predicate.
-        // Control-flow and subgraph layers are treated conservatively.
-        if (layer->subgraphs())
-            continue;
-        if (layer->supportBackend(DNN_BACKEND_CUDA))
-            canCuda[i] = 1;
-    }
-
-    int i = 0;
-    while (i < nops)
-    {
-        if (!canCuda[i]) { ++i; continue; }
-        int j = i;
-        while (j < nops && canCuda[j]) ++j;
-        const int len = j - i;
-        if (len >= minSegmentLen)
-        {
-            for (int k = i; k < j; ++k)
-                opBackends[k] = DNN_BACKEND_CUDA;
-        }
-        i = j;
-    }
-
-    for (int k = 1; k < nops; ++k)
-    {
-        if (opBackends[k] != opBackends[k - 1])
-            switchOpIdxs.push_back(k);
-    }
 }
 
 static bool engine2_preFinalizeGraph(Net::Impl* netimpl, const Ptr<Graph>& graph)
@@ -608,19 +559,6 @@ void Net::Impl::finalize()
         compileGraphOpProg(mainGraph);
 
     prepareForInference();
-
-    if (!engine2PlanPrepared ||
-        engine2PlanPreferableBackend != preferableBackend ||
-        engine2PlanPreferableTarget != preferableTarget)
-    {
-        engine2_computeCudaPartitionPlan(mainGraph->prog(), preferableBackend,
-                                         engine2MinCudaSegmentLen,
-                                         engine2OpBackends,
-                                         engine2SwitchOpIdxs);
-        engine2PlanPrepared = true;
-        engine2PlanPreferableBackend = preferableBackend;
-        engine2PlanPreferableTarget = preferableTarget;
-    }
 
     const bool allFinalized = engine2_preFinalizeGraph(this, mainGraph);
     finalizeLayers = !allFinalized;

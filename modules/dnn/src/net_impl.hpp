@@ -360,14 +360,6 @@ struct Net::Impl : public detail::NetImplBase
     // Explicit compilation step (primarily for the new graph engine).
     void finalize();
 
-    // ENGINE_NEW: partition metadata (hybrid CPU/CUDA plan prototype)
-    bool engine2PlanPrepared = false;
-    int engine2PlanPreferableBackend = DNN_BACKEND_OPENCV;
-    int engine2PlanPreferableTarget = DNN_TARGET_CPU;
-    int engine2MinCudaSegmentLen = 5;
-    std::vector<int> engine2OpBackends;      // per-op backend choice for mainGraph->prog()
-    std::vector<int> engine2SwitchOpIdxs;    // indices where backend changes (0-based in mainGraph->prog())
-
     // pre-allocates memory for output tensors.
     // if useBufferPool==true, the method uses 'buffers'
     // for outputs (according to bufidxs)
