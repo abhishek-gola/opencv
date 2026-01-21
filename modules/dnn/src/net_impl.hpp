@@ -89,10 +89,6 @@ struct Net::Impl : public detail::NetImplBase
 
     Ptr<Graph> mainGraph;
     int globGraphIdx;
-    std::map<std::string, Ptr<Graph> > engine2GraphsByName;
-    std::map<std::string, Ptr<AbstractGraph> > engine2AbstractGraphsByName;
-    std::vector<Ptr<AbstractGraph> > allAbstractGraphs;
-    Ptr<AbstractGraph> mainAbstractGraph;
 
     int accuracy;
     bool enableFP16, haveFP16;
@@ -329,21 +325,14 @@ struct Net::Impl : public detail::NetImplBase
                         const std::vector<Arg>& inputs,
                         bool isMainGraph);
 
-    // ENGINE_NEW: create a pair of graphs (executable Graph + AbstractGraph) with consistent naming.
-    void newGraphPair(const std::string& name,
-                      const std::vector<Arg>& inputs,
-                      bool isMainGraph,
-                      Ptr<Graph>& execGraph,
-                      Ptr<AbstractGraph>& abstractGraph);
-
-    // ENGINE_NEW: compile abstract graphs into executable graphs (fills Graph::prog()).
-    void compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph);
+    // ENGINE_NEW: compile OpData program of the graph (fills Graph::prog()).
+    void compileGraphOpProg(const Ptr<Graph>& graph);
 
     // ENGINE_NEW: create a typed OpData node (or plain OpData as fallback).
     Ptr<OpData> newOpData(const LayerParams& params,
                           const std::vector<Arg>& inputs,
                           const std::vector<Arg>& outputs,
-                          const std::vector<Ptr<AbstractGraph> >& subgraphs = std::vector<Ptr<AbstractGraph> >());
+                          const std::vector<Ptr<Graph> >& subgraphs = std::vector<Ptr<Graph> >());
 
     const ArgData& argData(Arg arg) const;
     const std::string& argName(Arg arg) const;

@@ -128,7 +128,6 @@ protected:
     struct ParsedGraphs
     {
         Ptr<Graph> exec;
-        Ptr<AbstractGraph> abs;
     };
     ParsedGraphs parseGraph(opencv_onnx::GraphProto* graph_proto, bool mainGraph);
     void parseNode(const opencv_onnx::NodeProto& node_proto);
@@ -154,7 +153,6 @@ protected:
     Ptr<Graph> curr_graph;
     opencv_onnx::GraphProto* curr_graph_proto;
     std::vector<Ptr<Layer> > curr_prog;
-    Ptr<AbstractGraph> curr_agraph;
     std::vector<Ptr<OpData> > curr_op_prog;
     std::vector<Arg> node_inputs, node_outputs;
 
@@ -762,7 +760,6 @@ ONNXImporter2::ParsedGraphs ONNXImporter2::parseGraph(opencv_onnx::GraphProto* g
     opencv_onnx::GraphProto* saved_graph_proto = curr_graph_proto;
     Ptr<Graph> saved_graph = curr_graph;
     std::vector<Ptr<Layer> > saved_prog;
-    Ptr<AbstractGraph> saved_agraph = curr_agraph;
     std::vector<Ptr<OpData> > saved_op_prog;
 
     curr_graph_proto = graph_proto;
@@ -803,9 +800,8 @@ ONNXImporter2::ParsedGraphs ONNXImporter2::parseGraph(opencv_onnx::GraphProto* g
         outputs.push_back(arg);
     }
 
-    netimpl->newGraphPair(graph_proto->name(), inputs, mainGraph_, curr_graph, curr_agraph);
+    curr_graph = netimpl->newGraph(graph_proto->name(), inputs, mainGraph_);
     curr_graph->setOutputs(outputs);
-    curr_agraph->setOutputs(outputs);
 
     std::swap(saved_prog, curr_prog);
     std::swap(saved_op_prog, curr_op_prog);
@@ -816,20 +812,17 @@ ONNXImporter2::ParsedGraphs ONNXImporter2::parseGraph(opencv_onnx::GraphProto* g
     }
 
     // Save abstract ops. Executable prog is built in Net::finalize().
-    curr_agraph->setProg(curr_op_prog);
+    curr_graph->setOpProg(curr_op_prog);
     curr_graph->setProg(std::vector<Ptr<Layer> >());
     curr_prog = saved_prog;
     curr_op_prog = saved_op_prog;
 
     Ptr<Graph> just_constructed = curr_graph;
-    Ptr<AbstractGraph> just_abs = curr_agraph;
     curr_graph_proto = saved_graph_proto;
     curr_graph = saved_graph;
-    curr_agraph = saved_agraph;
 
     ParsedGraphs result;
     result.exec = just_constructed;
-    result.abs = just_abs;
     return result;
 }
 
@@ -1591,12 +1584,12 @@ void ONNXImporter2::parseIf(LayerParams& layerParams,
             opencv_onnx::GraphProto branch = attr.g();
             ParsedGraphs parsed = parseGraph(&branch, false);
             thenelse[(int)(attr.name() == "else_branch")] = parsed.exec;
-            // Store abstract subgraphs in the last created OpData
+            // Store subgraphs in the last created OpData
             CV_Assert(!curr_op_prog.empty());
             Ptr<OpData> op = curr_op_prog.back();
             CV_Assert(op);
             op->subgraphs.resize(2);
-            op->subgraphs[(int)(attr.name() == "else_branch")] = parsed.abs;
+            op->subgraphs[(int)(attr.name() == "else_branch")] = parsed.exec;
         }
     }
 

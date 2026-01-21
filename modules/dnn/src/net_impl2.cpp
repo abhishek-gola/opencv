@@ -91,68 +91,6 @@ std::ostream& OpData::dump(std::ostream& strm, int indent, bool comma) const
     return strm;
 }
 
-class AbstractGraphImpl : public AbstractGraph
-{
-public:
-    AbstractGraphImpl(Net::Impl* netimpl, const std::string& name,
-                      const std::vector<Arg>& inputs)
-        : netimpl_(netimpl), name_(name), inputs_(inputs)
-    {
-    }
-
-    virtual ~AbstractGraphImpl() {}
-
-    virtual std::string name() const override { return name_; }
-    virtual bool empty() const override { return prog_.empty(); }
-    virtual void clear() override { prog_.clear(); }
-
-    virtual const std::vector<Arg>& inputs() const override { return inputs_; }
-    virtual const std::vector<Arg>& outputs() const override { return outputs_; }
-    virtual void setOutputs(const std::vector<Arg>& outputs) override { outputs_ = outputs; }
-
-    virtual const std::vector<Ptr<OpData> >& prog() const override { return prog_; }
-    virtual void setProg(const std::vector<Ptr<OpData> >& newprog) override { prog_ = newprog; }
-
-    virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const override
-    {
-        auto prindent_ = [&strm](int n) -> std::ostream& {
-            for (int i = 0; i < n; ++i) strm << ' ';
-            return strm;
-        };
-        int delta_indent = netimpl_ ? netimpl_->dump_indent : 3;
-        int subindent = indent + delta_indent;
-        int nodeindent = subindent + delta_indent;
-        strm << "{\n";
-        prindent_(subindent); strm << "name: \"" << name_ << "\",\n";
-        prindent_(subindent); strm << "nodes: [\n";
-        for (size_t i = 0; i < prog_.size(); ++i)
-        {
-            prindent_(nodeindent); strm << "// op #" << i << "\n";
-            prog_[i]->dump(strm, nodeindent, i + 1 < prog_.size());
-        }
-        prindent_(subindent); strm << "]\n";
-        prindent_(indent); strm << "}";
-        if (comma) strm << ",";
-        strm << "\n";
-        return strm;
-    }
-
-private:
-    Net::Impl* netimpl_;
-    std::string name_;
-    std::vector<Arg> inputs_;
-    std::vector<Arg> outputs_;
-    std::vector<Ptr<OpData> > prog_;
-};
-
-Ptr<AbstractGraph> AbstractGraph::create(void* netimpl, const std::string& name,
-                                         const std::vector<Arg>& inputs)
-{
-    return Ptr<AbstractGraph>(new AbstractGraphImpl(reinterpret_cast<Net::Impl*>(netimpl), name, inputs));
-}
-
-AbstractGraph::~AbstractGraph() {}
-
 static inline bool engine2_canInferStaticInput(const ArgData& adata)
 {
     if (adata.type < 0)
@@ -339,10 +277,11 @@ public:
     }
 
     virtual std::string name() const override { return name_; }
-    virtual bool empty() const override { return prog_.empty(); }
+    virtual bool empty() const override { return prog_.empty() && op_prog_.empty(); }
     virtual void clear() override
     {
         prog_.clear();
+        op_prog_.clear();
     }
 
     /*Ptr<Graph> clone(Net* newnet) const
@@ -444,12 +383,16 @@ public:
     virtual const std::vector<Ptr<Layer> >& prog() const override { return prog_; }
     virtual void setProg(const std::vector<Ptr<Layer> >& newprog) override { prog_ = newprog; }
 
+    virtual const std::vector<Ptr<OpData> >& opProg() const override { return op_prog_; }
+    virtual void setOpProg(const std::vector<Ptr<OpData> >& newprog) override { op_prog_ = newprog; }
+
 protected:
     Net::Impl* netimpl_;
     std::string name_;
     std::vector<Arg> inputs_;
     std::vector<Arg> outputs_;
     std::vector<Ptr<Layer> > prog_;
+    std::vector<Ptr<OpData> > op_prog_;
 };
 
 Ptr<Graph> Graph::create(void* netimpl, const std::string& name,
@@ -574,38 +517,10 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
     return graph;
 }
 
-void Net::Impl::newGraphPair(const std::string& name_, const std::vector<Arg>& inpargs, bool ismain,
-                             Ptr<Graph>& execGraph, Ptr<AbstractGraph>& abstractGraph)
+void Net::Impl::compileGraphOpProg(const Ptr<Graph>& graph)
 {
-    if (ismain)
-        globGraphIdx = 0;
-    std::string name = name_;
-    if (name_.empty())
-        name = ismain ? std::string("main") : format("subgraph_%d", globGraphIdx);
-    globGraphIdx++;
-
-    execGraph = Graph::create(this, name, inpargs);
-    abstractGraph = AbstractGraph::create(this, name, inpargs);
-
-    engine2GraphsByName[name] = execGraph;
-    engine2AbstractGraphsByName[name] = abstractGraph;
-    allAbstractGraphs.push_back(abstractGraph);
-
-    if (ismain)
-    {
-        mainGraph = execGraph;
-        mainAbstractGraph = abstractGraph;
-    }
-}
-
-void Net::Impl::compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph)
-{
-    CV_Assert(abstractGraph);
-    auto it = engine2GraphsByName.find(abstractGraph->name());
-    CV_Assert(it != engine2GraphsByName.end());
-    Ptr<Graph> execGraph = it->second;
-
-    const std::vector<Ptr<OpData> >& ops = abstractGraph->prog();
+    CV_Assert(graph);
+    const std::vector<Ptr<OpData> >& ops = graph->opProg();
     std::vector<Ptr<Layer> > prog;
     prog.reserve(ops.size());
 
@@ -627,13 +542,12 @@ void Net::Impl::compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph)
         {
             std::vector<Ptr<Graph> > execSubs;
             execSubs.reserve(op->subgraphs.size());
-            for (const Ptr<AbstractGraph>& absSub : op->subgraphs)
+            for (const Ptr<Graph>& sub : op->subgraphs)
             {
-                CV_Assert(absSub);
-                compileAbstractGraph(absSub);
-                auto itSub = engine2GraphsByName.find(absSub->name());
-                CV_Assert(itSub != engine2GraphsByName.end());
-                execSubs.push_back(itSub->second);
+                CV_Assert(sub);
+                if (!sub->opProg().empty())
+                    compileGraphOpProg(sub);
+                execSubs.push_back(sub);
             }
             std::vector<Ptr<Graph> >* layerSubs = layer->subgraphs();
             if (layerSubs)
@@ -641,13 +555,14 @@ void Net::Impl::compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph)
         }
         prog.push_back(layer);
     }
-    execGraph->setProg(prog);
+    graph->setProg(prog);
+    graph->setOpProg(std::vector<Ptr<OpData> >());
 }
 
 Ptr<OpData> Net::Impl::newOpData(const LayerParams& params,
                                  const std::vector<Arg>& inputs,
                                  const std::vector<Arg>& outputs,
-                                 const std::vector<Ptr<AbstractGraph> >& subgraphs)
+                                 const std::vector<Ptr<Graph> >& subgraphs)
 {
     const String type = params.type;
     if (type.empty())
@@ -688,12 +603,9 @@ void Net::Impl::finalize()
 
     validateBackendAndTarget();
 
-    // If we have an abstract graph, compile it into executable graphs first.
-    if (mainAbstractGraph && !mainAbstractGraph->prog().empty())
-    {
-        // Compile all graphs reachable from the main abstract graph.
-        compileAbstractGraph(mainAbstractGraph);
-    }
+    // ENGINE_NEW: if we have OpData program, compile it into executable Layers first.
+    if (!mainGraph->opProg().empty())
+        compileGraphOpProg(mainGraph);
 
     prepareForInference();
 
@@ -778,11 +690,9 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     if (!mainGraph) {
         CV_Error(Error::StsNullPtr, "the model was not loaded");
     }
-    // If the model was imported as an abstract graph, compile it on-demand.
-    if (mainGraph->prog().empty() && mainAbstractGraph && !mainAbstractGraph->prog().empty())
-    {
+    // If the model was imported as OpData program, compile it on-demand.
+    if (mainGraph->prog().empty() && !mainGraph->opProg().empty())
         finalize();
-    }
     // ************ uncomment one of the lines below for debugging **********
     //tracingMode = DNN_TRACE_OP;
     //tracingMode = DNN_TRACE_ALL;

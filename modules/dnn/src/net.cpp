@@ -474,12 +474,6 @@ Ptr<Graph> Net::getMainGraph() const
     return impl->mainGraph;
 }
 
-Ptr<AbstractGraph> Net::getMainAbstractGraph() const
-{
-    CV_Assert(impl);
-    return impl->mainAbstractGraph;
-}
-
 std::ostream& Net::dumpArg(std::ostream& strm, Arg arg, int indent,
                            bool comma, bool dump_details) const
 {

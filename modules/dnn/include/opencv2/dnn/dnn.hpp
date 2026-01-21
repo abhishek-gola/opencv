@@ -261,7 +261,7 @@ CV__DNN_INLINE_NS_BEGIN
 
     class CV_EXPORTS Net;
     class CV_EXPORTS Graph;
-    class CV_EXPORTS AbstractGraph;
+    class CV_EXPORTS_W_SIMPLE OpData;
     class CV_EXPORTS ActivationLayer;
 
     /** @brief This interface class allows to build new Layers - are building blocks of networks.
@@ -520,6 +520,11 @@ CV__DNN_INLINE_NS_BEGIN
         virtual void setOutputs(const std::vector<Arg>& outputs) = 0;
         virtual const std::vector<Ptr<Layer> >& prog() const = 0;
         virtual void setProg(const std::vector<Ptr<Layer> >& newprog) = 0;
+
+        // ENGINE_NEW: optional OpData program storage.
+        // When present, Net::finalize() can compile this op program into executable Layers (prog()).
+        virtual const std::vector<Ptr<OpData> >& opProg() const = 0;
+        virtual void setOpProg(const std::vector<Ptr<OpData> >& newprog) = 0;
     };
 
     /**
@@ -541,37 +546,9 @@ CV__DNN_INLINE_NS_BEGIN
         LayerParams params;
         std::vector<Arg> inputs;
         std::vector<Arg> outputs;
-        std::vector<Ptr<AbstractGraph> > subgraphs;
+        std::vector<Ptr<Graph> > subgraphs;
 
         virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const;
-    };
-
-    /**
-     * @brief Abstract graph representation (DAG of OpData nodes).
-     *
-     * It supports traversal and dumping, but cannot be executed.
-     * Use Net::finalize() to compile it into an executable Graph.
-     */
-    class CV_EXPORTS AbstractGraph
-    {
-    public:
-        virtual ~AbstractGraph();
-
-        virtual std::string name() const = 0;
-        virtual bool empty() const = 0;
-        virtual void clear() = 0;
-
-        virtual const std::vector<Arg>& inputs() const = 0;
-        virtual const std::vector<Arg>& outputs() const = 0;
-        virtual void setOutputs(const std::vector<Arg>& outputs) = 0;
-
-        virtual const std::vector<Ptr<OpData> >& prog() const = 0;
-        virtual void setProg(const std::vector<Ptr<OpData> >& newprog) = 0;
-
-        virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const = 0;
-
-        static Ptr<AbstractGraph> create(void* netimpl, const std::string& name,
-                                         const std::vector<Arg>& inputs);
     };
 
     /** @brief This class allows to create and manipulate comprehensive artificial neural networks.
@@ -1055,9 +1032,6 @@ CV__DNN_INLINE_NS_BEGIN
 
         // Get the main model graph
         Ptr<Graph> getMainGraph() const;
-
-        // Get the main abstract graph (ENGINE_NEW). It contains OpData nodes and cannot be executed.
-        Ptr<AbstractGraph> getMainAbstractGraph() const;
 
         const ArgData& argData(Arg arg) const;
         const std::string& argName(Arg arg) const;

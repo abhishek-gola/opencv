@@ -132,10 +132,6 @@ void Net::Impl::clear()
     buffers = std::vector<Mat>();
 
     mainGraph = Ptr<Graph>();
-    mainAbstractGraph = Ptr<AbstractGraph>();
-    engine2GraphsByName.clear();
-    engine2AbstractGraphsByName.clear();
-    allAbstractGraphs.clear();
 
     ArgData adata;
     adata.name = "";

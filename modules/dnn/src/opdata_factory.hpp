@@ -12,7 +12,7 @@ typedef Ptr<OpData> (*OpDataConstructor)(
         const std::vector<Arg>& inputs,
         const std::vector<Arg>& outputs);
 
-// Internal registry for typed OpData creation (ENGINE_NEW / AbstractGraph).
+// Internal registry for typed OpData creation (ENGINE_NEW).
 void registerOpData(const String& type, OpDataConstructor constructor);
 
 // Create a typed OpData instance if registered, otherwise returns a plain OpData.
