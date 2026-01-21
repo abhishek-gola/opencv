@@ -89,6 +89,10 @@ struct Net::Impl : public detail::NetImplBase
 
     Ptr<Graph> mainGraph;
     int globGraphIdx;
+    std::map<std::string, Ptr<Graph> > engine2GraphsByName;
+    std::map<std::string, Ptr<AbstractGraph> > engine2AbstractGraphsByName;
+    std::vector<Ptr<AbstractGraph> > allAbstractGraphs;
+    Ptr<AbstractGraph> mainAbstractGraph;
 
     int accuracy;
     bool enableFP16, haveFP16;
@@ -325,6 +329,16 @@ struct Net::Impl : public detail::NetImplBase
                         const std::vector<Arg>& inputs,
                         bool isMainGraph);
 
+    // ENGINE_NEW: create a pair of graphs (executable Graph + AbstractGraph) with consistent naming.
+    void newGraphPair(const std::string& name,
+                      const std::vector<Arg>& inputs,
+                      bool isMainGraph,
+                      Ptr<Graph>& execGraph,
+                      Ptr<AbstractGraph>& abstractGraph);
+
+    // ENGINE_NEW: compile abstract graphs into executable graphs (fills Graph::prog()).
+    void compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph);
+
     const ArgData& argData(Arg arg) const;
     const std::string& argName(Arg arg) const;
     ArgKind argKind(Arg arg) const;
@@ -347,6 +361,17 @@ struct Net::Impl : public detail::NetImplBase
     int findDim(const std::string& name, bool insert=false);
 
     void prepareForInference();
+
+    // Explicit compilation step (primarily for the new graph engine).
+    void finalize();
+
+    // ENGINE_NEW: partition metadata (hybrid CPU/CUDA plan prototype)
+    bool engine2PlanPrepared = false;
+    int engine2PlanPreferableBackend = DNN_BACKEND_OPENCV;
+    int engine2PlanPreferableTarget = DNN_TARGET_CPU;
+    int engine2MinCudaSegmentLen = 5;
+    std::vector<int> engine2OpBackends;      // per-op backend choice for mainGraph->prog()
+    std::vector<int> engine2SwitchOpIdxs;    // indices where backend changes (0-based in mainGraph->prog())
 
     // pre-allocates memory for output tensors.
     // if useBufferPool==true, the method uses 'buffers'

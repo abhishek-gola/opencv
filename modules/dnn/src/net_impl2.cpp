@@ -10,6 +10,234 @@ namespace cv {
 namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
+OpData::OpData() {}
+OpData::~OpData() {}
+
+std::ostream& OpData::dump(std::ostream& strm, int indent, bool comma) const
+{
+    auto prindent_ = [&strm](int n) -> std::ostream& {
+        for (int i = 0; i < n; ++i) strm << ' ';
+        return strm;
+    };
+    int subindent = indent + 3;
+    prindent_(indent); strm << "{\n";
+    prindent_(subindent); strm << "name: \"" << name << "\",\n";
+    prindent_(subindent); strm << "type: \"" << type << "\"";
+    if (comma) strm << ",";
+    strm << "\n";
+    prindent_(indent); strm << "}";
+    if (comma) strm << ",";
+    strm << "\n";
+    return strm;
+}
+
+class AbstractGraphImpl : public AbstractGraph
+{
+public:
+    AbstractGraphImpl(Net::Impl* netimpl, const std::string& name,
+                      const std::vector<Arg>& inputs)
+        : netimpl_(netimpl), name_(name), inputs_(inputs)
+    {
+    }
+
+    virtual ~AbstractGraphImpl() {}
+
+    virtual std::string name() const override { return name_; }
+    virtual bool empty() const override { return prog_.empty(); }
+    virtual void clear() override { prog_.clear(); }
+
+    virtual const std::vector<Arg>& inputs() const override { return inputs_; }
+    virtual const std::vector<Arg>& outputs() const override { return outputs_; }
+    virtual void setOutputs(const std::vector<Arg>& outputs) override { outputs_ = outputs; }
+
+    virtual const std::vector<Ptr<OpData> >& prog() const override { return prog_; }
+    virtual void setProg(const std::vector<Ptr<OpData> >& newprog) override { prog_ = newprog; }
+
+    virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const override
+    {
+        auto prindent_ = [&strm](int n) -> std::ostream& {
+            for (int i = 0; i < n; ++i) strm << ' ';
+            return strm;
+        };
+        int delta_indent = netimpl_ ? netimpl_->dump_indent : 3;
+        int subindent = indent + delta_indent;
+        int nodeindent = subindent + delta_indent;
+        strm << "{\n";
+        prindent_(subindent); strm << "name: \"" << name_ << "\",\n";
+        prindent_(subindent); strm << "nodes: [\n";
+        for (size_t i = 0; i < prog_.size(); ++i)
+        {
+            prindent_(nodeindent); strm << "// op #" << i << "\n";
+            prog_[i]->dump(strm, nodeindent, i + 1 < prog_.size());
+        }
+        prindent_(subindent); strm << "]\n";
+        prindent_(indent); strm << "}";
+        if (comma) strm << ",";
+        strm << "\n";
+        return strm;
+    }
+
+private:
+    Net::Impl* netimpl_;
+    std::string name_;
+    std::vector<Arg> inputs_;
+    std::vector<Arg> outputs_;
+    std::vector<Ptr<OpData> > prog_;
+};
+
+Ptr<AbstractGraph> AbstractGraph::create(void* netimpl, const std::string& name,
+                                         const std::vector<Arg>& inputs)
+{
+    return Ptr<AbstractGraph>(new AbstractGraphImpl(reinterpret_cast<Net::Impl*>(netimpl), name, inputs));
+}
+
+AbstractGraph::~AbstractGraph() {}
+
+static inline bool engine2_canInferStaticInput(const ArgData& adata)
+{
+    if (adata.type < 0)
+        return false;
+    if (adata.shape.empty())
+        return false;
+    for (int i = 0; i < (int)adata.shape.size(); ++i)
+    {
+        if (adata.shape[i] <= 0)
+            return false;
+    }
+    return true;
+}
+
+static void engine2_computeCudaPartitionPlan(const std::vector<Ptr<Layer> >& prog,
+                                            int preferableBackend,
+                                            int minSegmentLen,
+                                            std::vector<int>& opBackends,
+                                            std::vector<int>& switchOpIdxs)
+{
+    const int nops = (int)prog.size();
+    opBackends.assign(nops, DNN_BACKEND_OPENCV);
+    switchOpIdxs.clear();
+
+    if (preferableBackend != DNN_BACKEND_CUDA || nops == 0)
+        return;
+
+    std::vector<uchar> canCuda(nops, 0);
+    for (int i = 0; i < nops; ++i)
+    {
+        const Ptr<Layer>& layer = prog[i];
+        if (!layer)
+            continue;
+        // For now, we use Layer::supportBackend() as the capability predicate.
+        // Control-flow and subgraph layers are treated conservatively.
+        if (layer->subgraphs())
+            continue;
+        if (layer->supportBackend(DNN_BACKEND_CUDA))
+            canCuda[i] = 1;
+    }
+
+    int i = 0;
+    while (i < nops)
+    {
+        if (!canCuda[i]) { ++i; continue; }
+        int j = i;
+        while (j < nops && canCuda[j]) ++j;
+        const int len = j - i;
+        if (len >= minSegmentLen)
+        {
+            for (int k = i; k < j; ++k)
+                opBackends[k] = DNN_BACKEND_CUDA;
+        }
+        i = j;
+    }
+
+    for (int k = 1; k < nops; ++k)
+    {
+        if (opBackends[k] != opBackends[k - 1])
+            switchOpIdxs.push_back(k);
+    }
+}
+
+static bool engine2_preFinalizeGraph(Net::Impl* netimpl, const Ptr<Graph>& graph)
+{
+    CV_Assert(netimpl);
+    if (!graph)
+        return true;
+
+    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    const std::vector<Arg>& gr_inputs = graph->inputs();
+    bool allFinalized = true;
+
+    // Ensure graph inputs have tensors if shapes are fully known from the model.
+    for (size_t i = 0; i < gr_inputs.size(); ++i)
+    {
+        Arg inp = gr_inputs[i];
+        const ArgData& adata = netimpl->args.at(inp.idx);
+        Mat& t = netimpl->argTensor(inp);
+        if (!t.empty())
+            continue;
+        if (adata.kind == DNN_ARG_INPUT && engine2_canInferStaticInput(adata))
+        {
+            t.fit(adata.shape, adata.type);
+        }
+    }
+
+    std::vector<Mat> inpMats, outMats, tempMats;
+    std::vector<int> inpTypes, outTypes, tempTypes;
+    std::vector<std::pair<uchar*, size_t> > outOrigData;
+    std::vector<MatShape> inpShapes, outShapes, tempShapes;
+
+    for (size_t opidx = 0; opidx < prog.size(); ++opidx)
+    {
+        const Ptr<Layer>& layer = prog[opidx];
+        if (!layer)
+            continue;
+
+        const std::vector<Arg>& inputs = layer->inputs;
+        const std::vector<Arg>& outputs = layer->outputs;
+        const size_t ninputs = inputs.size();
+        const size_t noutputs = outputs.size();
+
+        inpMats.resize(ninputs);
+        inpTypes.resize(ninputs);
+        inpShapes.resize(ninputs);
+
+        for (size_t i = 0; i < ninputs; ++i)
+        {
+            Arg inp = inputs[i];
+            const Mat& m = netimpl->argTensor(inp);
+            inpMats[i] = m;
+            inpTypes[i] = m.type();
+            inpShapes[i] = m.shape();
+        }
+
+        const bool dynamicOutShapes = layer->dynamicOutputShapes();
+        if (!dynamicOutShapes)
+        {
+            netimpl->allocateLayerOutputs(layer, inpTypes, inpShapes,
+                                          outTypes, outShapes, outOrigData, outMats,
+                                          tempTypes, tempShapes, tempMats, netimpl->scratchBufs,
+                                          true);
+            if (netimpl->finalizeLayers)
+                layer->finalize(inpMats, outMats);
+
+            for (size_t i = 0; i < noutputs; ++i)
+            {
+                Arg out = outputs[i];
+                ArgData& odata = netimpl->args[out.idx];
+                const Mat& m = outMats[i];
+                odata.type = m.type();
+                odata.shape = m.shape();
+            }
+        }
+        else
+        {
+            // Can't pre-finalize layers with dynamic output shapes without running them.
+            // We'll leave them to be finalized during the first forward.
+            allFinalized = false;
+        }
+    }
+    return allFinalized;
+}
+
 std::string modelFormatToString(ModelFormat modelFormat)
 {
     return
@@ -286,6 +514,76 @@ Ptr<Graph> Net::Impl::newGraph(const std::string& name_, const std::vector<Arg>&
     return graph;
 }
 
+void Net::Impl::newGraphPair(const std::string& name_, const std::vector<Arg>& inpargs, bool ismain,
+                             Ptr<Graph>& execGraph, Ptr<AbstractGraph>& abstractGraph)
+{
+    if (ismain)
+        globGraphIdx = 0;
+    std::string name = name_;
+    if (name_.empty())
+        name = ismain ? std::string("main") : format("subgraph_%d", globGraphIdx);
+    globGraphIdx++;
+
+    execGraph = Graph::create(this, name, inpargs);
+    abstractGraph = AbstractGraph::create(this, name, inpargs);
+
+    engine2GraphsByName[name] = execGraph;
+    engine2AbstractGraphsByName[name] = abstractGraph;
+    allAbstractGraphs.push_back(abstractGraph);
+
+    if (ismain)
+    {
+        mainGraph = execGraph;
+        mainAbstractGraph = abstractGraph;
+    }
+}
+
+void Net::Impl::compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph)
+{
+    CV_Assert(abstractGraph);
+    auto it = engine2GraphsByName.find(abstractGraph->name());
+    CV_Assert(it != engine2GraphsByName.end());
+    Ptr<Graph> execGraph = it->second;
+
+    const std::vector<Ptr<OpData> >& ops = abstractGraph->prog();
+    std::vector<Ptr<Layer> > prog;
+    prog.reserve(ops.size());
+
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        const Ptr<OpData>& op = ops[i];
+        CV_Assert(op);
+        LayerParams lp = op->params;
+        lp.name = op->name;
+        lp.type = op->type;
+        Ptr<Layer> layer = LayerFactory::createLayerInstance(lp.type, lp);
+        if (!layer)
+            CV_Error_(Error::StsError, ("DNN: layer type '%s' cannot be created during finalize()", lp.type.c_str()));
+        layer->inputs = op->inputs;
+        layer->outputs = op->outputs;
+        layer->netimpl = this;
+
+        if (!op->subgraphs.empty())
+        {
+            std::vector<Ptr<Graph> > execSubs;
+            execSubs.reserve(op->subgraphs.size());
+            for (const Ptr<AbstractGraph>& absSub : op->subgraphs)
+            {
+                CV_Assert(absSub);
+                compileAbstractGraph(absSub);
+                auto itSub = engine2GraphsByName.find(absSub->name());
+                CV_Assert(itSub != engine2GraphsByName.end());
+                execSubs.push_back(itSub->second);
+            }
+            std::vector<Ptr<Graph> >* layerSubs = layer->subgraphs();
+            if (layerSubs)
+                *layerSubs = execSubs;
+        }
+        prog.push_back(layer);
+    }
+    execGraph->setProg(prog);
+}
+
 void Net::Impl::prepareForInference()
 {
     if (!prepared) {
@@ -301,6 +599,44 @@ void Net::Impl::prepareForInference()
         prepared = true;
         finalizeLayers = true;
     }
+}
+
+void Net::Impl::finalize()
+{
+    CV_TRACE_FUNCTION();
+    if (!mainGraph)
+    {
+        // Legacy engine path (ENGINE_CLASSIC): reuse existing setup.
+        setUpNet();
+        return;
+    }
+
+    validateBackendAndTarget();
+
+    // If we have an abstract graph, compile it into executable graphs first.
+    if (mainAbstractGraph && !mainAbstractGraph->prog().empty())
+    {
+        // Compile all graphs reachable from the main abstract graph.
+        compileAbstractGraph(mainAbstractGraph);
+    }
+
+    prepareForInference();
+
+    if (!engine2PlanPrepared ||
+        engine2PlanPreferableBackend != preferableBackend ||
+        engine2PlanPreferableTarget != preferableTarget)
+    {
+        engine2_computeCudaPartitionPlan(mainGraph->prog(), preferableBackend,
+                                         engine2MinCudaSegmentLen,
+                                         engine2OpBackends,
+                                         engine2SwitchOpIdxs);
+        engine2PlanPrepared = true;
+        engine2PlanPreferableBackend = preferableBackend;
+        engine2PlanPreferableTarget = preferableTarget;
+    }
+
+    const bool allFinalized = engine2_preFinalizeGraph(this, mainGraph);
+    finalizeLayers = !allFinalized;
 }
 
 void Net::Impl::allocateLayerOutputs(
@@ -366,6 +702,11 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
 {
     if (!mainGraph) {
         CV_Error(Error::StsNullPtr, "the model was not loaded");
+    }
+    // If the model was imported as an abstract graph, compile it on-demand.
+    if (mainGraph->prog().empty() && mainAbstractGraph && !mainAbstractGraph->prog().empty())
+    {
+        finalize();
     }
     // ************ uncomment one of the lines below for debugging **********
     //tracingMode = DNN_TRACE_OP;

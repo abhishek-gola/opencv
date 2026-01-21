@@ -190,8 +190,11 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
     {
         if (mainGraph)
         {
-            CV_LOG_WARNING(NULL, "Back-ends are not supported by the new graph engine for now");
             preferableBackend = backendId;
+            // ENGINE_NEW: backend change invalidates any cached plan and requires re-finalization.
+            prepared = false;
+            finalizeLayers = true;
+            engine2PlanPrepared = false;
             return;
         }
 
@@ -226,7 +229,36 @@ void Net::Impl::setPreferableTarget(int targetId)
 {
     if (mainGraph)
     {
-        CV_LOG_WARNING(NULL, "Targets are not supported by the new graph engine for now");
+        if (preferableTarget == targetId)
+            return;
+
+        preferableTarget = targetId;
+        // Normalize CUDA/OpenCL targets similarly to the legacy engine.
+        if (IS_DNN_CUDA_TARGET(targetId))
+        {
+            preferableTarget = DNN_TARGET_CPU;
+#ifdef HAVE_CUDA
+            if (cuda4dnn::doesDeviceSupportFP16() && targetId == DNN_TARGET_CUDA_FP16)
+                preferableTarget = DNN_TARGET_CUDA_FP16;
+            else
+                preferableTarget = DNN_TARGET_CUDA;
+#endif
+        }
+#ifdef HAVE_OPENCL
+        if (IS_DNN_OPENCL_TARGET(preferableTarget))
+        {
+            bool fp16 = ocl::Device::getDefault().isExtensionSupported("cl_khr_fp16");
+            if (!fp16 && preferableTarget == DNN_TARGET_OPENCL_FP16)
+                preferableTarget = DNN_TARGET_OPENCL;
+        }
+#else
+        if (IS_DNN_OPENCL_TARGET(preferableTarget))
+            preferableTarget = DNN_TARGET_CPU;
+#endif
+
+        prepared = false;
+        finalizeLayers = true;
+        engine2PlanPrepared = false;
         return;
     }
     if (netWasQuantized && targetId != DNN_TARGET_CPU &&

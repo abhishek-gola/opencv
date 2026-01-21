@@ -131,6 +131,14 @@ void Net::setPreferableTarget(int targetId)
     return impl->setPreferableTarget(targetId);
 }
 
+void Net::finalize()
+{
+    CV_TRACE_FUNCTION();
+    CV_Assert(impl);
+    CV_Assert(!empty());
+    impl->finalize();
+}
+
 void Net::setInputsNames(const std::vector<String>& inputBlobNames)
 {
     CV_TRACE_FUNCTION();
@@ -464,6 +472,12 @@ Ptr<Graph> Net::getMainGraph() const
 {
     CV_Assert(impl);
     return impl->mainGraph;
+}
+
+Ptr<AbstractGraph> Net::getMainAbstractGraph() const
+{
+    CV_Assert(impl);
+    return impl->mainAbstractGraph;
 }
 
 std::ostream& Net::dumpArg(std::ostream& strm, Arg arg, int indent,

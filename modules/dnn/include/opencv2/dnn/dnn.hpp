@@ -261,6 +261,7 @@ CV__DNN_INLINE_NS_BEGIN
 
     class CV_EXPORTS Net;
     class CV_EXPORTS Graph;
+    class CV_EXPORTS AbstractGraph;
     class CV_EXPORTS ActivationLayer;
 
     /** @brief This interface class allows to build new Layers - are building blocks of networks.
@@ -521,6 +522,58 @@ CV__DNN_INLINE_NS_BEGIN
         virtual void setProg(const std::vector<Ptr<Layer> >& newprog) = 0;
     };
 
+    /**
+     * @brief Abstract operation descriptor used by the new graph engine.
+     *
+     * Carries node parameters and connectivity, but is NOT executable (no forward()).
+     * It is intended for traversal, dumping and compilation into executable Layers during Net::finalize().
+     *
+     * Note: this class name intentionally differs from legacy internal detail::LayerData.
+     */
+    class CV_EXPORTS_W_SIMPLE OpData
+    {
+    public:
+        CV_WRAP OpData();
+        virtual ~OpData();
+
+        String name;
+        String type;
+        LayerParams params;
+        std::vector<Arg> inputs;
+        std::vector<Arg> outputs;
+        std::vector<Ptr<AbstractGraph> > subgraphs;
+
+        virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const;
+    };
+
+    /**
+     * @brief Abstract graph representation (DAG of OpData nodes).
+     *
+     * It supports traversal and dumping, but cannot be executed.
+     * Use Net::finalize() to compile it into an executable Graph.
+     */
+    class CV_EXPORTS AbstractGraph
+    {
+    public:
+        virtual ~AbstractGraph();
+
+        virtual std::string name() const = 0;
+        virtual bool empty() const = 0;
+        virtual void clear() = 0;
+
+        virtual const std::vector<Arg>& inputs() const = 0;
+        virtual const std::vector<Arg>& outputs() const = 0;
+        virtual void setOutputs(const std::vector<Arg>& outputs) = 0;
+
+        virtual const std::vector<Ptr<OpData> >& prog() const = 0;
+        virtual void setProg(const std::vector<Ptr<OpData> >& newprog) = 0;
+
+        virtual std::ostream& dump(std::ostream& strm, int indent, bool comma) const = 0;
+
+        static Ptr<AbstractGraph> create(void* netimpl, const std::string& name,
+                                         const std::vector<Arg>& inputs);
+    };
+
     /** @brief This class allows to create and manipulate comprehensive artificial neural networks.
      *
      * Neural network is presented as directed acyclic graph (DAG), where vertices are Layer instances,
@@ -747,6 +800,21 @@ CV__DNN_INLINE_NS_BEGIN
          * | DNN_TARGET_HDDL        |                    |                            + |                   |
          */
         CV_WRAP void setPreferableTarget(int targetId);
+
+        /**
+         * @brief Finalize (compile) network execution plan explicitly.
+         *
+         * This method is intended to move one-time preparation work out of the first forward() call:
+         * - run graph-level transformations / buffer planning (engine dependent)
+         * - do per-layer finalization / preallocation if possible
+         *
+         * For graph engine (ENGINE_NEW), this is a "compile" step. It does not run numeric inference.
+         * If input shapes are dynamic, finalize may perform partial preparation and will be re-triggered
+         * when actual input shapes become known.
+         */
+        // NOTE: Java (and some generators) already use/define 'finalize()' for object cleanup.
+        // Expose this API under a different name in bindings to avoid signature conflicts.
+        CV_WRAP_AS(compile) void finalize();
 
         /**
          * @brief Set the tracing mode
@@ -987,6 +1055,9 @@ CV__DNN_INLINE_NS_BEGIN
 
         // Get the main model graph
         Ptr<Graph> getMainGraph() const;
+
+        // Get the main abstract graph (ENGINE_NEW). It contains OpData nodes and cannot be executed.
+        Ptr<AbstractGraph> getMainAbstractGraph() const;
 
         const ArgData& argData(Arg arg) const;
         const std::string& argName(Arg arg) const;
