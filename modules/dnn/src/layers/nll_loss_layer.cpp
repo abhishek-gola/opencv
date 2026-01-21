@@ -38,7 +38,25 @@ public:
                          std::vector<MatShape>& out, std::vector<MatShape>& internals) const CV_OVERRIDE
     {
         CV_Assert(in.size() >= 2);
-        const MatShape& x = in[0];
+        MatShape x = in[0];
+        // If input shape is not known at this stage, propagate unknown shape.
+        // For reduced modes output is always a scalar, so we can still report it.
+        if (x.empty())
+        {
+            if (reduction == LOSS_REDUCTION_NONE)
+                out.assign(1, MatShape());
+            else
+                out.assign(1, MatShape(1, 1));
+            return false;
+        }
+        // Some ONNX conformance tests provide X as 1D (C) and label as scalar.
+        // Treat it as a single-sample batch: (1, C).
+        if (x.size() == 1)
+        {
+            x = MatShape(2);
+            x[0] = 1;
+            x[1] = in[0][0];
+        }
         CV_Assert(x.size() >= 2);
         if (reduction == LOSS_REDUCTION_NONE)
         {
@@ -69,11 +87,18 @@ public:
         std::vector<Mat> inp;
         in_arr.getMatVector(inp);
 
-        const Mat& logp  = inp[0];
+        Mat logp  = inp[0];
         const Mat& label = inp[1];
         const bool hasWeight = inp.size() >= 3;
 
+        // ONNX spec requires rank(X) >= 2, but allow rank-1 (C) for compatibility.
+        if (logp.dims == 1)
+        {
+            int sz[] = {1, logp.size[0]};
+            logp = logp.reshape(1, 2, sz);
+        }
         CV_Assert(logp.dims >= 2);
+
         const int N = logp.size[0], C = logp.size[1];
         int S = 1; for (int i = 2; i < logp.dims; ++i) S *= logp.size[i];
 

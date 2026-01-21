@@ -62,11 +62,25 @@ public:
 
     virtual bool dynamicOutputShapes() const CV_OVERRIDE
     {
-        // [TODO] fix. If the 'shape' spec is attribute,
-        // or if shape is a constant 2nd input of the layer,
-        // then the output shape can be inferred from the input tensor shape.
-        // That is, dynamicShapeSpec is not quite incorrect.
-        return dynamicShapeSpec;
+        // If the 'shape' spec is an attribute, output shape is static.
+        if (!dynamicShapeSpec)
+            return false;
+
+        // If the shape comes as a 2nd input but it is a constant tensor,
+        // output shape can be inferred from the input tensor shape.
+        if (this->inputs.size() == 2)
+        {
+            Net::Impl* netimpl_ = getNetImpl(this);
+            if (netimpl_)
+            {
+                const Arg shapeArg = this->inputs[1];
+                const ArgData& adata = netimpl_->args.at(shapeArg.idx);
+                if (adata.kind == DNN_ARG_CONST && !netimpl_->argTensor(shapeArg).empty())
+                    return false;
+            }
+        }
+
+        return true;
     }
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE

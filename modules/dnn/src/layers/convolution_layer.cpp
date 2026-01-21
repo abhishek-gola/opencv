@@ -57,6 +57,8 @@
 #include <iostream>
 #include <numeric>
 
+#include "../opdata_factory.hpp"
+
 #ifdef HAVE_OPENCL
 #include "opencl_kernels_dnn.hpp"
 using namespace cv::dnn::ocl4dnn;
@@ -74,6 +76,86 @@ namespace cv
 {
 namespace dnn
 {
+
+namespace {
+
+// Data-only op descriptor (ENGINE_NEW): ConvOpData : OpData
+class ConvOpData CV_FINAL : public OpData
+{
+public:
+    std::vector<size_t> kernel_size, pads_begin, pads_end, strides, dilations, adjust_pads;
+    String padMode;
+    bool useWinograd = false;
+    int groups = 1;
+
+    void initFromParams()
+    {
+        groups = params.get<int>("group", 1);
+        getConvolutionKernelParams(params, kernel_size, pads_begin, pads_end, strides, dilations,
+                                   padMode, adjust_pads, useWinograd);
+    }
+
+    std::ostream& dump(std::ostream& strm, int indent, bool comma) const CV_OVERRIDE
+    {
+        auto prindent_ = [&strm](int n) -> std::ostream& {
+            for (int i = 0; i < n; ++i) strm << ' ';
+            return strm;
+        };
+        auto dumpVec_ = [&strm](const std::vector<size_t>& v) -> std::ostream& {
+            strm << '[';
+            for (size_t i = 0; i < v.size(); ++i)
+            {
+                if (i) strm << ", ";
+                strm << v[i];
+            }
+            strm << ']';
+            return strm;
+        };
+
+        int subindent = indent + 3;
+        prindent_(indent); strm << "{\n";
+        prindent_(subindent); strm << "name: \"" << name << "\",\n";
+        prindent_(subindent); strm << "type: \"" << type << "\",\n";
+        prindent_(subindent); strm << "groups: " << groups << ",\n";
+        prindent_(subindent); strm << "kernel_size: "; dumpVec_(kernel_size); strm << ",\n";
+        prindent_(subindent); strm << "strides: "; dumpVec_(strides); strm << ",\n";
+        prindent_(subindent); strm << "dilations: "; dumpVec_(dilations); strm << ",\n";
+        prindent_(subindent); strm << "pads_begin: "; dumpVec_(pads_begin); strm << ",\n";
+        prindent_(subindent); strm << "pads_end: "; dumpVec_(pads_end); strm << ",\n";
+        prindent_(subindent); strm << "padMode: \"" << padMode << "\",\n";
+        prindent_(subindent); strm << "useWinograd: " << (useWinograd ? "true" : "false") << "\n";
+        prindent_(indent); strm << "}";
+        if (comma) strm << ",";
+        strm << "\n";
+        return strm;
+    }
+};
+
+static Ptr<OpData> createConvOpData(const LayerParams& lp,
+                                   const std::vector<Arg>& inputs,
+                                   const std::vector<Arg>& outputs)
+{
+    Ptr<ConvOpData> d = makePtr<ConvOpData>();
+    d->name = lp.name;
+    d->type = "Convolution";
+    d->params = lp;
+    d->inputs = inputs;
+    d->outputs = outputs;
+    d->initFromParams();
+    return d;
+}
+
+struct ConvOpDataRegister
+{
+    ConvOpDataRegister()
+    {
+        registerOpData("Convolution", createConvOpData);
+    }
+};
+
+static ConvOpDataRegister g_registerConvOpData;
+
+}  // namespace
 
 class BaseConvolutionLayerImpl : public ConvolutionLayer
 {

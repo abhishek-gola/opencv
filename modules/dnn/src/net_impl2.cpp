@@ -5,6 +5,7 @@
 #include "precomp.hpp"
 
 #include "net_impl.hpp"
+#include "opdata_factory.hpp"
 
 namespace cv {
 namespace dnn {
@@ -12,6 +13,65 @@ CV__DNN_INLINE_NS_BEGIN
 
 OpData::OpData() {}
 OpData::~OpData() {}
+
+namespace {
+
+Mutex& getOpDataFactoryMutex()
+{
+    static Mutex* volatile instance = NULL;
+    if (instance == NULL)
+    {
+        cv::AutoLock lock(getInitializationMutex());
+        if (instance == NULL)
+            instance = new Mutex();
+    }
+    return *instance;
+}
+
+static std::map<String, std::vector<OpDataConstructor> >& getOpDataFactoryImpl()
+{
+    static std::map<String, std::vector<OpDataConstructor> > impl;
+    return impl;
+}
+
+}  // namespace
+
+void registerOpData(const String& type, OpDataConstructor constructor)
+{
+    cv::AutoLock lock(getOpDataFactoryMutex());
+    auto& registry = getOpDataFactoryImpl();
+    auto it = registry.find(type);
+    if (it != registry.end())
+        it->second.push_back(constructor);
+    else
+        registry.insert(std::make_pair(type, std::vector<OpDataConstructor>(1, constructor)));
+}
+
+Ptr<OpData> createOpData(const String& type,
+                         const LayerParams& params,
+                         const std::vector<Arg>& inputs,
+                         const std::vector<Arg>& outputs)
+{
+    OpDataConstructor ctor = nullptr;
+    {
+        cv::AutoLock lock(getOpDataFactoryMutex());
+        auto& registry = getOpDataFactoryImpl();
+        auto it = registry.find(type);
+        if (it != registry.end() && !it->second.empty())
+            ctor = it->second.back();
+    }
+
+    Ptr<OpData> op = ctor ? ctor(params, inputs, outputs) : Ptr<OpData>();
+    if (!op)
+        op = makePtr<OpData>();
+
+    // Ensure the core OpData fields are always set, even if ctor didn't.
+    op->type = type;
+    op->params = params;
+    op->inputs = inputs;
+    op->outputs = outputs;
+    return op;
+}
 
 std::ostream& OpData::dump(std::ostream& strm, int indent, bool comma) const
 {
@@ -582,6 +642,21 @@ void Net::Impl::compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph)
         prog.push_back(layer);
     }
     execGraph->setProg(prog);
+}
+
+Ptr<OpData> Net::Impl::newOpData(const LayerParams& params,
+                                 const std::vector<Arg>& inputs,
+                                 const std::vector<Arg>& outputs,
+                                 const std::vector<Ptr<AbstractGraph> >& subgraphs)
+{
+    const String type = params.type;
+    if (type.empty())
+        CV_Error(Error::StsBadArg, "DNN: OpData node type is empty");
+
+    Ptr<OpData> op = createOpData(type, params, inputs, outputs);
+    op->name = params.name;
+    op->subgraphs = subgraphs;
+    return op;
 }
 
 void Net::Impl::prepareForInference()

@@ -127,8 +127,14 @@ public:
 
     MatShape getOutShape(const MatShape& inpShape) const
     {
+        // Shape inference can be requested even when some intermediate tensor ranks are unknown.
+        // In that case, propagate "unknown" shape instead of asserting.
+        if (inpShape.empty())
+            return MatShape();
+
         MatShape outShape(inpShape.dims);
-        CV_Assert(perm.empty() || perm.size() == (size_t)inpShape.dims);
+        if (!perm.empty() && perm.size() != (size_t)inpShape.dims)
+            return MatShape();
 
         for (int i = 0; i < inpShape.dims; i++) {
             int j = perm.empty() ? inpShape.dims - i - 1 : perm[i];

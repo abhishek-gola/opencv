@@ -339,6 +339,12 @@ struct Net::Impl : public detail::NetImplBase
     // ENGINE_NEW: compile abstract graphs into executable graphs (fills Graph::prog()).
     void compileAbstractGraph(const Ptr<AbstractGraph>& abstractGraph);
 
+    // ENGINE_NEW: create a typed OpData node (or plain OpData as fallback).
+    Ptr<OpData> newOpData(const LayerParams& params,
+                          const std::vector<Arg>& inputs,
+                          const std::vector<Arg>& outputs,
+                          const std::vector<Ptr<AbstractGraph> >& subgraphs = std::vector<Ptr<AbstractGraph> >());
+
     const ArgData& argData(Arg arg) const;
     const std::string& argName(Arg arg) const;
     ArgKind argKind(Arg arg) const;
