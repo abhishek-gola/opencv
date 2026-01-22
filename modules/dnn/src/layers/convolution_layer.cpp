@@ -89,6 +89,7 @@ public:
                          std::vector<MatShape> &outputs,
                          std::vector<MatShape> &internals) const
     {
+        std::cout<<"ConvLayerData::getMemoryShapes"<<std::endl;
         CV_Assert(requiredOutputs == 0 || requiredOutputs == 1);
         CV_Assert(!inputs.empty());
         CV_Assert(inputs[0].size() > 2);
@@ -495,6 +496,7 @@ public:
                          std::vector<MatShape> &outputs,
                          std::vector<MatShape> &internals) const CV_OVERRIDE
     {
+        std::cout<<"CPUConvLayer::getMemoryShapes"<<std::endl;
         CV_Assert(convdata);
         return convdata->getMemoryShapes(inputs, requiredOutputs, outputs, internals);
     }
@@ -505,6 +507,7 @@ public:
                   std::vector<MatType> &outputs,
                   std::vector<MatType> &internals) const CV_OVERRIDE
     {
+        std::cout<<"CPUConvLayer::getTypes"<<std::endl;
         CV_Assert(convdata);
         convdata->getTypes(inputs, requiredOutputs, requiredInternals, outputs, internals);
     }
