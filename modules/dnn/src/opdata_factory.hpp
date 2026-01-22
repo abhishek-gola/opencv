@@ -21,6 +21,13 @@ Ptr<LayerOpData> createOpData(const String& type,
                               const std::vector<Arg>& inputs,
                               const std::vector<Arg>& outputs);
 
+// ENGINE_NEW: registry for backend-specific Layer creation from LayerOpData.
+// This allows selecting a backend-specific Layer implementation at Net::finalize() time.
+typedef Ptr<Layer> (*LayerFromDataConstructor)(int backendId, const Ptr<LayerOpData>& data);
+
+void registerLayerFromData(const String& type, int backendId, LayerFromDataConstructor constructor);
+Ptr<Layer> createLayerFromData(const String& type, int backendId, const Ptr<LayerOpData>& data);
+
 CV__DNN_INLINE_NS_END
 }} // namespace cv::dnn
 

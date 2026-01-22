@@ -34,6 +34,24 @@ static std::map<String, std::vector<OpDataConstructor> >& getOpDataFactoryImpl()
     return impl;
 }
 
+static Mutex& getLayerFromDataFactoryMutex()
+{
+    static Mutex* volatile instance = NULL;
+    if (instance == NULL)
+    {
+        cv::AutoLock lock(getInitializationMutex());
+        if (instance == NULL)
+            instance = new Mutex();
+    }
+    return *instance;
+}
+
+static std::map<String, std::vector<LayerFromDataConstructor> >& getLayerFromDataFactoryImpl()
+{
+    static std::map<String, std::vector<LayerFromDataConstructor> > impl;
+    return impl;
+}
+
 }  // namespace
 
 void registerLayerData(const String& type, OpDataConstructor constructor)
@@ -45,6 +63,37 @@ void registerLayerData(const String& type, OpDataConstructor constructor)
         it->second.push_back(constructor);
     else
         registry.insert(std::make_pair(type, std::vector<OpDataConstructor>(1, constructor)));
+}
+
+static inline String makeLayerFromDataKey(const String& type, int backendId)
+{
+    return type + "@" + cv::format("%d", backendId);
+}
+
+void registerLayerFromData(const String& type, int backendId, LayerFromDataConstructor constructor)
+{
+    cv::AutoLock lock(getLayerFromDataFactoryMutex());
+    auto& registry = getLayerFromDataFactoryImpl();
+    const String key = makeLayerFromDataKey(type, backendId);
+    auto it = registry.find(key);
+    if (it != registry.end())
+        it->second.push_back(constructor);
+    else
+        registry.insert(std::make_pair(key, std::vector<LayerFromDataConstructor>(1, constructor)));
+}
+
+Ptr<Layer> createLayerFromData(const String& type, int backendId, const Ptr<LayerOpData>& data)
+{
+    LayerFromDataConstructor ctor = nullptr;
+    {
+        cv::AutoLock lock(getLayerFromDataFactoryMutex());
+        auto& registry = getLayerFromDataFactoryImpl();
+        const String key = makeLayerFromDataKey(type, backendId);
+        auto it = registry.find(key);
+        if (it != registry.end() && !it->second.empty())
+            ctor = it->second.back();
+    }
+    return ctor ? ctor(backendId, data) : Ptr<Layer>();
 }
 
 Ptr<LayerOpData> createOpData(const String& type,
@@ -529,7 +578,10 @@ void Net::Impl::compileGraphOpProg(const Ptr<Graph>& graph)
         LayerParams lp = op->params;
         lp.name = op->name;
         lp.type = op->type;
-        Ptr<Layer> layer = LayerFactory::createLayerInstance(lp.type, lp);
+        // Try backend-specific layer creation from LayerOpData first.
+        Ptr<Layer> layer = createLayerFromData(lp.type, preferableBackend, op);
+        if (!layer)
+            layer = LayerFactory::createLayerInstance(lp.type, lp);
         if (!layer)
             CV_Error_(Error::StsError, ("DNN: layer type '%s' cannot be created during finalize()", lp.type.c_str()));
         layer->inputs = op->inputs;

@@ -43,26 +43,15 @@
 #include "../precomp.hpp"
 #include "layers_common.hpp"
 #include "../op_cuda.hpp"
-#include "../op_inf_engine.hpp"
-#include "../ie_ngraph.hpp"
-#include "../op_vkcom.hpp"
-#include "../op_webnn.hpp"
-#include "../op_cann.hpp"
 
 #include <opencv2/core/utils/configuration.private.hpp>
 #include <opencv2/core/utils/logger.hpp>
 
 #include "opencv2/core/hal/hal.hpp"
 #include "opencv2/core/hal/intrin.hpp"
-#include <iostream>
 #include <numeric>
 
 #include "../opdata_factory.hpp"
-
-#ifdef HAVE_OPENCL
-#include "opencl_kernels_dnn.hpp"
-using namespace cv::dnn::ocl4dnn;
-#endif
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/convolution.hpp"
@@ -93,6 +82,58 @@ public:
         groups = params.get<int>("group", 1);
         getConvolutionKernelParams(params, kernel_size, pads_begin, pads_end, strides, dilations,
                                    padMode, adjust_pads, useWinograd);
+    }
+
+    bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                         const int requiredOutputs,
+                         std::vector<MatShape> &outputs,
+                         std::vector<MatShape> &internals) const
+    {
+        CV_Assert(requiredOutputs == 0 || requiredOutputs == 1);
+        CV_Assert(!inputs.empty());
+        CV_Assert(inputs[0].size() > 2);
+
+        // weights may come either from blobs (params.blobs) or as the 2nd input
+        const bool haveBlobs = !params.blobs.empty();
+        CV_Assert(haveBlobs || inputs.size() > 1);
+        const int* weightShape = haveBlobs ? params.blobs[0].size.p : &inputs[1][0];
+
+        internals.clear();
+
+        std::vector<int> inpShape(inputs[0].begin() + 2, inputs[0].end());
+        int outCn = weightShape[0];
+
+        std::vector<int> outShape;
+        outShape.push_back(inputs[0][0]);  // batch
+        outShape.push_back(outCn);
+
+        if (padMode.empty())
+        {
+            for (int i = 0; i < (int)inpShape.size(); i++)
+            {
+                outShape.push_back((inpShape[i] + (int)pads_begin[i] + (int)pads_end[i] -
+                                    (int)dilations[i] * ((int)kernel_size[i] - 1) - 1) / (int)strides[i] + 1);
+            }
+        }
+        else
+        {
+            getConvPoolOutParams(inpShape, kernel_size, strides, padMode, dilations, outShape);
+        }
+
+        outputs.resize(1, MatShape(outShape));
+        return false;
+    }
+
+    void getTypes(const std::vector<MatType>& inputs,
+                  const int requiredOutputs,
+                  const int requiredInternals,
+                  std::vector<MatType>& outputs,
+                  std::vector<MatType>& internals) const
+    {
+        CV_Assert(!inputs.empty());
+        outputs.assign(requiredOutputs, inputs[0]);
+        // Convolution internals (if any) are float32 buffers today.
+        internals.assign(requiredInternals, CV_32F);
     }
 
     std::ostream& dump(std::ostream& strm, int indent, bool comma) const CV_OVERRIDE
@@ -154,6 +195,113 @@ struct ConvLayerDataRegister
 };
 
 static ConvLayerDataRegister g_registerConvLayerData;
+
+// Backend-specific layer (ENGINE_NEW): CUDA Convolution wrapper created from ConvLayerData.
+// For now it wraps an existing Convolution layer implementation, but is selected through
+// the Layer-from-data registry, so we can incrementally move CUDA execution here.
+class CUDAConvLayer CV_FINAL : public Layer
+{
+public:
+    CUDAConvLayer(const LayerParams& params, const Ptr<ConvLayerData>& data)
+        : Layer(params), convdata(data)
+    {
+        LayerParams lp = params;
+        lp.type = "Convolution";  // CPU fallback until CUDAConvLayer forward is implemented
+        cpuFallback = LayerFactory::createLayerInstance(lp.type, lp);
+    }
+
+    bool supportBackend(int backendId) CV_OVERRIDE
+    {
+        return backendId == DNN_BACKEND_CUDA;
+    }
+
+    bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                         const int requiredOutputs,
+                         std::vector<MatShape> &outputs,
+                         std::vector<MatShape> &internals) const CV_OVERRIDE
+    {
+        std::cout<<"CUDAConvLayer::getMemoryShapes"<<std::endl;
+        if (convdata)
+            return convdata->getMemoryShapes(inputs, requiredOutputs, outputs, internals);
+        return cpuFallback ? cpuFallback->getMemoryShapes(inputs, requiredOutputs, outputs, internals)
+                        : Layer::getMemoryShapes(inputs, requiredOutputs, outputs, internals);
+    }
+
+    void getTypes(const std::vector<MatType>& inputs,
+                  const int requiredOutputs,
+                  const int requiredInternals,
+                  std::vector<MatType>& outputs,
+                  std::vector<MatType>& internals) const CV_OVERRIDE
+    {
+        if (convdata)
+            return convdata->getTypes(inputs, requiredOutputs, requiredInternals, outputs, internals);
+        return cpuFallback ? cpuFallback->getTypes(inputs, requiredOutputs, requiredInternals, outputs, internals)
+                        : Layer::getTypes(inputs, requiredOutputs, requiredInternals, outputs, internals);
+    }
+
+    void finalize(InputArrayOfArrays inputs, OutputArrayOfArrays outputs) CV_OVERRIDE
+    {
+        if (cpuFallback)
+            cpuFallback->netimpl = this->netimpl;
+        if (cpuFallback)
+            cpuFallback->finalize(inputs, outputs);
+    }
+
+    void forward(InputArrayOfArrays inputs, OutputArrayOfArrays outputs, OutputArrayOfArrays internals) CV_OVERRIDE
+    {
+        if (!cpuFallback)
+            CV_Error(Error::StsError, "CUDAConvLayer: missing CPU fallback layer implementation");
+        cpuFallback->netimpl = this->netimpl;
+        cpuFallback->forward(inputs, outputs, internals);
+    }
+
+    Ptr<ConvLayerData> convdata;
+    Ptr<Layer> cpuFallback;
+};
+
+static Ptr<Layer> createCUDAConvLayerFromData(int backendId, const Ptr<LayerOpData>& data)
+{
+    if (backendId != DNN_BACKEND_CUDA)
+        return Ptr<Layer>();
+    Ptr<ConvLayerData> convdata = data.dynamicCast<ConvLayerData>();
+    if (!convdata)
+        return Ptr<Layer>();
+
+    // Simple capability predicate (can be refined later).
+    const size_t ksize = convdata->kernel_size.size();
+    if (ksize == 0 || ksize > 3)
+        return Ptr<Layer>();
+
+    LayerParams lp = convdata->params;
+    lp.name = convdata->name;
+    lp.type = convdata->type;
+    Ptr<Layer> layer = makePtr<CUDAConvLayer>(lp, convdata);
+    return layer;
+}
+
+struct CUDAConvLayerRegister
+{
+    CUDAConvLayerRegister()
+    {
+        // When preferableBackend==DNN_BACKEND_CUDA, Net::finalize() will try this first.
+        registerLayerFromData("Convolution", DNN_BACKEND_CUDA, createCUDAConvLayerFromData);
+    }
+};
+
+static CUDAConvLayerRegister g_registerCudaConvLayer;
+
+// CPU backend layer is implemented as CPUConvLayer (see below). Factory from LayerOpData is defined below.
+static Ptr<Layer> createCPUConvLayerFromData(int backendId, const Ptr<LayerOpData>& data);
+
+struct CPUConvLayerRegister
+{
+    CPUConvLayerRegister()
+    {
+        registerLayerFromData("Convolution", DNN_BACKEND_OPENCV, createCPUConvLayerFromData);
+    }
+};
+
+static CPUConvLayerRegister g_registerCpuConvLayer;
 
 }  // namespace
 
@@ -279,7 +427,7 @@ public:
 
 
 //TODO: simultaneously convolution and bias addition for cache optimization
-class ConvolutionLayerImpl CV_FINAL : public BaseConvolutionLayerImpl
+class CPUConvLayer CV_FINAL : public BaseConvolutionLayerImpl
 {
 public:
     enum { VEC_ALIGN = 8, DFT_TYPE = CV_32F };
@@ -291,14 +439,6 @@ public:
     Ptr<FastConv> fastConvImpl;
     bool canUseWinograd = false;
 
-#ifdef HAVE_OPENCL
-    Ptr<OCL4DNNConvSpatial<float> > convolutionOp;
-    std::vector<UMat> umat_blobs;
-    bool newActiv;
-    ocl4dnnFusedActiv_t activType;
-    float power;
-#endif
-
 #ifdef HAVE_CUDA
     cuda4dnn::ConvolutionConfiguration::FusionMode cudaFusionMode;
     cuda4dnn::ConvolutionConfiguration::ActivationType cudaActType;
@@ -306,14 +446,26 @@ public:
     float cuda_power_exp, cuda_power_scale, cuda_power_shift;
 #endif
 
-    ConvolutionLayerImpl(const LayerParams &params) : BaseConvolutionLayerImpl(params)
-    {
-#ifdef HAVE_OPENCL
-        newActiv = false;
-        activType = OCL4DNN_CONV_FUSED_ACTIV_NONE;
-        power = 0.f;
-#endif
+    Ptr<ConvLayerData> convdata;  // ENGINE_NEW: centralized inference data (optional)
 
+    CPUConvLayer(const LayerParams &params) : BaseConvolutionLayerImpl(params)
+    {
+        // Keep all inference logic in ConvLayerData (used by both classic and ENGINE_NEW paths).
+        convdata = makePtr<ConvLayerData>();
+        convdata->name = params.name;
+        convdata->type = "Convolution";
+        convdata->params = params;
+        convdata->initFromParams();
+
+#ifdef HAVE_CUDA
+        cudaFusionMode = cuda4dnn::ConvolutionConfiguration::FusionMode::NONE;
+        cudaActType = cuda4dnn::ConvolutionConfiguration::ActivationType::IDENTITY;
+#endif
+    }
+
+    CPUConvLayer(const LayerParams& params, const Ptr<ConvLayerData>& data)
+        : BaseConvolutionLayerImpl(params), convdata(data)
+    {
 #ifdef HAVE_CUDA
         cudaFusionMode = cuda4dnn::ConvolutionConfiguration::FusionMode::NONE;
         cudaActType = cuda4dnn::ConvolutionConfiguration::ActivationType::IDENTITY;
@@ -335,62 +487,7 @@ public:
 
     virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
-        size_t ksize = kernel_size.size();
-#ifdef HAVE_CUDA
-        if (backendId == DNN_BACKEND_CUDA)
-        {
-            /* only 1d, 2d and 3d convolutions supported */
-            if (ksize > 0 && ksize <= 3)
-                return true;
-
-            return false;
-        }
-#endif
-#ifdef HAVE_INF_ENGINE
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH)
-        {
-            bool isArmTarget = preferableTarget == DNN_TARGET_CPU && isArmComputePlugin();
-            if (isArmTarget && blobs.empty())
-                return false;
-            if (ksize == 1)
-                return isArmTarget;
-            if (ksize == 3)
-                return preferableTarget != DNN_TARGET_MYRIAD && !isArmTarget;
-            bool isMyriad = preferableTarget == DNN_TARGET_MYRIAD || preferableTarget == DNN_TARGET_HDDL;
-            if (!isMyriad && blobs.empty())
-                return false;
-            return (!isMyriad || dilation.width == dilation.height);
-        }
-#endif
-        if (backendId == DNN_BACKEND_OPENCV)
-            return ksize >= 1 && ksize <= 3;
-#ifdef HAVE_VULKAN
-        if (backendId == DNN_BACKEND_VKCOM)
-            return ksize == 2;
-#endif
-#ifdef HAVE_WEBNN
-        if (backendId == DNN_BACKEND_WEBNN)
-        {
-            if (ksize != 2)
-            {
-                CV_LOG_WARNING(NULL, "WebNN only supports Conv2d.");
-                return false;
-            }
-            return true;
-        }
-#endif
-#ifdef HAVE_CANN
-        if (backendId == DNN_BACKEND_CANN)
-        {
-            if (ksize != 2)
-            {
-                CV_LOG_WARNING(NULL, "CANN supports Conv2D for now");
-                return false;
-            }
-            return true;
-        }
-#endif // HAVE_CANN
-        return false;
+        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_CUDA;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -398,42 +495,18 @@ public:
                          std::vector<MatShape> &outputs,
                          std::vector<MatShape> &internals) const CV_OVERRIDE
     {
-        CV_Assert(!blobs.empty() || inputs.size() > 1);
-        const int* weightShape = blobs.empty() ? &inputs[1][0] : blobs[0].size.p;
-        CV_Assert(!hasBias() || blobs[1].total() == (size_t)weightShape[0]);
+        CV_Assert(convdata);
+        return convdata->getMemoryShapes(inputs, requiredOutputs, outputs, internals);
+    }
 
-        internals.clear();
-
-        CV_Assert(!inputs.empty());
-        CV_Assert(inputs[0].size() > 2);
-        std::vector<int> inpShape(inputs[0].begin() + 2, inputs[0].end());
-
-        int outCn = weightShape[0];
-        std::vector<int> outShape;
-        outShape.push_back(inputs[0][0]);
-        outShape.push_back(outCn);
-
-        int inpCn = inputs[0][1];
-        if (padMode.empty())
-        {
-            for (int i = 0; i < inpShape.size(); i++)
-                outShape.push_back((inpShape[i] + pads_begin[i] + pads_end[i] -
-                                    dilations[i] * (kernel_size[i] - 1) - 1) / strides[i] + 1);
-        }
-        else
-        {
-            getConvPoolOutParams(inpShape, kernel_size, strides, padMode, dilations, outShape);
-        }
-
-        int ngroups = inpCn / weightShape[1];
-        if (ngroups == 0 || ngroups * weightShape[1] != inpCn)
-            CV_Error(Error::StsError, format("Number of input channels should "
-                     "be multiple of %d but got %d", weightShape[1], inpCn));
-        CV_Assert(ngroups > 0 && inpCn % ngroups == 0 && outCn % ngroups == 0);
-
-        outputs.resize(1, MatShape(outShape));
-
-        return false;
+    void getTypes(const std::vector<MatType> &inputs,
+                  const int requiredOutputs,
+                  const int requiredInternals,
+                  std::vector<MatType> &outputs,
+                  std::vector<MatType> &internals) const CV_OVERRIDE
+    {
+        CV_Assert(convdata);
+        convdata->getTypes(inputs, requiredOutputs, requiredInternals, outputs, internals);
     }
 
     virtual void finalize(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr) CV_OVERRIDE
@@ -480,10 +553,6 @@ public:
             for(int i = 0; i < numOutput; i++ )
                 biasvec[i] = biasMat.at<float>(i);
         }
-#ifdef HAVE_OPENCL
-        convolutionOp.release();
-#endif
-
         // Winograd only works when input h and w >= 12.
         canUseWinograd = useWinograd && inputs[0].dims == 4 && inputs[0].size[2] >= 12 && inputs[0].size[3] >= 12;
         if (fastConvImpl && (fastConvImpl->conv_type == CONV_TYPE_WINOGRAD3X3) ^ canUseWinograd)
@@ -500,51 +569,19 @@ public:
         activ = layer;
         if (activ.empty())
             reluslope.clear();
-#ifdef HAVE_OPENCL
-        newActiv = true;
-        activType = OCL4DNN_CONV_FUSED_ACTIV_NONE;
 
-        if (IS_DNN_OPENCL_TARGET(preferableTarget))
-        {
-            Ptr<PowerLayer> activ_power = activ.dynamicCast<PowerLayer>();
-            if (!activ_power.empty())
-            {
-                if (activ_power->scale != 1.0f)  // not supported well by implementation, #17964
-                {
-                    // FIXIT no way to check number of blobs (like, eltwise input)
-                    CV_LOG_DEBUG(NULL, "DNN/OpenCL: can't configure Power activation (scale != 1.0f)");
-                    activ.release();
-                    newActiv = false;
-                    return false;
-                }
-                if (activ_power->scale != 1.f || activ_power->shift != 0.f)
-                {
-                    const int outCh = blobs[0].size[0];
-                    fuseWeights(Mat(1, outCh, CV_32F, Scalar(activ_power->scale)),
-                                Mat(1, outCh, CV_32F, Scalar(activ_power->shift)));
-                }
-
-                power = activ_power->power;
-                activType = OCL4DNN_CONV_FUSED_ACTIV_POWER;
-            }
-            Ptr<TanHLayer> activ_tanh = activ.dynamicCast<TanHLayer>();
-            if (!activ_tanh.empty())
-            {
-                activType = OCL4DNN_CONV_FUSED_ACTIV_TANH;
-            }
-        }
-#endif
-
-#ifdef HAVE_CUDA
         if (activ.empty())
         {
             /* setActivation was called with empty argument => reset all fusions */
+#ifdef HAVE_CUDA
             cudaFusionMode = cuda4dnn::ConvolutionConfiguration::FusionMode::NONE;
             cudaActType = cuda4dnn::ConvolutionConfiguration::ActivationType::IDENTITY;
+#endif
         }
 
         if(IS_DNN_CUDA_TARGET(preferableTarget))
         {
+#ifdef HAVE_CUDA
             CV_Assert(cudaFusionMode == ConvolutionConfiguration::FusionMode::NONE ||
                       cudaFusionMode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM);
 
@@ -601,8 +638,8 @@ public:
                 else if (cudaFusionMode == ConvolutionConfiguration::FusionMode::ELTWISE_SUM) /* previously eltwise was fused */
                     cudaFusionMode = ConvolutionConfiguration::FusionMode::ELTWISE_SUM_THEN_ACTIVATION; /* now activation on eltwise output */
             }
+#endif  // HAVE_CUDA
         }
-#endif
         fusedActivation = !activ.empty();
         return fusedActivation;
     }
@@ -612,9 +649,9 @@ public:
         if (fusedAdd)   // If the Conv layer has fused Add layer, it cannot fuse other layers.
             return false;
 
-#ifdef HAVE_CUDA
         if(IS_DNN_CUDA_TARGET(preferableTarget))
         {
+#ifdef HAVE_CUDA
             Ptr<EltwiseLayer> eltwise = top.dynamicCast<EltwiseLayer>();
             Ptr<NaryEltwiseLayer> naryEltwise = top.dynamicCast<NaryEltwiseLayer>();
             if (!eltwise.empty() || !naryEltwise.empty())
@@ -636,8 +673,8 @@ public:
                 }
                 return false;
             }
+#endif  // HAVE_CUDA
         }
-#endif
         return BaseConvolutionLayerImpl::tryFuse(top);
     }
 
@@ -676,526 +713,34 @@ public:
         biasvec[outCn] = biasvec[outCn+1] = biasvec[outCn-1];
     }
 
-    virtual Ptr<BackendNode> initVkCom(const std::vector<Ptr<BackendWrapper> > &inputs, std::vector<Ptr<BackendWrapper> > &outputs) CV_OVERRIDE
+    virtual Ptr<BackendNode> initVkCom(const std::vector<Ptr<BackendWrapper> >&, std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
     {
-#ifdef HAVE_VULKAN
-        int activationType = transFusedActivType(activ);
-
-        CV_Assert(inputs.size() == 1 && outputs.size() == 1);
-        Ptr<VkComBackendWrapper> inputWrap = inputs[0].dynamicCast<VkComBackendWrapper>();
-        Ptr<VkComBackendWrapper> outputWrap = outputs[0].dynamicCast<VkComBackendWrapper>();
-        CV_Assert(inputWrap && outputWrap);
-
-        MatShape inpShape = shape(*inputWrap->getMat());
-        MatShape outShape = shape(*outputWrap->getMat());
-
-        CV_Assert(inpShape.size() == 4 && inpShape.size() == outShape.size());
-
-        if (activationType == -1)
-        {
-            CV_LOG_WARNING(NULL, "Unsupported fused Active type in Conv layer!!!");
-            return Ptr<BackendNode>();
-        }
-
-        const int inpGroupCn = blobs[0].size[1];
-        int ngroups = inpShape[1] / inpGroupCn;
-        CV_Assert(outShape[1] % ngroups == 0);
-        if (ngroups != 1)
-            return Ptr<BackendNode>();
-
-        Mat weightVK;
-        if (fusedWeights)
-        {
-            weightsMat.copyTo(weightVK); // to handle the case of isContinuous() == false
-            weightVK = weightVK.reshape(1, blobs[0].size);
-        }
-        else
-            weightVK = blobs[0];
-
-        CV_Assert(weightVK.isContinuous());
-        CV_Assert(pads_begin.size() == 2);
-        CV_Assert(fusedAdd == false && "Vulkan Backend can not support the Conv_Add optimization.");
-        Ptr<vkcom::OpBase> op(new vkcom::OpConv(weightVK, biasvec, activationType, ngroups, outShape[1], inpShape[1],
-                                                            kernel.height, kernel.width, stride.height, stride.width,
-                                                            dilation.height, dilation.width, pads_begin[1], pads_begin[0]));
-
-        return Ptr<BackendNode>(new VkComBackendNode(inputs, op, outputs));
-#endif  // HAVE_VULKAN
         return Ptr<BackendNode>();
     }
 
-#ifdef HAVE_CANN
-    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &inputs,
-                                      const std::vector<Ptr<BackendWrapper> > &outputs,
-                                      const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &,
+                                      const std::vector<Ptr<BackendWrapper> > &,
+                                      const std::vector<Ptr<BackendNode> >&) CV_OVERRIDE
     {
-        CV_Assert(!blobs.empty());
-        CV_Assert(inputs.size() == 1);
-        CV_Assert(nodes.size() == 1);
-
-        bool has_bias = hasBias() || fusedBias;
-
-        auto x = inputs[0].dynamicCast<CannBackendWrapper>();
-        const auto shape_x = x->host->size; // [b, c, h, w]
-        const int filter_out_channel = blobs[0].size[1];
-        const int groups = shape_x[1] / filter_out_channel;
-
-        // create operator
-        auto op = std::make_shared<ge::op::Conv2D>(name);
-
-        // set attributes
-        op->set_attr_strides(ge::Operator::OpListInt(
-            {1, 1, (int64_t)strides[0], (int64_t)strides[1]}
-        ));
-        // recalculate pads in case of "SAME" padMode with odd pads
-        // since in 'getConvPoolPaddings' pads are divided equally
-        // leading to the loss of one pad
-        if (padMode == "SAME")
-        {
-            for (int i = 0; i < pads_begin.size(); i++) {
-                if (strides[i] <= kernel_size[i])
-                {
-                    int pads_at_i = kernel_size[i] - 1 - (shape_x[i+2] - 1 + strides[i]) % strides[i];
-                    pads_begin[i] = pads_at_i / 2;
-                    // if odd, add extra padding to the end for SAME_UPPER
-                    // or to the beginning for SAME_LOWER. Since here we cannot
-                    // identity SAME_UPPER and SAME_LOWER, extra padding is always
-                    // added to the end.
-                    pads_end[i] = pads_at_i - pads_begin[i];
-                }
-            }
-        }
-        op->set_attr_pads(ge::Operator::OpListInt(
-            {(int64_t)pads_begin[1], (int64_t)pads_end[1], (int64_t)pads_begin[0], (int64_t)pads_end[0]}
-        ));
-        op->set_attr_dilations(ge::Operator::OpListInt(
-            {1, 1, (int64_t)dilations[0], (int64_t)dilations[1]}
-        ));
-        op->set_attr_groups(groups);
-        op->set_attr_data_format("NCHW");
-
-        // set inputs
-        // set inputs : x
-        auto op_x = nodes[0].dynamicCast<CannBackendNode>()->getOp();
-        op->set_input_x_by_name(*op_x, x->name.c_str());
-        auto x_desc = x->getTensorDesc();
-        op->update_input_desc_x(*x_desc);
-        // set inputs : weight
-        const Mat& w_mat = blobs[0];
-        auto op_const_weight = std::make_shared<CannConstOp>(w_mat.data, w_mat.type(), shape(w_mat), cv::format("%s_w", name.c_str()));
-        op->set_input_filter(*(op_const_weight->getOp()));
-        op->update_input_desc_filter(*(op_const_weight->getTensorDesc()));
-        // set inputs : bias
-        if (has_bias)
-        {
-            int out_channel = blobs[0].size[0];
-            Mat b_mat({out_channel}, CV_32F, &biasvec[0]);
-
-            std::vector<int> bias_shape{out_channel};
-            auto op_const_bias = std::make_shared<CannConstOp>(b_mat.data, b_mat.type(), bias_shape, cv::format("%s_b", name.c_str()));
-            op->set_input_bias(*(op_const_bias->getOp()));
-            op->update_input_desc_bias(*(op_const_bias->getTensorDesc()));
-        }
-
-        // set outputs
-        auto output_desc = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
-        op->update_output_desc_y(*output_desc);
-
-        return Ptr<BackendNode>(new CannBackendNode(op));
+        return Ptr<BackendNode>();
     }
-#endif
 
-
-#ifdef HAVE_DNN_NGRAPH
-    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &inputs,
-                                        const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &,
+                                        const std::vector<Ptr<BackendNode> >&) CV_OVERRIDE
     {
-        CV_Assert(!blobs.empty());
-        CV_Assert_N(inputs.size() >= 1, nodes.size() >= 1);
-        auto& ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-        std::vector<size_t> dims = ieInpNode.get_shape();
-        CV_Check(dims.size(), dims.size() >= 3 && dims.size() <= 5, "");
-        ov::Output<ov::Node> ieWeights;
-        if (nodes.size() > 1)
-            ieWeights = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
-        const int inpCn = dims[1];
-        const int inpGroupCn = nodes.size() > 1 ? ieWeights.get_shape()[1] : blobs[0].size[1];
-        const int group = inpCn / inpGroupCn;
-
-        std::vector<size_t> kernel_shape;
-        if (group != 1)
-        {
-            kernel_shape.push_back(group);
-        }
-        kernel_shape.push_back(numOutput / group);
-        kernel_shape.push_back(inpCn / group);
-        std::copy(kernel_size.begin(), kernel_size.end(), back_inserter(kernel_shape));
-
-        if (nodes.size() == 1)
-        {
-            ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, blobs[0].data);
-            if (fusedWeights)
-            {
-                if (weightsMat.isContinuous())
-                {
-                    ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, weightsMat.data);
-                }
-                else
-                {
-                    Mat newWeights;
-                    Mat cvWeights = weightsMat.colRange(0, blobs[0].total() / numOutput);
-                    cvWeights.copyTo(newWeights);
-                    ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, newWeights.data);
-                }
-            }
-        }
-        else
-        {
-            auto shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64,
-                             ov::Shape{kernel_shape.size()}, std::vector<int64_t>(kernel_shape.begin(), kernel_shape.end()));
-            ieWeights  = std::make_shared<ov::op::v1::Reshape>(ieWeights, shape, true);
-        }
-
-        ov::op::PadType pad_type = ov::op::PadType::EXPLICIT;
-        if (!padMode.empty())
-            pad_type = padMode == "VALID" ? ov::op::PadType::VALID : ov::op::PadType::SAME_UPPER;
-
-        std::shared_ptr<ov::Node> conv_node;
-        if (group != 1) {
-            conv_node = std::make_shared<ov::op::v1::GroupConvolution>(
-                                ieInpNode, ieWeights,
-                                ov::Strides(strides),
-                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(),   pads_end.end())),
-                                ov::Strides(dilations),
-                                pad_type);
-        } else {
-            conv_node = std::make_shared<ov::op::v1::Convolution>(
-                                ieInpNode, ieWeights,
-                                ov::Strides(strides),
-                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(), pads_end.end())),
-                                ov::Strides(dilations),
-                                pad_type);
-        }
-
-        if (hasBias() || fusedBias || nodes.size() == 3)
-        {
-            std::vector<size_t> shape(conv_node->get_shape().size(), 1);
-            shape[1] = conv_node->get_shape()[1];
-            std::shared_ptr<ov::Node> bias;
-            if (nodes.size() == 3)
-            {
-                auto bias_shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64,
-                                    ov::Shape{shape.size()}, std::vector<int64_t>(shape.begin(), shape.end()));
-                bias = std::make_shared<ov::op::v1::Reshape>(nodes[2].dynamicCast<InfEngineNgraphNode>()->node, bias_shape, true);
-            }
-            else
-            {
-                bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(shape), biasvec.data());
-            }
-            auto conv_bias = std::make_shared<ov::op::v1::Add>(conv_node, bias, ov::op::AutoBroadcastType::NUMPY);
-            return Ptr<BackendNode>(new InfEngineNgraphNode(conv_bias));
-        }
-        return Ptr<BackendNode>(new InfEngineNgraphNode(conv_node));
+        return Ptr<BackendNode>();
     }
-#endif  // HAVE_DNN_NGRAPH
 
-#ifdef HAVE_WEBNN
-    virtual Ptr<BackendNode> initWebnn(const std::vector<Ptr<BackendWrapper> >& inputs, const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    virtual Ptr<BackendNode> initWebnn(const std::vector<Ptr<BackendWrapper> >&,
+                                       const std::vector<Ptr<BackendNode> >&) CV_OVERRIDE
     {
-        CV_Assert(!blobs.empty());
-        CV_Assert_N(inputs.size() >= 1, nodes.size() >= 1);
-        Ptr<WebnnBackendNode> node = nodes[0].dynamicCast<WebnnBackendNode>();
-        auto& webnnInpOperand = node->operand;
-        auto& webnnGraphBuilder = node->net->builder;
-        ml::Operand webnnWeights = nodes.size() > 1 ? nodes[1].dynamicCast<WebnnBackendNode>()->operand : nullptr;
-        if (nodes.size() > 1)
-            CV_Assert(webnnWeights);
-        const int inpCn = weightsMat.total()/(kernel_size[0]*kernel_size[1]*numOutput);
-        const int group = groups;
-        const int inpGroupCn = inpCn / group;
-        std::vector<int32_t> kernel_shape;
-        if (group != 1)
-        {
-            kernel_shape.push_back(group);
-        }
-        kernel_shape.push_back(numOutput / group);
-        kernel_shape.push_back(inpGroupCn);
-        std::copy(kernel_size.begin(), kernel_size.end(), back_inserter(kernel_shape));
-
-        if (nodes.size() == 1)
-        {
-            webnnWeights = webnn::BuildConstant(webnnGraphBuilder, webnn::getShape(blobs[0]), blobs[0].data, blobs[0].total()*blobs[0].elemSize(), ml::OperandType::Float32);
-            if (fusedWeights)
-            {
-                if (weightsMat.isContinuous())
-                {
-                    webnnWeights = webnn::BuildConstant(webnnGraphBuilder, webnn::getShape(weightsMat), weightsMat.data, weightsMat.total()*weightsMat.elemSize(), ml::OperandType::Float32);
-                }
-                else
-                {
-                    Mat newWeights;
-                    Mat cvWeights = weightsMat.colRange(0, blobs[0].total() / numOutput);
-                    cvWeights.copyTo(newWeights);
-                    webnnWeights = webnn::BuildConstant(webnnGraphBuilder, webnn::getShape(newWeights), newWeights.data, newWeights.total()*newWeights.elemSize(), ml::OperandType::Float32);
-                }
-            }
-        }
-        else
-        {
-            webnnWeights  = webnnGraphBuilder.Reshape(webnnWeights, kernel_shape.data(), kernel_shape.size());
-        }
-
-        ml::AutoPad pad_type = ml::AutoPad::Explicit;
-        if (!padMode.empty())
-            pad_type = padMode == "VALID" ? ml::AutoPad::Explicit : ml::AutoPad::SameUpper;
-
-        ml::Conv2dOptions options = {};
-        options.groups = group;
-        options.autoPad = pad_type;
-        std::vector<int32_t> Strides(strides.begin(), strides.end());
-        if (!Strides.empty())
-        {
-            options.stridesCount = Strides.size();
-            options.strides = Strides.data();
-        }
-        std::vector<int32_t> Padding;
-        if (padMode.empty())
-        {
-            Padding = {static_cast<int32_t>(pads_begin[0]),
-                       static_cast<int32_t>(pads_end[0]),
-                       static_cast<int32_t>(pads_begin[1]),
-                       static_cast<int32_t>(pads_end[1])};
-        }
-        else if (padMode == "VALID")
-        {
-            Padding = {0, 0, 0, 0};
-        }
-        if (!Padding.empty())
-        {
-            options.paddingCount = Padding.size();
-            options.padding = Padding.data();
-        }
-        std::vector<int32_t> Dilations(dilations.begin(), dilations.end());
-        if (!Dilations.empty())
-        {
-            options.dilationsCount = Dilations.size();
-            options.dilations = Dilations.data();
-        }
-        ml::Operand operand = webnnGraphBuilder.Conv2d(webnnInpOperand, webnnWeights, &options);
-
-        // ml::Operand result = operand;
-        if (hasBias() || fusedBias || nodes.size() == 3)
-        {
-            ml::Operand webnnBias = nullptr;
-            if (nodes.size() == 3)
-            {
-                std::vector<int32_t> bias_shape = {1, numOutput, 1, 1};
-                webnnBias = webnnGraphBuilder.Reshape(nodes[2].dynamicCast<WebnnBackendNode>()->operand, bias_shape.data(), bias_shape.size());
-            }
-            else
-            {
-                webnnBias = webnn::BuildConstant(webnnGraphBuilder, {1, numOutput, 1, 1}, biasvec.data(), (numOutput) * sizeof(float), ml::OperandType::Float32);
-            }
-            operand = webnnGraphBuilder.Add(operand, webnnBias);
-        }
-        return Ptr<BackendNode>(new WebnnBackendNode(operand));
+        return Ptr<BackendNode>();
     }
-#endif // HAVE_WEBNN
-
-#ifdef HAVE_OPENCL
-    bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays internals)
-    {
-        if (kernel_size.size() != 2)
-        {
-            // no OpenCL optimizations, see .supportedBacked()
-            return false;
-        }
-
-        std::vector<UMat> inputs;
-        std::vector<UMat> outputs;
-
-        bool use_half = (inps.depth() == CV_16F);
-        inps.getUMatVector(inputs);
-        outs.getUMatVector(outputs);
-
-        CV_Assert(outputs.size() == 1);
-        for (int i = 0; i < inputs.size(); ++i)
-            CV_Assert(inputs[i].u != outputs[0].u);
-
-        if (blobs.empty())
-        {
-            size_t n = inputs.size() - 1;
-            umat_blobs.resize(n);
-            for (size_t i = 0; i < n; i++)
-            {
-                CV_Assert(!use_half);  // TODO: not implemented
-                inputs[i + 1].copyTo(umat_blobs[i]);
-            }
-            inputs.resize(1);
-        }
-
-        if (umat_blobs.empty())
-        {
-            size_t n = blobs.size();
-            umat_blobs.resize(n);
-            for (size_t i = 0; i < n; i++)
-            {
-                if (use_half)
-                    blobs[i].convertTo(umat_blobs[i], CV_16F);
-                else
-                    blobs[i].copyTo(umat_blobs[i]);
-            }
-        }
-
-        if (convolutionOp.empty() || blobs.empty())
-        {
-            OCL4DNNConvConfig config;
-            config.in_shape = shape(inputs[0]);
-            config.out_shape = shape(outputs[0]);
-            config.kernel = kernel;
-            // pads_begin: 0 - pad_top, 1 - pad_left
-            // pads_end: 0 - pad_bottom, 1 - pad_right
-            std::vector<int> pads = {int(pads_begin[0]), int(pads_end[0]), int(pads_begin[1]), int(pads_end[1])};
-            config.pads = pads;
-            config.stride = stride;
-            config.dilation = dilation;
-            if (inputs[0].dims != 4 && inputs[0].dims != (blobs.empty() ? umat_blobs[0].dims : blobs[0].dims))
-            {
-                static bool bypassCheck = utils::getConfigurationParameterBool("OPENCV_OCL4DNN_CONVOLUTION_IGNORE_INPUT_DIMS_4_CHECK", false);
-                if (!bypassCheck)
-                {
-                    CV_LOG_ERROR(NULL, "DNN/OpenCL: Unsupported configuration: inputs[0].dims=" << inputs[0].dims << "  umat_blobs[0].dims=" << umat_blobs[0].dims
-                        << ". Consider reporting complete reproducer to https://github.com/opencv/opencv/issues/20833."
-                        << " You can skip this check temporary through OPENCV_OCL4DNN_CONVOLUTION_IGNORE_INPUT_DIMS_4_CHECK=1"
-                    );
-                    return false;
-                }
-            }
-            config.group = inputs[0].size[1] / (blobs.empty() ? umat_blobs[0].size[1] : blobs[0].size[1]);
-            if (config.group < 1)  // config.group == 0 causes div by zero in ocl4dnn code
-            {
-                CV_LOG_WARNING(NULL, "DNN/OpenCL: Unsupported config.group=" << config.group
-                    << ". Consider reporting complete reproducer to https://github.com/opencv/opencv/issues/20833"
-                );
-                return false;
-            }
-            config.bias_term = umat_blobs.size() == 2;
-            config.use_half = use_half;
-
-            convolutionOp = Ptr<OCL4DNNConvSpatial<float> >(new OCL4DNNConvSpatial<float>(config));
-        }
-
-        int outCn = umat_blobs[0].size[0];
-
-        reluslope.clear();
-        if( activ )
-        {
-            Ptr<ReLULayer> activ_relu = activ.dynamicCast<ReLULayer>();
-            if( !activ_relu.empty() )
-            {
-                reluslope.assign(outCn+2, activ_relu->negativeSlope);
-                activType = OCL4DNN_CONV_FUSED_ACTIV_RELU;
-            }
-
-            Ptr<ReLU6Layer> activ_relu6 = activ.dynamicCast<ReLU6Layer>();
-            if( !activ_relu6.empty() )
-            {
-                reluslope.resize(2);
-                reluslope[0] = activ_relu6->minValue;
-                reluslope[1] = activ_relu6->maxValue;
-                activType = OCL4DNN_CONV_FUSED_ACTIV_RELU6;
-            }
-
-            Ptr<ChannelsPReLULayer> activ_chprelu = activ.dynamicCast<ChannelsPReLULayer>();
-            if( !activ_chprelu.empty() )
-            {
-                const Mat& m = activ_chprelu->blobs[0];
-                CV_Assert(m.isContinuous() && m.type() == CV_32F && (int)m.total() == outCn);
-                const float* mdata = m.ptr<float>();
-                reluslope.resize(outCn+2);
-                std::copy(mdata, mdata + outCn, reluslope.begin());
-                reluslope[outCn] = reluslope[outCn+1] = reluslope[outCn-1];
-                activType = OCL4DNN_CONV_FUSED_ACTIV_PRELU;
-            }
-        }
-
-        if (fusedWeights)
-        {
-            if (use_half)
-                weightsMat.convertTo(umat_blobs[0], CV_16F);
-            else
-                weightsMat.copyTo(umat_blobs[0]);
-            fusedWeights = false;
-        }
-        if (fusedBias)
-        {
-            if ( umat_blobs.size() < 2 )
-                umat_blobs.resize(2);
-            if (use_half)
-                Mat(biasvec, true).convertTo(umat_blobs[1], CV_16F);
-            else
-                Mat(biasvec, true).copyTo(umat_blobs[1]);
-            convolutionOp->setBias(true);
-            fusedBias = false;
-        }
-
-        if ( newActiv )
-        {
-            if ( activType == OCL4DNN_CONV_FUSED_ACTIV_RELU )
-            {
-                CV_Assert(!reluslope.empty());
-                convolutionOp->setActivReLU(true, reluslope[0]);
-            }
-            else if ( activType == OCL4DNN_CONV_FUSED_ACTIV_PRELU)
-            {
-                CV_Assert(!reluslope.empty());
-                convolutionOp->setActivPReLU(true, reluslope);
-            }
-            else if ( activType == OCL4DNN_CONV_FUSED_ACTIV_POWER)
-            {
-                convolutionOp->setActivPower(true, power);
-            }
-            else if ( activType == OCL4DNN_CONV_FUSED_ACTIV_TANH)
-            {
-                convolutionOp->setActivTanh(true);
-            }
-            else if ( activType == OCL4DNN_CONV_FUSED_ACTIV_RELU6)
-            {
-                convolutionOp->setActivReLU6(true, reluslope[0], reluslope[1]);
-            }
-            else
-            {
-                convolutionOp->setActivReLU(false, 0);
-                convolutionOp->setActivPReLU(false, reluslope);
-                convolutionOp->setActivPower(false, 1.f);
-                convolutionOp->setActivTanh(false);
-                convolutionOp->setActivReLU6(false, 0, 0);
-            }
-            newActiv = false;
-        }
-
-        UMat& inpMat = inputs[0];
-        UMat& outMat = outputs[0];
-        int batch_size = inpMat.size[0];
-
-        return convolutionOp->Forward(inpMat,
-                                      inputs.size() == 2 ? inputs[1] : UMat(),
-                                      umat_blobs[0],
-                                      umat_blobs.size() > 1 ? umat_blobs[1] : UMat(),
-                                      outMat,
-                                      batch_size);
-    }
-#endif
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
-
-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
-                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
         if (inputs_arr.depth() == CV_16F)
         {
@@ -1383,7 +928,7 @@ public:
         return make_cuda_node<cuda4dnn::ConvolutionOp>(
             preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
     }
-#endif
+#endif  // HAVE_CUDA
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,
                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
@@ -1400,6 +945,21 @@ public:
         return flops;
     }
 };
+
+namespace {
+static Ptr<Layer> createCPUConvLayerFromData(int backendId, const Ptr<LayerOpData>& data)
+{
+    if (backendId != DNN_BACKEND_OPENCV)
+        return Ptr<Layer>();
+    Ptr<ConvLayerData> convdata = data.dynamicCast<ConvLayerData>();
+    if (!convdata)
+        return Ptr<Layer>();
+    LayerParams lp = convdata->params;
+    lp.name = convdata->name;
+    lp.type = convdata->type;
+    return makePtr<CPUConvLayer>(lp, convdata);
+}
+}  // namespace
 
 class DeConvolutionLayerImpl CV_FINAL : public BaseConvolutionLayerImpl
 {
@@ -1433,20 +993,7 @@ public:
 
             return false;
         }
-
-#ifdef HAVE_INF_ENGINE
-        const int outGroupCn = blobs[0].size[1];  // Weights are in IOHW or IODHW layout
-        const int group = numOutput / outGroupCn;
-
-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH) {
-            return group == 1;
-        }
-#endif  // HAVE_INF_ENGINE
-        {
-            return backendId == DNN_BACKEND_CUDA ||
-            (kernel_size.size() == 2 && backendId == DNN_BACKEND_OPENCV) ||
-            (kernel_size.size() == 2 && backendId == DNN_BACKEND_CANN);
-        }
+        return kernel_size.size() == 2 && backendId == DNN_BACKEND_OPENCV;
     }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -1837,118 +1384,11 @@ public:
         }
     };
 
-#ifdef HAVE_OPENCL
-    bool forward_ocl(InputArrayOfArrays inputs_, OutputArrayOfArrays outputs_, OutputArrayOfArrays internals_)
+    bool forward_ocl(InputArrayOfArrays, OutputArrayOfArrays, OutputArrayOfArrays)
     {
-        std::vector<UMat> inputs;
-        std::vector<UMat> outputs;
-        std::vector<UMat> internals;
-
-        if (inputs_.depth() == CV_16F)
-            return false;
-
-        inputs_.getUMatVector(inputs);
-        outputs_.getUMatVector(outputs);
-        internals_.getUMatVector(internals);
-
-        int outCn = numOutput;
-        int inpCn = inputs[0].size[1];
-
-        if (is1x1())
-            return false;
-
-        if (umat_weights.empty() || inputs.size() >= 2) {
-            Mat temp;
-            if (fusedWeights)
-                weightsMat.copyTo(umat_weights);
-            else if (!blobs.empty()) {
-                transpose(blobs[0].reshape(1, inpCn), temp);
-                temp.copyTo(umat_weights);
-            }
-            else {
-                transpose(inputs[1].reshape(1, inpCn), temp);
-                temp.copyTo(umat_weights);
-            }
-        }
-
-        if (umat_biases.empty() || inputs.size() >= 3) {
-            if (fusedBias)
-                biasesMat.copyTo(umat_biases);
-            else if (blobs.size() > 1)
-                blobs[1].reshape(1, outCn).copyTo(umat_biases);
-            else if (inputs.size() >= 3)
-                inputs[2].reshape(1, outCn).copyTo(umat_biases);
-            else
-                umat_biases = UMat::zeros(outCn, 1, CV_32F);
-        }
-
-        String buildopt = format("-DT=%s ", ocl::typeToStr(inputs[0].type()));
-        buildopt += format("-DPAD_H=%d -DPAD_W=%d -DKERNEL_H=%d -DKERNEL_W=%d -DSTRIDE_H=%d -DSTRIDE_W=%d ",
-                           pad.height, pad.width, kernel.height, kernel.width, stride.height, stride.width);
-
-        //for (size_t ii = 0; ii < outputs.size(); ii++)
-        {
-            int ii = 0;
-            int inpGroupCn = inpCn / groups;
-            int outGroupCn = outCn / groups;
-            const UMat& inp = inputs[ii];
-            UMat& out = outputs[ii];
-            int numImg = inp.size[0];
-            int inpH = inp.size[2], inpW = inp.size[3];
-            int outH = out.size[2], outW = out.size[3];
-
-            MatShape inpshape = shape(numImg*inpCn, inpH*inpW);
-            MatShape outshape = shape(numImg*outCn, outH*outW);
-            UMat convBlob = inputs[ii].reshape(1, inpshape);
-            UMat decnBlob = out.reshape(1, outshape);
-            int rows = internals[0].rows / groups;
-
-            for (int n = 0; n < numImg; n++)
-            {
-                for (int g = 0; g < groups; g++)
-                {
-                    UMat colMat = internals[0].rowRange(_Range(g * rows, rows));
-                    UMat convMat = convBlob.rowRange(_Range((g + n * groups) * inpGroupCn, inpGroupCn));
-                    UMat wghtMat = umat_weights.colRange(_Range(g * inpGroupCn, inpGroupCn));
-                    gemm(wghtMat, convMat, 1, noArray(), 0, colMat, 0);
-                }
-
-                for (int g = 0; g < groups; g++)
-                {
-                    int total = outGroupCn * decnBlob.cols;
-                    int index = 0;
-                    int height_col = inpH;
-                    int width_col = inpW;
-                    int coeff_h = (1 - stride.height * kernel.width * height_col) * width_col;
-                    int coeff_w = (1 - stride.width * height_col * width_col);
-
-                    ocl::Kernel k("col2im", ocl::dnn::col2im_oclsrc, buildopt);
-                    k.set(index++, total);
-                    k.set(index++, ocl::KernelArg::PtrReadOnly(internals[0]));
-                    k.set(index++, (int)(g * rows * internals[0].cols));
-                    k.set(index++, outGroupCn);
-                    k.set(index++, outH);
-                    k.set(index++, outW);
-                    k.set(index++, height_col);
-                    k.set(index++, width_col);
-                    k.set(index++, coeff_h);
-                    k.set(index++, coeff_w);
-                    k.set(index++, ocl::KernelArg::PtrReadOnly(umat_biases));
-                    k.set(index++, (int)(g * outGroupCn * umat_biases.cols));
-                    k.set(index++, ocl::KernelArg::PtrWriteOnly(decnBlob));
-                    k.set(index++, (int)((g + n * groups) * outGroupCn * decnBlob.cols));
-
-                    size_t global[] = { (size_t)total };
-                    bool ret = k.run(1, global, NULL, false);
-                    if (!ret)
-                        return false;
-                }
-            }
-        }
-
-        return true;
+        // OpenCL path removed (CPU/CUDA-only build).
+        return false;
     }
-#endif
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
@@ -2111,136 +1551,20 @@ public:
         return make_cuda_node<cuda4dnn::TransposeConvolutionOp>(
             preferableTarget, std::move(context->stream), std::move(context->cudnn_handle), config, filtersMat, biasMat);
     }
-#endif
+#endif  // HAVE_CUDA
 
-#ifdef HAVE_CANN
-    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &inputs,
-                                      const std::vector<Ptr<BackendWrapper> > &outputs,
-                                      const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    virtual Ptr<BackendNode> initCann(const std::vector<Ptr<BackendWrapper> > &,
+                                      const std::vector<Ptr<BackendWrapper> > &,
+                                      const std::vector<Ptr<BackendNode> >&) CV_OVERRIDE
     {
-        CV_Assert(!blobs.empty());
-        CV_Assert(inputs.size() == 1);
-        CV_Assert(nodes.size() == 1);
-
-        bool has_bias = hasBias() || fusedBias;
-
-        auto x = inputs[0].dynamicCast<CannBackendWrapper>();
-        auto y = outputs[0].dynamicCast<CannBackendWrapper>();
-        const auto shape_x = x->host->size; // [N, C, H, W]
-        const auto shape_y = y->host->size; // [N, C, H, W]
-        const int filter_out_channel = blobs[0].size[0];
-        const int groups = shape_x[1] / filter_out_channel;
-
-        // create operator
-        auto op = std::make_shared<ge::op::Conv2DTransposeD>(name);
-
-        // set attributes
-        op->set_attr_input_size(
-            ge::Operator::OpListInt({(int64_t)shape_y[0],
-                                     (int64_t)shape_y[1],
-                                     (int64_t)shape_y[2],
-                                     (int64_t)shape_y[3],})
-        );
-        op->set_attr_strides(
-            ge::Operator::OpListInt({1, 1, (int64_t)strides[0], (int64_t)strides[1]})
-        );
-        op->set_attr_pads(ge::Operator::OpListInt(
-            {(int64_t)pads_begin[1], (int64_t)pads_end[1], (int64_t)pads_begin[0], (int64_t)pads_end[0]}
-        ));
-        op->set_attr_dilations(ge::Operator::OpListInt(
-            {1, 1, (int64_t)dilations[0], (int64_t)dilations[1]}
-        ));
-        op->set_attr_groups(groups);
-        op->set_attr_data_format("NCHW");
-        op->set_attr_output_padding(
-            ge::Operator::OpListInt({0, 0, (int64_t)adjust_pads[0], (int64_t)adjust_pads[1]}) // adjust_pads: [height, width]
-        );
-
-        // set inputs
-        // set inputs : x
-        auto op_x = nodes[0].dynamicCast<CannBackendNode>()->getOp();
-        op->set_input_x_by_name(*op_x, x->name.c_str());
-        auto desc_x = x->getTensorDesc();
-        op->update_input_desc_x(*desc_x);
-        // set inputs : weight
-        const Mat& mat_w = blobs[0];
-        auto op_const_w = std::make_shared<CannConstOp>(mat_w.data, mat_w.type(), shape(mat_w), cv::format("%s_w", name.c_str()));
-        op->set_input_filter(*(op_const_w->getOp()));
-        op->update_input_desc_filter(*(op_const_w->getTensorDesc()));
-        // set inputs : bias
-        if (has_bias)
-        {
-            int out_channel = blobs[0].size[0];
-            const Mat& mat_b = blobs[1];
-
-            std::vector<int> shape_b{out_channel};
-            auto op_const_b = std::make_shared<CannConstOp>(mat_b.data, mat_b.type(), shape_b, cv::format("%s_b", name.c_str()));
-            op->set_input_bias(*(op_const_b->getOp()));
-            op->update_input_desc_bias(*(op_const_b->getTensorDesc()));
-        }
-
-        // set outputs
-        auto desc_output = std::make_shared<ge::TensorDesc>(ge::Shape(), ge::FORMAT_NCHW, ge::DT_FLOAT);
-        op->update_output_desc_y(*desc_output);
-
-        return Ptr<BackendNode>(new CannBackendNode(op));
+        return Ptr<BackendNode>();
     }
-#endif // HAVE_CANN
 
-#ifdef HAVE_DNN_NGRAPH
-    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &inputs,
-                                        const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
+    virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &,
+                                        const std::vector<Ptr<BackendNode> >&) CV_OVERRIDE
     {
-       CV_Assert(!blobs.empty());
-       const int outGroupCn = blobs[0].size[1];
-       const int group = numOutput / outGroupCn;
-       CV_Assert(group == 1);
-
-       auto& ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-       std::vector<size_t> kernel_shape = getShape<size_t>(blobs[0]);
-       auto ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, blobs[0].data);
-
-        if (fusedWeights)
-        {
-            Mat newWeights;
-            transpose(weightsMat, newWeights);
-            ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, newWeights.data);
-        }
-        std::vector<size_t> paddings_end;
-        if (padMode == "SAME")
-        {
-            for (int i = 0; i < pads_begin.size(); i++) {
-                paddings_end.push_back(kernel_size[i] - pads_begin[i] - 1 - adjust_pads[i]);
-            }
-            adjust_pads = std::vector<size_t>(pads_begin.size(), 0);
-        } else {
-            paddings_end = pads_end;
-        }
-        ov::op::PadType pad_type = padMode == "VALID" ? ov::op::PadType::VALID : ov::op::PadType::EXPLICIT;
-
-        auto deconv = std::make_shared<ov::op::v1::ConvolutionBackpropData>(
-                          ieInpNode,
-                          ieWeights,
-                          ov::Strides(strides),
-                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(paddings_end.begin(), paddings_end.end())),
-                          ov::Strides(dilations),
-                          pad_type,
-                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(adjust_pads.begin(), adjust_pads.end())));
-
-        if (hasBias() || fusedBias)
-        {
-            std::vector<size_t> shape(deconv->get_shape().size(), 1);
-            shape[1] = numOutput;
-            auto bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(shape), blobs[1].data);
-            auto deconv_bias = std::make_shared<ov::op::v1::Add>(deconv, bias, ov::op::AutoBroadcastType::NUMPY);
-            return Ptr<BackendNode>(new InfEngineNgraphNode(deconv_bias));
-        }
-
-
-        return Ptr<BackendNode>(new InfEngineNgraphNode(deconv));
+        return Ptr<BackendNode>();
     }
-#endif  // HAVE_DNN_NGRAPH
 
     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,
                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
@@ -2263,7 +1587,7 @@ public:
 
 Ptr<BaseConvolutionLayer> ConvolutionLayer::create(const LayerParams &params)
 {
-    Ptr<ConvolutionLayerImpl> l(new ConvolutionLayerImpl(params));
+    Ptr<CPUConvLayer> l(new CPUConvLayer(params));
     return l;
 }
 
