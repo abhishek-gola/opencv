@@ -144,7 +144,6 @@ void Net::Impl::clear()
 
     prepared = false;
     finalizeLayers = true;
-
 }
 
 

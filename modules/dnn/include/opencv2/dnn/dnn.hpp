@@ -521,19 +521,15 @@ CV__DNN_INLINE_NS_BEGIN
         virtual const std::vector<Ptr<Layer> >& prog() const = 0;
         virtual void setProg(const std::vector<Ptr<Layer> >& newprog) = 0;
 
-        // ENGINE_NEW: optional LayerOpData program storage.
-        // When present, Net::finalize() can compile this op program into executable Layers (prog()).
+        //LayerOpData program storage, Net::finalize() compiles this op program into executable Layers (prog()).
         virtual const std::vector<Ptr<LayerOpData> >& opProg() const = 0;
         virtual void setOpProg(const std::vector<Ptr<LayerOpData> >& newprog) = 0;
     };
 
     /**
-     * @brief Abstract operation descriptor used by the new graph engine.
-     *
-     * Carries node parameters and connectivity, but is NOT executable (no forward()).
+     * @brief Abstract Graph.
+     * Carries node parameters and connectivity, but is NOT executable .
      * It is intended for traversal, dumping and compilation into executable Layers during Net::finalize().
-     *
-     * Note: this class name intentionally differs from legacy internal detail::LayerData.
      */
     class CV_EXPORTS_W_SIMPLE LayerOpData
     {
@@ -784,13 +780,7 @@ CV__DNN_INLINE_NS_BEGIN
          * This method is intended to move one-time preparation work out of the first forward() call:
          * - run graph-level transformations / buffer planning (engine dependent)
          * - do per-layer finalization / preallocation if possible
-         *
-         * For graph engine (ENGINE_NEW), this is a "compile" step. It does not run numeric inference.
-         * If input shapes are dynamic, finalize may perform partial preparation and will be re-triggered
-         * when actual input shapes become known.
          */
-        // NOTE: Java (and some generators) already use/define 'finalize()' for object cleanup.
-        // Expose this API under a different name in bindings to avoid signature conflicts.
         CV_WRAP_AS(compile) void finalize();
 
         /**

@@ -94,7 +94,6 @@ public:
         CV_Assert(!inputs.empty());
         CV_Assert(inputs[0].size() > 2);
 
-        // weights may come either from blobs (params.blobs) or as the 2nd input
         const bool haveBlobs = !params.blobs.empty();
         CV_Assert(haveBlobs || inputs.size() > 1);
         const int* weightShape = haveBlobs ? params.blobs[0].size.p : &inputs[1][0];
@@ -105,7 +104,7 @@ public:
         int outCn = weightShape[0];
 
         std::vector<int> outShape;
-        outShape.push_back(inputs[0][0]);  // batch
+        outShape.push_back(inputs[0][0]);
         outShape.push_back(outCn);
 
         if (padMode.empty())
@@ -426,8 +425,6 @@ public:
     virtual void fuseWeights(const Mat& w_, const Mat& b_) = 0;
 };
 
-
-//TODO: simultaneously convolution and bias addition for cache optimization
 class CPUConvLayer CV_FINAL : public BaseConvolutionLayerImpl
 {
 public:
@@ -447,11 +444,10 @@ public:
     float cuda_power_exp, cuda_power_scale, cuda_power_shift;
 #endif
 
-    Ptr<ConvLayerData> convdata;  // ENGINE_NEW: centralized inference data (optional)
+    Ptr<ConvLayerData> convdata;
 
     CPUConvLayer(const LayerParams &params) : BaseConvolutionLayerImpl(params)
     {
-        // Keep all inference logic in ConvLayerData (used by both classic and ENGINE_NEW paths).
         convdata = makePtr<ConvLayerData>();
         convdata->name = params.name;
         convdata->type = "Convolution";
