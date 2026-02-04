@@ -12,17 +12,13 @@ typedef Ptr<LayerOpData> (*OpDataConstructor)(
         const std::vector<Arg>& inputs,
         const std::vector<Arg>& outputs);
 
-// Internal registry for typed LayerOpData creation (ENGINE_NEW).
 void registerLayerData(const String& type, OpDataConstructor constructor);
 
-// Create a typed LayerOpData instance if registered, otherwise returns a plain LayerOpData.
 Ptr<LayerOpData> createOpData(const String& type,
                               const LayerParams& params,
                               const std::vector<Arg>& inputs,
                               const std::vector<Arg>& outputs);
 
-// ENGINE_NEW: registry for backend-specific Layer creation from LayerOpData.
-// This allows selecting a backend-specific Layer implementation at Net::finalize() time.
 typedef Ptr<Layer> (*LayerFromDataConstructor)(int backendId, const Ptr<LayerOpData>& data);
 
 void registerLayerFromData(const String& type, int backendId, LayerFromDataConstructor constructor);
