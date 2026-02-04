@@ -68,7 +68,7 @@ namespace dnn
 
 namespace {
 
-// Data-only op descriptor (ENGINE_NEW): ConvLayerData : LayerOpData
+// Data-only op descriptor: ConvLayerData : LayerOpData
 class ConvLayerData CV_FINAL : public LayerOpData
 {
 public:
@@ -196,7 +196,7 @@ struct ConvLayerDataRegister
 
 static ConvLayerDataRegister g_registerConvLayerData;
 
-// Backend-specific layer (ENGINE_NEW): CUDA Convolution wrapper created from ConvLayerData.
+// Backend-specific layer: CUDA Convolution wrapper created from ConvLayerData.
 // For now it wraps an existing Convolution layer implementation, but is selected through
 // the Layer-from-data registry, so we can incrementally move CUDA execution here.
 class CUDAConvLayer CV_FINAL : public Layer
@@ -267,7 +267,6 @@ static Ptr<Layer> createCUDAConvLayerFromData(int backendId, const Ptr<LayerOpDa
     if (!convdata)
         return Ptr<Layer>();
 
-    // Simple capability predicate (can be refined later).
     const size_t ksize = convdata->kernel_size.size();
     if (ksize == 0 || ksize > 3)
         return Ptr<Layer>();
@@ -290,7 +289,6 @@ struct CUDAConvLayerRegister
 
 static CUDAConvLayerRegister g_registerCudaConvLayer;
 
-// CPU backend layer is implemented as CPUConvLayer (see below). Factory from LayerOpData is defined below.
 static Ptr<Layer> createCPUConvLayerFromData(int backendId, const Ptr<LayerOpData>& data);
 
 struct CPUConvLayerRegister
@@ -403,7 +401,7 @@ public:
 
     virtual bool tryFuse(Ptr<Layer>& top) CV_OVERRIDE
     {
-        if (fusedAdd)   // If the Conv layer has fused Add layer, it cannot fuse other layers.
+        if (fusedAdd)
             return false;
 
         Ptr<BlankLayer> blank_layer = top.dynamicCast<BlankLayer>();
@@ -429,7 +427,7 @@ class CPUConvLayer CV_FINAL : public BaseConvolutionLayerImpl
 {
 public:
     enum { VEC_ALIGN = 8, DFT_TYPE = CV_32F };
-    Mat weightsMat;  // Used to store weight params. It will be used for layer fusion and memory alignment.
+    Mat weightsMat;
     std::vector<float> biasvec;
     std::vector<float> reluslope;
     Ptr<ActivationLayer> activ;
@@ -534,7 +532,6 @@ public:
         }
         else
         {
-            // initialized in .forward()
             weightsMat.release();
         }
 
