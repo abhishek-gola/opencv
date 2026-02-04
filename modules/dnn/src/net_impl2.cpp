@@ -114,7 +114,6 @@ Ptr<LayerOpData> createOpData(const String& type,
     if (!op)
         op = makePtr<LayerOpData>();
 
-    // Ensure the core LayerOpData fields are always set, even if ctor didn't.
     op->type = type;
     op->params = params;
     op->inputs = inputs;
@@ -154,8 +153,6 @@ static inline bool engine2_canInferStaticInput(const ArgData& adata)
     return true;
 }
 
-// Shared helper: gather input tensors and prepare output/temp tensors for a layer.
-// If allowDynamicOutputs==false and the layer reports dynamic output shapes, returns false.
 static bool prepareLayerIO(Net::Impl* netimpl,
                            const Ptr<Layer>& layer,
                            std::vector<Mat>& inpMats,
@@ -227,7 +224,6 @@ static bool prewarmGraphForInference(Net::Impl* netimpl, const Ptr<Graph>& graph
     const std::vector<Arg>& gr_inputs = graph->inputs();
     bool allFinalized = true;
 
-    // Ensure graph inputs have tensors if shapes are fully known from the model.
     for (size_t i = 0; i < gr_inputs.size(); ++i)
     {
         Arg inp = gr_inputs[i];
@@ -262,8 +258,6 @@ static bool prewarmGraphForInference(Net::Impl* netimpl, const Ptr<Graph>& graph
                                        false /*allowDynamicOutputs*/);
         if (!ok)
         {
-            // Can't pre-finalize layers with dynamic output shapes without running them.
-            // We'll leave them to be finalized during the first forward.
             allFinalized = false;
             continue;
         }
