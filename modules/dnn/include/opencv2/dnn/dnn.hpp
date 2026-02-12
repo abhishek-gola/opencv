@@ -538,33 +538,6 @@ CV__DNN_INLINE_NS_BEGIN
         CV_WRAP Net();  //!< Default constructor.
         CV_WRAP ~Net(); //!< Destructor frees the net only if there aren't references to the net anymore.
 
-        /** @brief Create a network from Intel's Model Optimizer intermediate representation (IR).
-         *  @param[in] xml XML configuration file with network's topology.
-         *  @param[in] bin Binary file with trained weights.
-         *  Networks imported from Intel's Model Optimizer are launched in Intel's Inference Engine
-         *  backend.
-         */
-        CV_WRAP static Net readFromModelOptimizer(CV_WRAP_FILE_PATH const String& xml, CV_WRAP_FILE_PATH const String& bin);
-
-        /** @brief Create a network from Intel's Model Optimizer in-memory buffers with intermediate representation (IR).
-         *  @param[in] bufferModelConfig buffer with model's configuration.
-         *  @param[in] bufferWeights buffer with model's trained weights.
-         *  @returns Net object.
-         */
-        CV_WRAP static
-        Net readFromModelOptimizer(const std::vector<uchar>& bufferModelConfig, const std::vector<uchar>& bufferWeights);
-
-        /** @brief Create a network from Intel's Model Optimizer in-memory buffers with intermediate representation (IR).
-         *  @param[in] bufferModelConfigPtr buffer pointer of model's configuration.
-         *  @param[in] bufferModelConfigSize buffer size of model's configuration.
-         *  @param[in] bufferWeightsPtr buffer pointer of model's trained weights.
-         *  @param[in] bufferWeightsSize buffer size of model's trained weights.
-         *  @returns Net object.
-         */
-        static
-        Net readFromModelOptimizer(const uchar* bufferModelConfigPtr, size_t bufferModelConfigSize,
-                                            const uchar* bufferWeightsPtr, size_t bufferWeightsSize);
-
         /** Returns true if there are no layers in the network. */
         CV_WRAP bool empty() const;
 
@@ -1023,112 +996,6 @@ CV__DNN_INLINE_NS_BEGIN
         ENGINE_AUTO=3     //!< Try to use the new engine and then fall back to the classic version.
     };
 
-    /** @brief Reads a network model stored in <a href="https://pjreddie.com/darknet/">Darknet</a> model files.
-    *  @param cfgFile      path to the .cfg file with text description of the network architecture.
-    *  @param darknetModel path to the .weights file with learned network.
-    *  @returns Network object that ready to do forward, throw an exception in failure cases.
-    */
-    CV_EXPORTS_W Net readNetFromDarknet(CV_WRAP_FILE_PATH const String &cfgFile, CV_WRAP_FILE_PATH const String &darknetModel = String());
-
-    /** @brief Reads a network model stored in <a href="https://pjreddie.com/darknet/">Darknet</a> model files.
-     *  @param bufferCfg   A buffer contains a content of .cfg file with text description of the network architecture.
-     *  @param bufferModel A buffer contains a content of .weights file with learned network.
-     *  @returns Net object.
-     */
-    CV_EXPORTS_W Net readNetFromDarknet(const std::vector<uchar>& bufferCfg,
-                                        const std::vector<uchar>& bufferModel = std::vector<uchar>());
-
-    /** @brief Reads a network model stored in <a href="https://pjreddie.com/darknet/">Darknet</a> model files.
-     *  @param bufferCfg   A buffer contains a content of .cfg file with text description of the network architecture.
-     *  @param lenCfg      Number of bytes to read from bufferCfg
-     *  @param bufferModel A buffer contains a content of .weights file with learned network.
-     *  @param lenModel    Number of bytes to read from bufferModel
-     *  @returns Net object.
-     */
-    CV_EXPORTS Net readNetFromDarknet(const char *bufferCfg, size_t lenCfg,
-                                      const char *bufferModel = NULL, size_t lenModel = 0);
-
-    /** @brief Reads a network model stored in <a href="http://caffe.berkeleyvision.org">Caffe</a> framework's format.
-      * @param prototxt   path to the .prototxt file with text description of the network architecture.
-      * @param caffeModel path to the .caffemodel file with learned network.
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      * @returns Net object.
-      */
-    CV_EXPORTS_W Net readNetFromCaffe(CV_WRAP_FILE_PATH const String &prototxt,
-                                      CV_WRAP_FILE_PATH const String &caffeModel = String(),
-                                      int engine = ENGINE_AUTO);
-
-    /** @brief Reads a network model stored in Caffe model in memory.
-      * @param bufferProto buffer containing the content of the .prototxt file
-      * @param bufferModel buffer containing the content of the .caffemodel file
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      * @returns Net object.
-      */
-    CV_EXPORTS_W Net readNetFromCaffe(const std::vector<uchar>& bufferProto,
-                                      const std::vector<uchar>& bufferModel = std::vector<uchar>(),
-                                      int engine = ENGINE_AUTO);
-
-    /** @brief Reads a network model stored in Caffe model in memory.
-      * @details This is an overloaded member function, provided for convenience.
-      * It differs from the above function only in what argument(s) it accepts.
-      * @param bufferProto buffer containing the content of the .prototxt file
-      * @param lenProto length of bufferProto
-      * @param bufferModel buffer containing the content of the .caffemodel file
-      * @param lenModel length of bufferModel
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      * @returns Net object.
-      */
-    CV_EXPORTS Net readNetFromCaffe(const char *bufferProto, size_t lenProto,
-                                    const char *bufferModel = NULL, size_t lenModel = 0,
-                                    int engine = ENGINE_AUTO);
-
-    /** @brief Reads a network model stored in <a href="https://www.tensorflow.org/">TensorFlow</a> framework's format.
-      * @param model  path to the .pb file with binary protobuf description of the network architecture
-      * @param config path to the .pbtxt file that contains text graph definition in protobuf format.
-      *               Resulting Net object is built by text graph using weights from a binary one that
-      *               let us make it more flexible.
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * @param extraOutputs specify model outputs explicitly, in addition to the outputs the graph analyzer finds.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      * @returns Net object.
-      */
-    CV_EXPORTS_W Net readNetFromTensorflow(CV_WRAP_FILE_PATH const String &model,
-                                           CV_WRAP_FILE_PATH const String &config = String(),
-                                           int engine=ENGINE_AUTO,
-                                           const std::vector<String>& extraOutputs = std::vector<String>());
-
-    /** @brief Reads a network model stored in <a href="https://www.tensorflow.org/">TensorFlow</a> framework's format.
-      * @param bufferModel buffer containing the content of the pb file
-      * @param bufferConfig buffer containing the content of the pbtxt file
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * @param extraOutputs specify model outputs explicitly, in addition to the outputs the graph analyzer finds.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      * @returns Net object.
-      */
-    CV_EXPORTS_W Net readNetFromTensorflow(const std::vector<uchar>& bufferModel,
-                                           const std::vector<uchar>& bufferConfig = std::vector<uchar>(),
-                                           int engine=ENGINE_AUTO,
-                                           const std::vector<String>& extraOutputs = std::vector<String>());
-
-    /** @brief Reads a network model stored in <a href="https://www.tensorflow.org/">TensorFlow</a> framework's format.
-      * @details This is an overloaded member function, provided for convenience.
-      * It differs from the above function only in what argument(s) it accepts.
-      * @param bufferModel buffer containing the content of the pb file
-      * @param lenModel length of bufferModel
-      * @param bufferConfig buffer containing the content of the pbtxt file
-      * @param lenConfig length of bufferConfig
-      * @param engine select DNN engine to be used. With auto selection the new engine is used.
-      * @param extraOutputs specify model outputs explicitly, in addition to the outputs the graph analyzer finds.
-      * Please pay attention that the new DNN does not support non-CPU back-ends for now.
-      */
-    CV_EXPORTS Net readNetFromTensorflow(const char *bufferModel, size_t lenModel,
-                                         const char *bufferConfig = NULL, size_t lenConfig = 0,
-                                         int engine=ENGINE_AUTO,
-                                         const std::vector<String>& extraOutputs = std::vector<String>());
-
     /** @brief Reads a network model stored in <a href="https://www.tensorflow.org/lite">TFLite</a> framework's format.
       * @param model  path to the .tflite file with binary flatbuffers description of the network architecture
       * @param engine select DNN engine to be used. With auto selection the new engine is used first and falls back to classic.
@@ -1159,17 +1026,11 @@ CV__DNN_INLINE_NS_BEGIN
       * @brief Read deep learning network represented in one of the supported formats.
       * @param[in] model Binary file contains trained weights. The following file
       *                  extensions are expected for models from different frameworks:
-      *                  * `*.caffemodel` (Caffe, http://caffe.berkeleyvision.org/)
-      *                  * `*.pb` (TensorFlow, https://www.tensorflow.org/)
-      *                  * `*.weights` (Darknet, https://pjreddie.com/darknet/)
-      *                  * `*.bin` | `*.onnx` (OpenVINO, https://software.intel.com/openvino-toolkit)
       *                  * `*.onnx` (ONNX, https://onnx.ai/)
+     *                  * `*.tflite` (TFLite, https://www.tensorflow.org/lite)
       * @param[in] config Text file contains network configuration. It could be a
       *                   file with the following extensions:
-      *                  * `*.prototxt` (Caffe, http://caffe.berkeleyvision.org/)
-      *                  * `*.pbtxt` (TensorFlow, https://www.tensorflow.org/)
-      *                  * `*.cfg` (Darknet, https://pjreddie.com/darknet/)
-      *                  * `*.xml` (OpenVINO, https://software.intel.com/openvino-toolkit)
+     *                  * no additional config is required for ONNX and TFLite importers.
       * @param[in] framework Explicit framework name tag to determine a format.
       * @param[in] engine select DNN engine to be used. With auto selection the new engine is used first and falls back to classic.
       * Please pay attention that the new DNN does not support non-CPU back-ends for now.
@@ -1177,8 +1038,8 @@ CV__DNN_INLINE_NS_BEGIN
       * @returns Net object.
       *
       * This function automatically detects an origin framework of trained model
-      * and calls an appropriate function such @ref readNetFromCaffe, @ref readNetFromTensorflow
-      * or @ref readNetFromDarknet. An order of @p model and @p config
+     * and calls an appropriate function such @ref readNetFromONNX
+     * or @ref readNetFromTFLite. An order of @p model and @p config
       * arguments does not matter.
       */
      CV_EXPORTS_W Net readNet(CV_WRAP_FILE_PATH const String& model,
@@ -1201,40 +1062,6 @@ CV__DNN_INLINE_NS_BEGIN
      CV_EXPORTS_W Net readNet(const String& framework, const std::vector<uchar>& bufferModel,
                               const std::vector<uchar>& bufferConfig = std::vector<uchar>(),
                               int engine = ENGINE_AUTO);
-
-    /** @brief Load a network from Intel's Model Optimizer intermediate representation.
-     *  @param[in] xml XML configuration file with network's topology.
-     *  @param[in] bin Binary file with trained weights.
-     *  @returns Net object.
-     *  Networks imported from Intel's Model Optimizer are launched in Intel's Inference Engine
-     *  backend.
-     */
-    CV_EXPORTS_W
-    Net readNetFromModelOptimizer(CV_WRAP_FILE_PATH const String &xml, CV_WRAP_FILE_PATH const String &bin = "");
-
-    /** @brief Load a network from Intel's Model Optimizer intermediate representation.
-     *  @param[in] bufferModelConfig Buffer contains XML configuration with network's topology.
-     *  @param[in] bufferWeights Buffer contains binary data with trained weights.
-     *  @returns Net object.
-     *  Networks imported from Intel's Model Optimizer are launched in Intel's Inference Engine
-     *  backend.
-     */
-    CV_EXPORTS_W
-    Net readNetFromModelOptimizer(const std::vector<uchar>& bufferModelConfig, const std::vector<uchar>& bufferWeights);
-
-    /** @brief Load a network from Intel's Model Optimizer intermediate representation.
-     *  @param[in] bufferModelConfigPtr Pointer to buffer which contains XML configuration with network's topology.
-     *  @param[in] bufferModelConfigSize Binary size of XML configuration data.
-     *  @param[in] bufferWeightsPtr Pointer to buffer which contains binary data with trained weights.
-     *  @param[in] bufferWeightsSize Binary size of trained weights data.
-     *  @returns Net object.
-     *  Networks imported from Intel's Model Optimizer are launched in Intel's Inference Engine
-     *  backend.
-     */
-    CV_EXPORTS
-    Net readNetFromModelOptimizer(const uchar* bufferModelConfigPtr, size_t bufferModelConfigSize,
-                                           const uchar* bufferWeightsPtr, size_t bufferWeightsSize);
-
 
     /** @brief Reads a network model <a href="https://onnx.ai/">ONNX</a>.
      *  @param onnxFile path to the .onnx file with text description of the network architecture.

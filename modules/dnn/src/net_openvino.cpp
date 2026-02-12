@@ -815,48 +815,6 @@ Net openvino_readNetwork(
 
 #endif  // HAVE_INF_ENGINE
 
-Net Net::readFromModelOptimizer(const String& xml, const String& bin)
-{
-    CV_TRACE_FUNCTION();
-#if defined(HAVE_INF_ENGINE)
-    return openvino_readNetwork(xml, bin);
-#elif defined(ENABLE_PLUGINS)
-    auto& networkBackend = dnn_backend::createPluginDNNNetworkBackend("openvino");
-    return networkBackend.readNetwork(std::string(), xml, bin);
-#else
-    CV_UNUSED(xml); CV_UNUSED(bin);
-    CV_Error(Error::StsError, "Build OpenCV with Inference Engine to enable loading models from Model Optimizer.");
-#endif
-}
-
-Net Net::readFromModelOptimizer(const std::vector<uchar>& bufferModelConfig, const std::vector<uchar>& bufferWeights)
-{
-    CV_TRACE_FUNCTION();
-    CV_Assert(!bufferModelConfig.empty());
-    CV_Assert(!bufferWeights.empty());
-    return readFromModelOptimizer(bufferModelConfig.data(), bufferModelConfig.size(),
-                                           bufferWeights.data(), bufferWeights.size());
-}
-
-Net Net::readFromModelOptimizer(
-        const uchar* bufferModelConfigPtr, size_t bufferModelConfigSize,
-        const uchar* bufferWeightsPtr, size_t bufferWeightsSize
-)
-{
-    CV_TRACE_FUNCTION();
-#if defined(HAVE_INF_ENGINE)
-    return openvino_readNetwork(bufferModelConfigPtr, bufferModelConfigSize, bufferWeightsPtr, bufferWeightsSize);
-#elif defined(ENABLE_PLUGINS)
-    auto& networkBackend = dnn_backend::createPluginDNNNetworkBackend("openvino");
-    return networkBackend.readNetwork(std::string(), bufferModelConfigPtr, bufferModelConfigSize, bufferWeightsPtr, bufferWeightsSize);
-#else
-    CV_UNUSED(bufferModelConfigPtr); CV_UNUSED(bufferWeightsPtr);
-    CV_UNUSED(bufferModelConfigSize); CV_UNUSED(bufferModelConfigSize);
-    CV_Error(Error::StsError, "Build OpenCV with Inference Engine to enable loading models from Model Optimizer.");
-#endif
-}
-
-
 CV__DNN_INLINE_NS_END
 }}  // namespace cv::dnn
 
