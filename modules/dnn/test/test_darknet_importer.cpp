@@ -44,6 +44,7 @@
 #include "test_precomp.hpp"
 #include "npy_blob.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
+// TODO(new-dnn-engine): Replace Darknet-based test assets with ONNX or TFLite equivalents.
 
 namespace opencv_test { namespace {
 

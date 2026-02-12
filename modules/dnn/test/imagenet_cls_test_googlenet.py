@@ -3,6 +3,7 @@ import sys
 import os
 import argparse
 from imagenet_cls_test_alexnet import MeanChannelsFetch, CaffeModel, DnnCaffeModel, ClsAccEvaluation
+# TODO(new-dnn-engine): Replace Caffe-based classification checks with ONNX or TFLite equivalents.
 try:
     import caffe
 except ImportError:

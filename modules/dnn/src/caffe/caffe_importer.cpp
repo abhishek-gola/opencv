@@ -766,20 +766,6 @@ public:
 
 }
 
-Net readNetFromCaffe(const String &prototxt,
-                     const String &caffeModel, /*= String()*/
-                     int engine)
-{
-    static const int engine_forced = (int)utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO);
-    if(engine_forced != ENGINE_AUTO)
-        engine = engine_forced;
-
-    CaffeImporter caffeImporter(prototxt.c_str(), caffeModel.c_str());
-    Net net;
-    caffeImporter.populateNet(net, engine == ENGINE_NEW || engine == ENGINE_AUTO);
-    return net;
-}
-
 Net readNetFromCaffe(const char *bufferProto, size_t lenProto,
                      const char *bufferModel, size_t lenModel,
                      int engine)
@@ -787,10 +773,15 @@ Net readNetFromCaffe(const char *bufferProto, size_t lenProto,
     static const int engine_forced = (int)utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO);
     if(engine_forced != ENGINE_AUTO)
         engine = engine_forced;
+    if (engine == ENGINE_NEW)
+    {
+        CV_Error(Error::StsNotImplemented,
+                 "The new dnn engine supports only ONNX and TFLite importers");
+    }
 
     CaffeImporter caffeImporter(bufferProto, lenProto, bufferModel, lenModel);
     Net net;
-    caffeImporter.populateNet(net, engine == ENGINE_NEW || engine == ENGINE_AUTO);
+    caffeImporter.populateNet(net, false);
     return net;
 }
 

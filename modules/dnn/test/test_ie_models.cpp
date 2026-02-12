@@ -5,6 +5,7 @@
 // Copyright (C) 2018-2019, Intel Corporation, all rights reserved.
 // Third party copyrights are property of their respective owners.
 #include "test_precomp.hpp"
+// TODO(new-dnn-engine): Replace OpenVINO IR test assets with ONNX or TFLite equivalents.
 
 #ifdef HAVE_INF_ENGINE
 #include <opencv2/core/utils/filesystem.hpp>

@@ -7,6 +7,7 @@
 
 #include "test_precomp.hpp"
 #include "opencv2/core/ocl.hpp"
+// TODO(new-dnn-engine): Replace legacy model format test assets (Caffe/Darknet/TF/OpenVINO) with ONNX or TFLite equivalents.
 
 namespace opencv_test { namespace {
 

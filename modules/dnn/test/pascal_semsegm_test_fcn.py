@@ -6,6 +6,7 @@ import argparse
 import time
 
 from imagenet_cls_test_alexnet import CaffeModel, DNNOnnxModel
+# TODO(new-dnn-engine): Replace Caffe-based segmentation checks with ONNX or TFLite equivalents.
 try:
     import cv2 as cv
 except ImportError:

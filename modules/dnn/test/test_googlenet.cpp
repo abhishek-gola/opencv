@@ -43,6 +43,7 @@
 #include "npy_blob.hpp"
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/ts/ocl_test.hpp>
+// TODO(new-dnn-engine): Replace Caffe/TensorFlow GoogLeNet test assets with ONNX or TFLite equivalents.
 
 namespace opencv_test { namespace {
 

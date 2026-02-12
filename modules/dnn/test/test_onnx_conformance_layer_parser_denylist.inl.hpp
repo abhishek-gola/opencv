@@ -285,24 +285,24 @@
 "test_convtranspose_with_kernel",  // Issue::Parser::Weights are required as inputs
 "test_deform_conv_with_mask_bias",
 "test_deform_conv_with_multiple_offset_groups",
-"test_dequantizelinear_e4m3fn",
-"test_dequantizelinear_e4m3fn_float16",
-"test_dequantizelinear_e4m3fn_zero_point",
-"test_dequantizelinear_e5m2",
-"test_dequantizelinear_float4e2m1",
-"test_dequantizelinear_int16",
-"test_dequantizelinear_int4",
-"test_dequantizelinear_uint16",
-"test_dequantizelinear_uint4",
+// "test_dequantizelinear_e4m3fn",
+// "test_dequantizelinear_e4m3fn_float16",
+// "test_dequantizelinear_e4m3fn_zero_point",
+// "test_dequantizelinear_e5m2",
+// "test_dequantizelinear_float4e2m1",
+// "test_dequantizelinear_int16",
+// "test_dequantizelinear_int4",
+// "test_dequantizelinear_uint16",
+// "test_dequantizelinear_uint4",
 "test_dft_axis",
 "test_dropout_default_mask",  // Issue::cvtest::norm::wrong data type
 "test_dropout_default_mask_ratio",  // ---- same as above ---
-"test_dynamicquantizelinear",  // Issue:: Unkonwn error
-"test_dynamicquantizelinear_expanded",  // ---- same as above ---
-"test_dynamicquantizelinear_max_adjusted",  // ---- same as above ---
-"test_dynamicquantizelinear_max_adjusted_expanded",  // ---- same as above ---
-"test_dynamicquantizelinear_min_adjusted",  // ---- same as above ---
-"test_dynamicquantizelinear_min_adjusted_expanded",  // ---- same as above ---
+// "test_dynamicquantizelinear",  // Issue:: Unkonwn error
+// "test_dynamicquantizelinear_expanded",  // ---- same as above ---
+// "test_dynamicquantizelinear_max_adjusted",  // ---- same as above ---
+// "test_dynamicquantizelinear_max_adjusted_expanded",  // ---- same as above ---
+// "test_dynamicquantizelinear_min_adjusted",  // ---- same as above ---
+// "test_dynamicquantizelinear_min_adjusted_expanded",  // ---- same as above ---
 "test_einsum_inner_prod",  // Issue::Output shape does not match with reference
 "test_einsum_scalar",
 "test_equal_string",
@@ -379,26 +379,26 @@
 "test_optional_has_element_tensor_input",
 "test_prelu_broadcast",  // Issue::Parser:Blob slope not found in const blobs in function 'getBlob' (weights are required as inputs)
 "test_prelu_example",  // ---- same as above ---
-"test_qlinearconv",  // Issue::Parser:  Blob x_scale not found in const blobs in function 'getBlob' (weights are required as inputs)
-"test_qlinearmatmul_2D",  // Issue:: Parser: Variable weights is not supported in function 'parseQMatMul'
-"test_qlinearmatmul_2D_int8_float16",
-"test_qlinearmatmul_2D_int8_float32",
-"test_qlinearmatmul_2D_uint8_float16",
-"test_qlinearmatmul_2D_uint8_float32",
-"test_qlinearmatmul_3D",  // ---- same as above ---
-"test_qlinearmatmul_3D_int8_float16",
-"test_qlinearmatmul_3D_int8_float32",
-"test_qlinearmatmul_3D_uint8_float16",
-"test_qlinearmatmul_3D_uint8_float32",
-"test_quantizelinear_blocked_asymmetric",
-"test_quantizelinear_blocked_symmetric",
-"test_quantizelinear_e4m3fn",
-"test_quantizelinear_e5m2",
-"test_quantizelinear_float4e2m1",
-"test_quantizelinear_int16",
-"test_quantizelinear_int4",
-"test_quantizelinear_uint16",
-"test_quantizelinear_uint4",
+// "test_qlinearconv",  // Issue::Parser:  Blob x_scale not found in const blobs in function 'getBlob' (weights are required as inputs)
+// "test_qlinearmatmul_2D",  // Issue:: Parser: Variable weights is not supported in function 'parseQMatMul'
+// "test_qlinearmatmul_2D_int8_float16",
+// "test_qlinearmatmul_2D_int8_float32",
+// "test_qlinearmatmul_2D_uint8_float16",
+// "test_qlinearmatmul_2D_uint8_float32",
+// "test_qlinearmatmul_3D",  // ---- same as above ---
+// "test_qlinearmatmul_3D_int8_float16",
+// "test_qlinearmatmul_3D_int8_float32",
+// "test_qlinearmatmul_3D_uint8_float16",
+// "test_qlinearmatmul_3D_uint8_float32",
+// "test_quantizelinear_blocked_asymmetric",
+// "test_quantizelinear_blocked_symmetric",
+// "test_quantizelinear_e4m3fn",
+// "test_quantizelinear_e5m2",
+// "test_quantizelinear_float4e2m1",
+// "test_quantizelinear_int16",
+// "test_quantizelinear_int4",
+// "test_quantizelinear_uint16",
+// "test_quantizelinear_uint4",
 "test_range_float_type_positive_delta_expanded",  // ---- Unsupported operations: Loop ---
 "test_range_int32_type_negative_delta_expanded",  // ---- same as above ---
 "test_reduce_l1_empty_set",

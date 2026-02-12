@@ -5,6 +5,7 @@
 #include "test_precomp.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include "npy_blob.hpp"
+// TODO(new-dnn-engine): Replace legacy model format test assets (Caffe/Darknet/TF/OpenVINO) with ONNX or TFLite equivalents.
 namespace opencv_test { namespace {
 
 template<typename TString>

@@ -5,6 +5,7 @@ import argparse
 import tensorflow as tf
 from tensorflow.python.platform import gfile
 from imagenet_cls_test_alexnet import MeanValueFetch, DnnCaffeModel, Framework, ClsAccEvaluation
+# TODO(new-dnn-engine): Replace TensorFlow/Caffe-based classification checks with ONNX or TFLite equivalents.
 try:
     import cv2 as cv
 except ImportError:

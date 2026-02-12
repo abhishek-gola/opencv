@@ -11,6 +11,7 @@ Test for Tensorflow models loading
 
 #include "test_precomp.hpp"
 #include "npy_blob.hpp"
+// TODO(new-dnn-engine): Replace TensorFlow .pb/.pbtxt test assets with ONNX or TFLite equivalents.
 
 #include <opencv2/dnn/layer.details.hpp>  // CV_DNN_REGISTER_LAYER_CLASS
 #include <opencv2/dnn/utils/debug_utils.hpp>

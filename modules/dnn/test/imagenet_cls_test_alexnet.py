@@ -6,6 +6,7 @@ import os
 import argparse
 import time
 
+# TODO(new-dnn-engine): Replace Caffe-based classification checks with ONNX or TFLite equivalents.
 try:
     import caffe
 except ImportError:
