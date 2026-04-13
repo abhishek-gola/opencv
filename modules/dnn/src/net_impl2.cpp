@@ -548,6 +548,11 @@ void Net::Impl::prepareForInference()
         fuseQDQ();
         constFold();
         constArgs();
+        // Run basic fusion twice: first pass handles structural fusions
+        // (e.g. split-conv-concat, double transpose) that should happen before
+        // block layout transformation. Second pass handles the remaining
+        // fusions (conv+bn+activation) that run after block layout.
+        fuseBasic();
         useBlockLayout();
         fuseBasic();
         assignBuffers();

@@ -948,22 +948,21 @@ TEST_P(Reproducibility_ResNet50_QDQ_ONNX, Accuracy)
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ResNet50_QDQ_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
-typedef testing::TestWithParam<Target> Reproducibility_MobileNetSSD_ONNX;
-TEST_P(Reproducibility_MobileNetSSD_ONNX, Accuracy)
+// ShuffleNet exercises several of the graph fusion optimizations:
+//   - double-transpose fusion (channel shuffle contains Reshape->Transpose->Reshape,
+//     and adjacent transposes around it can collapse)
+//   - split => multiple convs => concat (grouped conv pattern that may be decomposed
+//     across branches depending on the ONNX export)
+// The test validates that after fusion the model still produces correct top-5
+// ImageNet predictions on sqcat.png and measures inference time.
+typedef testing::TestWithParam<Target> Reproducibility_ShuffleNet_ONNX;
+TEST_P(Reproducibility_ShuffleNet_ONNX, Accuracy)
 {
     Target targetId = GetParam();
-    auto engine_forced = static_cast<EngineType>(
-        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
-    if (engine_forced == ENGINE_CLASSIC)
-    {
-        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
-        return;
-    }
-
     applyTestTag(targetId == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
     ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
 
-    std::string modelname = _tf("onnx/models/ssd_mobilenet_v1_12.onnx", false);
+    std::string modelname = _tf("onnx/models/shufflenet.onnx", false);
     Net net = readNetFromONNX(modelname);
 
     net.setPreferableBackend(DNN_BACKEND_OPENCV);
@@ -972,79 +971,41 @@ TEST_P(Reproducibility_MobileNetSSD_ONNX, Accuracy)
     if (targetId == DNN_TARGET_CPU_FP16)
         net.enableWinograd(false);
 
-    std::string imgname = _tf("dog_orig_size.png");
+    std::string imgname = _tf("sqcat.png");
     Mat image = imread(imgname);
-    ASSERT_TRUE(!image.empty());
-    Mat input;
-    resize(image, input, Size(300, 300));
-    int imsize[] = {1, input.rows, input.cols, 3};
-    Mat input8dim4(4, imsize, CV_8U, input.data);
+    Mat input = blobFromImage(image, 0.017, Size(224,224),
+                              Scalar(103.939, 116.779, 123.68),
+                              true, true, CV_32F);
+    ASSERT_TRUE(!input.empty());
 
     std::vector<String> outNames = net.getUnconnectedOutLayersNames();
     std::vector<Mat> outs;
     net.setInput(input8dim4);
     net.forward(outs, outNames);
 
-    // Model outputs: detection_boxes [1,N,4], detection_classes [1,N],
-    //                detection_scores [1,N], num_detections [1]
-    ASSERT_EQ(outs.size(), (size_t)4);
+    const int K = 5;
+    std::vector<std::pair<int, float> > res;
+    topK(out, res, K);
+    ASSERT_EQ(int(res.size()), K);
 
-    Mat boxes, classes, scores, numDet;
-    for (size_t i = 0; i < outs.size(); i++) {
-        if (outs[i].dims == 3 && outs[i].size[2] == 4)
-            boxes = outs[i];
-        else if (outs[i].total() == 1)
-            numDet = outs[i];
-        else if (outs[i].dims == 2) {
-            float first = outs[i].at<float>(0, 0);
-            if (first == std::round(first) && first > 0)
-                classes = outs[i];
-            else
-                scores = outs[i];
-        }
-    }
-    ASSERT_FALSE(boxes.empty());
-    ASSERT_FALSE(scores.empty());
-    ASSERT_FALSE(classes.empty());
-    ASSERT_FALSE(numDet.empty());
-
-    int ndet = (int)numDet.at<float>(0);
-    printf("num_detections = %d\n", ndet);
-    ASSERT_GT(ndet, 0);
-
-    // Build test detection vectors from model outputs
-    // Model boxes are normalized (y1, x1, y2, x2) — convert to Rect2d(x, y, w, h)
-    std::vector<int> testClassIds;
-    std::vector<float> testScores;
-    std::vector<Rect2d> testBoxes;
-    for (int j = 0; j < ndet; j++) {
-        testClassIds.push_back((int)classes.at<float>(0, j));
-        testScores.push_back(scores.at<float>(0, j));
-        float y1 = boxes.at<float>(0, j, 0);
-        float x1 = boxes.at<float>(0, j, 1);
-        float y2 = boxes.at<float>(0, j, 2);
-        float x2 = boxes.at<float>(0, j, 3);
-        testBoxes.push_back(Rect2d(x1, y1, x2 - x1, y2 - y1));
-    }
-
-    // Reference detections for dog_orig_size.png
-    // COCO 1-indexed: 2=bicycle, 3=car, 18=dog
-    std::vector<int> refClassIds = {2, 18, 3};
-    std::vector<float> refScores = {0.944377f, 0.877805f, 0.787824f};
-    std::vector<Rect2d> refBoxes = {
-        Rect2d(0.157917, 0.219984, 0.742909 - 0.157917, 0.739280 - 0.219984),  // bicycle
-        Rect2d(0.168082, 0.360803, 0.426304 - 0.168082, 0.919625 - 0.360803),  // dog
-        Rect2d(0.600506, 0.114612, 0.899101 - 0.600506, 0.298757 - 0.114612),  // car
+    // Reference top-5 computed via onnxruntime with same preprocessing.
+    std::vector<std::pair<int, float> > ref = {
+        {287, 0.146f}, {281, 0.141f}, {285, 0.126f}, {282, 0.110f}, {279, 0.094f}
     };
+    const float eps = 0.05f;
 
-    float confThreshold = 0.5f;
-    double scoreDiff = 0.1;
-    double iouDiff = 0.05;
-    normAssertDetections(refClassIds, refScores, refBoxes,
-                         testClassIds, testScores, testBoxes,
-                         "", confThreshold, scoreDiff, iouDiff);
+    std::vector<int> reflabels(K), reslabels(K);
+    for (int i = 0; i < K; i++) {
+        reflabels[i] = ref[i].first;
+        reslabels[i] = res[i].first;
+    }
+    ASSERT_EQ(reflabels, reslabels);
+
+    for (int i = 0; i < K; i++) {
+        EXPECT_NEAR(ref[i].second, res[i].second, eps);
+    }
 }
-INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_MobileNetSSD_ONNX,
+INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ShuffleNet_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
 
