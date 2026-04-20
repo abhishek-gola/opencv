@@ -294,6 +294,256 @@ struct ModelFusionBasic
                     }
                 }
 
+                // merge a single shared input => N parallel convs => concat
+                // into a single convolution with weights concatenated along the
+                // output-channel axis. This matches SqueezeNet-style "fire" modules
+                // (1x1 + 3x3 expand branches sharing the squeeze input). Different
+                // kernel sizes are supported by zero-padding smaller kernels so the
+                // centered weights produce the same output as the original conv.
+                {
+                    Concat2Layer* concat = dynamic_cast<Concat2Layer*>(layer_ptr);
+                    if (concat && ninputs >= 2 && concat->axis == 1) {
+                        // check that all inputs come from Conv2Layers with compatible shape
+                        bool all_convs = true;
+                        std::vector<int> conv_indices(ninputs);
+                        std::vector<Conv2Layer*> convs(ninputs);
+                        for (size_t k = 0; k < ninputs; k++) {
+                            int idx = producer_of.at(inputs[k].idx);
+                            Conv2Layer* c = getLayer<Conv2Layer>(newprog, idx);
+                            if (!c || c->inputs.size() < 2 || c->inputs.size() > 3 ||
+                                c->ngroups != 1 || c->auto_pad != AUTO_PAD_NONE ||
+                                usecounts.at(inputs[k].idx) != 1) {
+                                all_convs = false;
+                                break;
+                            }
+                            conv_indices[k] = idx;
+                            convs[k] = c;
+                        }
+                        // all convs must share the same input arg (no explicit Split layer
+                        // between the input and the convs — the Split-based variant is
+                        // handled by the fusion block above).
+                        bool shared_input = all_convs;
+                        if (shared_input) {
+                            int in_idx = convs[0]->inputs[0].idx;
+                            for (size_t k = 1; k < ninputs && shared_input; k++) {
+                                if (convs[k]->inputs[0].idx != in_idx)
+                                    shared_input = false;
+                            }
+                        }
+                        // strides/dilations must match; per-conv kernel sizes and pads may
+                        // differ as long as every conv uses centered "same" padding so the
+                        // output spatial sizes are identical.
+                        bool compatible_params = shared_input;
+                        if (compatible_params) {
+                            const Conv2Layer* c0 = convs[0];
+                            for (size_t k = 1; k < ninputs && compatible_params; k++) {
+                                const Conv2Layer* ck = convs[k];
+                                if (ck->strides != c0->strides ||
+                                    ck->dilations != c0->dilations)
+                                    compatible_params = false;
+                            }
+                        }
+                        // any fused op (BN / activation / residual) on the convs must match
+                        bool same_fused = compatible_params;
+                        for (size_t k = 1; k < ninputs && same_fused; k++) {
+                            if (!convs[0]->sameFusedOp(convs[k]))
+                                same_fused = false;
+                        }
+                        if (same_fused) {
+                            // all weights must be constants of compatible shape
+                            bool weights_ok = true;
+                            std::vector<Mat> weight_mats(ninputs);
+                            std::vector<Mat> bias_mats(ninputs);
+                            int ndims_w = -1;
+                            int C_in = -1;
+                            for (size_t k = 0; k < ninputs && weights_ok; k++) {
+                                Arg w_arg = convs[k]->inputs[1];
+                                if (!netimpl->isConstArg(w_arg)) { weights_ok = false; break; }
+                                weight_mats[k] = netimpl->argTensor(w_arg);
+                                if (weight_mats[k].empty() || weight_mats[k].dims < 3) { weights_ok = false; break; }
+                                if (k == 0) {
+                                    ndims_w = weight_mats[k].dims;
+                                    C_in = weight_mats[k].size[1];
+                                } else if (weight_mats[k].dims != ndims_w ||
+                                           weight_mats[k].size[1] != C_in ||
+                                           weight_mats[k].type() != weight_mats[0].type()) {
+                                    weights_ok = false;
+                                }
+                                if (weights_ok && convs[k]->inputs.size() > 2) {
+                                    Arg b_arg = convs[k]->inputs[2];
+                                    if (!netimpl->isConstArg(b_arg)) { weights_ok = false; break; }
+                                    bias_mats[k] = netimpl->argTensor(b_arg);
+                                }
+                            }
+                            if (weights_ok && ndims_w >= 3) {
+                                int nspatialdims = ndims_w - 2;
+                                // per-dim max kernel size across all convs
+                                std::vector<int> max_k(nspatialdims, 0);
+                                for (int d = 0; d < nspatialdims; d++) {
+                                    for (size_t k = 0; k < ninputs; k++)
+                                        max_k[d] = std::max(max_k[d], weight_mats[k].size[d+2]);
+                                }
+                                // require odd kernel sizes in each spatial dim so a smaller
+                                // kernel can be centered inside the max kernel when zero-padded
+                                bool odd_kernel = true;
+                                for (int d = 0; d < nspatialdims && odd_kernel; d++) {
+                                    for (size_t k = 0; k < ninputs && odd_kernel; k++) {
+                                        if ((weight_mats[k].size[d+2] & 1) == 0)
+                                            odd_kernel = false;
+                                    }
+                                }
+                                // require every conv to use "same" padding:
+                                //   pads[d] == pads[d+nspatialdims] == (k[d]-1)/2 * dilation[d]
+                                // This guarantees output_spatial = input_spatial / stride,
+                                // so all convs produce identical spatial output shapes.
+                                bool pads_ok = odd_kernel;
+                                const std::vector<int>& dils = convs[0]->dilations;
+                                for (size_t k = 0; k < ninputs && pads_ok; k++) {
+                                    const std::vector<int>& p = convs[k]->pads;
+                                    if (!p.empty() && (int)p.size() != nspatialdims*2) { pads_ok = false; break; }
+                                    for (int d = 0; d < nspatialdims && pads_ok; d++) {
+                                        int kd = weight_mats[k].size[d+2];
+                                        int dilation = dils.empty() ? 1 : dils[d];
+                                        int expected_pad = ((kd - 1) / 2) * dilation;
+                                        int pad_begin = p.empty() ? 0 : p[d];
+                                        int pad_end = p.empty() ? 0 : p[d + nspatialdims];
+                                        if (pad_begin != expected_pad || pad_end != expected_pad)
+                                            pads_ok = false;
+                                    }
+                                }
+                                // bias must be uniformly present or absent
+                                bool have_any_bias = false, have_all_bias = true;
+                                for (size_t k = 0; k < ninputs; k++) {
+                                    if (!bias_mats[k].empty()) have_any_bias = true;
+                                    else have_all_bias = false;
+                                }
+                                bool have_bias = have_any_bias && have_all_bias;
+                                if (pads_ok && (!have_any_bias || have_bias)) {
+                                    int total_outCn = 0;
+                                    for (size_t k = 0; k < ninputs; k++)
+                                        total_outCn += weight_mats[k].size[0];
+                                    std::vector<int> merged_wshape(ndims_w);
+                                    merged_wshape[0] = total_outCn;
+                                    merged_wshape[1] = C_in;
+                                    for (int d = 0; d < nspatialdims; d++)
+                                        merged_wshape[d + 2] = max_k[d];
+                                    Mat merged_weights = Mat::zeros(ndims_w, merged_wshape.data(), weight_mats[0].type());
+                                    int wtype = weight_mats[0].type();
+                                    size_t wesz = CV_ELEM_SIZE(wtype);
+
+                                    size_t dst_spatial_total = 1;
+                                    for (int d = 0; d < nspatialdims; d++)
+                                        dst_spatial_total *= max_k[d];
+                                    size_t dst_filter_elem = (size_t)C_in * dst_spatial_total;
+
+                                    int out_offset = 0;
+                                    for (size_t kk = 0; kk < ninputs; kk++) {
+                                        const Mat& w = weight_mats[kk];
+                                        int outCn_k = w.size[0];
+                                        std::vector<int> pad_lo(nspatialdims);
+                                        size_t src_spatial_total = 1;
+                                        for (int d = 0; d < nspatialdims; d++) {
+                                            pad_lo[d] = (max_k[d] - w.size[d+2]) / 2;
+                                            src_spatial_total *= w.size[d+2];
+                                        }
+                                        size_t src_filter_elem = (size_t)C_in * src_spatial_total;
+                                        int inner_src = w.size[ndims_w - 1];
+                                        int inner_dst = max_k[nspatialdims - 1];
+                                        int inner_pad = pad_lo[nspatialdims - 1];
+
+                                        for (int f = 0; f < outCn_k; f++) {
+                                            const uchar* src_filter = w.ptr() + (size_t)f * src_filter_elem * wesz;
+                                            uchar* dst_filter = merged_weights.ptr() +
+                                                (size_t)(out_offset + f) * dst_filter_elem * wesz;
+                                            for (int c = 0; c < C_in; c++) {
+                                                const uchar* src_ch = src_filter + (size_t)c * src_spatial_total * wesz;
+                                                uchar* dst_ch = dst_filter + (size_t)c * dst_spatial_total * wesz;
+                                                // iterate outer spatial dims [0..nspatialdims-2];
+                                                // the innermost dim (nspatialdims-1) is copied in one memcpy.
+                                                std::vector<int> sidx(nspatialdims > 1 ? nspatialdims - 1 : 0, 0);
+                                                for (;;) {
+                                                    size_t src_lin = 0;
+                                                    size_t dst_lin = 0;
+                                                    size_t src_stride = inner_src;
+                                                    size_t dst_stride = inner_dst;
+                                                    for (int d = nspatialdims - 2; d >= 0; d--) {
+                                                        src_lin += (size_t)sidx[d] * src_stride;
+                                                        dst_lin += (size_t)(pad_lo[d] + sidx[d]) * dst_stride;
+                                                        src_stride *= w.size[d + 2];
+                                                        dst_stride *= max_k[d];
+                                                    }
+                                                    dst_lin += inner_pad;
+                                                    memcpy(dst_ch + dst_lin * wesz,
+                                                           src_ch + src_lin * wesz,
+                                                           (size_t)inner_src * wesz);
+                                                    if (nspatialdims <= 1) break;
+                                                    int d = nspatialdims - 2;
+                                                    while (d >= 0) {
+                                                        sidx[d]++;
+                                                        if (sidx[d] < w.size[d + 2]) break;
+                                                        sidx[d] = 0;
+                                                        d--;
+                                                    }
+                                                    if (d < 0) break;
+                                                }
+                                            }
+                                        }
+                                        out_offset += outCn_k;
+                                    }
+
+                                    // concatenate biases along output channels
+                                    Mat merged_bias;
+                                    if (have_bias) {
+                                        int btype = bias_mats[0].type();
+                                        size_t besz = CV_ELEM_SIZE(btype);
+                                        merged_bias.create(1, &total_outCn, btype);
+                                        int boff = 0;
+                                        for (size_t k = 0; k < ninputs; k++) {
+                                            int bn_k = (int)bias_mats[k].total();
+                                            memcpy(merged_bias.data + (size_t)boff * besz,
+                                                   bias_mats[k].data, (size_t)bn_k * besz);
+                                            boff += bn_k;
+                                        }
+                                    }
+
+                                    Arg merged_w_arg = netimpl->newConstArg(
+                                        convs[0]->name + "_parallel_merged_weight", merged_weights);
+                                    std::vector<Arg> new_inputs = {convs[0]->inputs[0], merged_w_arg};
+                                    if (have_bias) {
+                                        Arg merged_b_arg = netimpl->newConstArg(
+                                            convs[0]->name + "_parallel_merged_bias", merged_bias);
+                                        new_inputs.push_back(merged_b_arg);
+                                    }
+
+                                    // update the first conv to be the merged conv; update its
+                                    // pads to "same" padding for the (possibly larger) merged kernel
+                                    Conv2Layer* merged_conv = convs[0];
+                                    std::vector<int> new_pads(nspatialdims * 2);
+                                    for (int d = 0; d < nspatialdims; d++) {
+                                        int dilation = dils.empty() ? 1 : dils[d];
+                                        int p = ((max_k[d] - 1) / 2) * dilation;
+                                        new_pads[d] = p;
+                                        new_pads[d + nspatialdims] = p;
+                                    }
+                                    merged_conv->pads = new_pads;
+                                    fused_layer_idx = conv_indices[0];
+                                    fused_inputs = new_inputs;
+
+                                    for (size_t k = 0; k < ninputs; k++)
+                                        removed_args.push_back(inputs[k]); // original conv outputs (consumed by concat)
+                                    for (size_t k = 1; k < ninputs; k++)
+                                        newprog[conv_indices[k]] = Ptr<Layer>(); // drop merged-away convs
+
+                                    size_t new_nargs = netimpl->args.size();
+                                    usecounts.resize(new_nargs, 0);
+                                    producer_of.resize(new_nargs, -1);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // merge convolution and activation
                 if (activ && ninputs == 1 &&
                     usecounts.at(inputs[0].idx) == 1) {
@@ -316,6 +566,10 @@ struct ModelFusionBasic
                 modified = true;
                 Layer* fused_layer = newprog[fused_layer_idx];
                 fused_layer->outputs = outputs;
+                // Patterns that need to rewrite the fused node's inputs populate
+                // fused_inputs; leaving it empty keeps the original inputs.
+                if (!fused_inputs.empty())
+                    fused_layer->inputs = fused_inputs;
                 for (Arg new_out: outputs)
                     producer_of[new_out.idx] = fused_layer_idx;
                 for (Arg old_out: removed_args) {

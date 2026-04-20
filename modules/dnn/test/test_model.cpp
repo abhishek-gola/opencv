@@ -906,6 +906,72 @@ TEST_P(Reproducibility_ResNet50_ONNX, Accuracy)
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ResNet50_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
+typedef testing::TestWithParam<Target> Reproducibility_SqueezeNet_ONNX;
+TEST_P(Reproducibility_SqueezeNet_ONNX, Accuracy)
+{
+    Target targetId = GetParam();
+    applyTestTag(targetId == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("onnx/models/squeezenet.onnx", false);
+    Net net = readNetFromONNX(modelname);
+
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(targetId);
+
+    if (targetId == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+
+    std::string imgname = _tf("sqcat.png");
+    Mat image = imread(imgname);
+    Mat input = blobFromImage(image, 1.0f, Size(224, 224),
+                              Scalar(), false, true, CV_32F);
+    ASSERT_TRUE(!input.empty());
+
+    Mat out;
+    double min_t = 0;
+    const int niters =
+#ifdef _DEBUG
+        1;
+#else
+        30;
+#endif
+
+    for (int i = 0; i < niters; i++) {
+        double t = (double)getTickCount();
+        net.setInput(input);
+        out = net.forward();
+        t = (double)getTickCount() - t;
+        min_t = i == 0 ? t : std::min(min_t, t);
+    }
+    printf("run time = %.2fms\n", min_t*1000./getTickFrequency());
+
+    // SqueezeNet ONNX output is (1, 1000, 1, 1) — flatten to (1, 1000) for topK.
+    Mat probs(1, (int)out.total(), CV_32F, out.data);
+
+    std::vector<std::pair<int, float> > ref = {{281, 0.7895}, {282, 0.1430}, {285, 0.0576}, {287, 0.0038}, {284, 0.0017}};
+    std::vector<std::pair<int, float> > res;
+    const int K = 5;
+
+    topK(probs, res, K);
+    const float eps = 0.02f;
+
+    ASSERT_EQ(int(res.size()), K);
+
+    std::vector<int> reflabels(K), reslabels(K);
+    for (int i = 0; i < K; i++) {
+        reflabels[i] = ref[i].first;
+        reslabels[i] = res[i].first;
+    }
+    ASSERT_EQ(reflabels, reslabels);
+
+    for (int i = 0; i < K; i++) {
+        EXPECT_NEAR(ref[i].second, res[i].second, eps);
+    }
+}
+INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_SqueezeNet_ONNX,
+                        testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
+
 typedef testing::TestWithParam<Target> Reproducibility_ResNet50_QDQ_ONNX;
 TEST_P(Reproducibility_ResNet50_QDQ_ONNX, Accuracy)
 {

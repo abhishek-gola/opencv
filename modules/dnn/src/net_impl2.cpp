@@ -547,11 +547,14 @@ void Net::Impl::prepareForInference()
     if (!prepared) {
         fuseQDQ();
         constFold();
+        // Structural fusions that need to inspect/concatenate constant weight args
+        // (split-conv-concat, input-convs-concat) must run BEFORE constArgs() — once
+        // constArgs() moves the weight/bias tensors into each Conv2Layer, they are no
+        // longer reachable as graph args.
+        fuseBasic();
         constArgs();
-        // Run basic fusion twice: first pass handles structural fusions
-        // (e.g. split-conv-concat, double transpose) that should happen before
-        // block layout transformation. Second pass handles the remaining
-        // fusions (conv+bn+activation) that run after block layout.
+        // Second pass: now that weights are folded into the conv layers, fuse
+        // batch-norm and activations into their producing convs.
         fuseBasic();
         useBlockLayout();
         fuseBasic();

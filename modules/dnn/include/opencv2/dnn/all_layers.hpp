@@ -375,6 +375,10 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool fuseBatchNorm(const Ptr<Layer>& bn) = 0;
         virtual bool fuseActivation(const Ptr<Layer>& activ) = 0;
         virtual bool fuseAddResidual(Arg residual) = 0;
+        // Compares the fused-op state (batch norm, activation, residual) of two Conv2Layer
+        // instances. Used by graph-level fusions that merge several parallel convolutions
+        // into one: the merged op inherits this state, so all merged convs must match.
+        virtual bool sameFusedOp(const Conv2Layer* other) const = 0;
 
         std::vector<int> strides, dilations, pads;
         int ngroups;
