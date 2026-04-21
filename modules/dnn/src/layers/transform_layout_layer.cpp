@@ -256,11 +256,19 @@ void transformLayout(const Mat& inp, Mat& out,
         planesize *= (size_t)inpshape[i];
     }
 
+    // Choose nblocks so the parallel_for has roughly nthreads*4 chunks of work,
+    // bounded below by a minimum chunk size so we don't pay scheduler overhead
+    // on trivially-small layouts. The previous fixed 128K-element threshold
+    // produced only 3 chunks for the typical 1x3x224x224 input convert, leaving
+    // nearly all threads idle on multi-core CPUs.
     size_t total = N*C1*planesize*C0;
-    constexpr size_t min_elems_per_chunk = 1 << 17;
-    int nblocks = int((total + min_elems_per_chunk/2) / min_elems_per_chunk);
-    nblocks = clamp(nblocks, 1, 128);
-    nblocks = (nblocks + N*C1 - 1)/(N*C1);
+    size_t total_bytes = total * esz;
+    constexpr size_t min_chunk_bytes = 16 * 1024;
+    int nthreads = cv::getNumThreads();
+    size_t target_tasks = std::max((size_t)1, (size_t)nthreads * 4);
+    size_t max_tasks_by_chunk = std::max((size_t)1, total_bytes / min_chunk_bytes);
+    int total_tasks = (int)std::min(target_tasks, max_tasks_by_chunk);
+    int nblocks = std::max(1, (total_tasks + N*C1 - 1) / (N*C1));
 
     parallel_for_(Range(0, N*C1*nblocks), [&](const Range& range)
     {

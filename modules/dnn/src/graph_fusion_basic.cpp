@@ -4,6 +4,8 @@
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -21,12 +23,95 @@ struct ModelFusionBasic
     void fuse()
     {
         int i, niter = 10;
+        eliminateBlankLayers(netimpl->mainGraph);
         netimpl->useCounts(usecounts);
         for (i = 0; i < niter; i++) {
             bool fused_any = fuseGraph(netimpl->mainGraph);
             if (!fused_any)
                 break;
         }
+    }
+
+    // Drop BlankLayer (Dropout/Identity) nodes: they are no-op passthroughs at
+    // inference, so we rewrite downstream consumers to read the layer's input
+    // directly. Runs before the normal fusion loop so subsequent passes see a
+    // smaller graph.
+    bool eliminateBlankLayers(Ptr<Graph>& graph)
+    {
+        if (!graph) return false;
+        const std::vector<Ptr<Layer> >& prog = graph->prog();
+        size_t nops = prog.size();
+        std::vector<Ptr<Layer> > newprog;
+        newprog.reserve(nops);
+        bool modified = false;
+
+        // Args that are graph outputs must not be renamed.
+        const std::vector<Arg>& gouts = graph->outputs();
+        std::unordered_set<int> output_set;
+        for (const Arg& a : gouts) output_set.insert(a.idx);
+
+        // remap[out.idx] = inp — replace uses of out with inp everywhere downstream.
+        std::unordered_map<int, Arg> remap;
+
+        for (size_t i = 0; i < nops; i++) {
+            Ptr<Layer> layer = prog[i];
+            if (!layer) continue;
+
+            // Apply any accumulated arg remapping to this layer's inputs.
+            for (size_t j = 0; j < layer->inputs.size(); j++) {
+                int idx = layer->inputs[j].idx;
+                auto it = remap.find(idx);
+                while (it != remap.end()) {
+                    layer->inputs[j] = it->second;
+                    modified = true;
+                    idx = it->second.idx;
+                    it = remap.find(idx);
+                }
+            }
+
+            // Recurse into subgraphs.
+            std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
+            if (subgraphs) {
+                for (Ptr<Graph>& g : *subgraphs) {
+                    if (eliminateBlankLayers(g))
+                        modified = true;
+                }
+            }
+
+            BlankLayer* blank = dynamic_cast<BlankLayer*>(layer.get());
+            // ONNX Dropout emits (output, optional_mask). BlankLayer's forward copies
+            // input to every output, so we can drop the layer as long as only the
+            // first output is used (mask is uncommon in inference) and no output is
+            // a graph output.
+            if (blank && layer->inputs.size() == 1 && layer->outputs.size() >= 1) {
+                bool any_is_graph_output = false;
+                for (const Arg& o : layer->outputs) {
+                    if (output_set.find(o.idx) != output_set.end()) { any_is_graph_output = true; break; }
+                }
+                // Allow the (output, mask) pattern when the mask has no downstream users.
+                bool extra_outs_unused = true;
+                for (size_t k = 1; k < layer->outputs.size() && extra_outs_unused; k++) {
+                    // Count uses of this output across the full prog.
+                    int uses = 0;
+                    for (size_t m = 0; m < nops; m++) {
+                        if (!prog[m] || m == i) continue;
+                        for (const Arg& in : prog[m]->inputs)
+                            if (in.idx == layer->outputs[k].idx) uses++;
+                    }
+                    if (uses != 0) extra_outs_unused = false;
+                }
+                if (!any_is_graph_output && extra_outs_unused) {
+                    remap[layer->outputs[0].idx] = layer->inputs[0];
+                    modified = true;
+                    continue;
+                }
+            }
+
+            newprog.push_back(layer);
+        }
+
+        if (modified) graph->setProg(newprog);
+        return modified;
     }
 
     template<typename _LayerType> _LayerType*

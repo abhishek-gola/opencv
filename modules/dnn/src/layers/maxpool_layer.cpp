@@ -21,13 +21,26 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
     CV_Assert(cs.outshape.layout == DATA_LAYOUT_BLOCK);
     CV_Assert(cs.inpshape.dims == cs.outshape.dims);
 
-    parallel_for_(Range(0, NC1), [&](const Range& r) {
+    // Sub-divide each (n, c1) slice along the H axis when NC1 alone doesn't
+    // produce enough tasks to keep the thread pool busy. The original code
+    // ran parallel_for(0, NC1) which left most cores idle when channels were
+    // small (e.g. NC1 = 8 for the first pool's 64-channel input).
+    int sdims = cs.nspatialdims;
+    int H_out = sdims > 1 ? cs.outshape[sdims] : 1;
+    int nthreads = cv::getNumThreads();
+    int nHChunks = 1;
+    if (NC1 < nthreads * 4 && H_out > 1) {
+        nHChunks = std::min(H_out, (nthreads * 4 + NC1 - 1) / std::max(NC1, 1));
+        nHChunks = std::max(1, nHChunks);
+    }
+    int totalTasks = NC1 * nHChunks;
+
+    parallel_for_(Range(0, totalTasks), [&](const Range& r) {
         constexpr int MAX_POOL_DIMS = ConvState::MAX_CONV_DIMS;
 
         CV_Assert(cs.nspatialdims <= MAX_POOL_DIMS && MAX_POOL_DIMS == 3);
 
         int sdims = cs.nspatialdims;
-        int nc0 = r.start, nc1 = r.end;
         int C0 = cs.inpshape.back();
         int Di = sdims > 2 ? cs.inpshape[sdims - 1] : 1;
         int Hi = sdims > 1 ? cs.inpshape[sdims] : 1;
@@ -46,8 +59,6 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
         const int* zyxtab = cs.coordtab.data();
         const int* ofstab = cs.ofstab.data();
 
-        const float* inp = (const float*)inp_ + nc0*iplanesize;
-        float* out = (float*)out_ + nc0*planesize;
         const float INITVAL = -FLT_MAX;
 
     #if CV_SIMD || CV_SIMD_SCALABLE
@@ -56,10 +67,18 @@ static void maxPool32f(const void* inp_, void* out_, const ConvState& cs)
         CV_Assert(C0 == nlanes || C0 == nlanes*2 || C0 % (nlanes*4) == 0);
     #endif
 
-        for (int nc = nc0; nc < nc1; nc++, inp += iplanesize) {
+        for (int t = r.start; t < r.end; t++) {
+            int nc = t / nHChunks;
+            int hc = t % nHChunks;
+            int y_start = (hc * H) / nHChunks;
+            int y_end = ((hc + 1) * H) / nHChunks;
+            if (y_start >= y_end) continue;
+            const float* inp = (const float*)inp_ + nc*iplanesize;
+            float* out_nc = (float*)out_ + nc*planesize;
             for (int z0 = 0; z0 < D; z0++) {
                 int zi_ = z0*SZ - padZ0;
-                for (int y0 = 0; y0 < H; y0++, out += W*C0) {
+                float* out = out_nc + (z0*H + y_start)*W*C0;
+                for (int y0 = y_start; y0 < y_end; y0++, out += W*C0) {
                     int x0 = 0;
                     int x1 = z0 >= inner_z0 && z0 < inner_z1 &&
                         y0 >= inner_y0 && y0 < inner_y1 ? inner_x0 : W;
