@@ -10,9 +10,8 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-// Orchestrates the graph-level fusion pass. The actual pattern matchers live in
-// graph_fusion_patterns.{hpp,cpp}; this file only drives them and handles the
-// pre-pass that strips no-op BlankLayer (Dropout/Identity) nodes.
+// Drives the fusion pass: strips BlankLayer no-ops, then iterates the pattern
+// matchers in graph_fusion_patterns until the graph hits a fixed point.
 struct ModelFusionBasic
 {
     explicit ModelFusionBasic(Net::Impl* netimpl_) : netimpl(netimpl_) {}
@@ -27,21 +26,17 @@ struct ModelFusionBasic
         }
     }
 
-    // Drop BlankLayer (Dropout/Identity) nodes: they are no-op passthroughs at
-    // inference, so we rewrite downstream consumers to read the layer's input
-    // directly. Runs before the normal fusion loop so subsequent passes see a
-    // smaller graph.
+    // Drops Dropout/Identity passthroughs and rewires downstream consumers to read
+    // the layer's input directly.
     bool eliminateBlankLayers(Ptr<Graph>& graph)
     {
         if (!graph) return false;
         const std::vector<Ptr<Layer> >& prog = graph->prog();
         const size_t nops = prog.size();
 
-        // Args that are graph outputs must not be renamed away.
         std::unordered_set<int> output_set;
         for (const Arg& a : graph->outputs()) output_set.insert(a.idx);
 
-        // remap[out] = inp — rewrite downstream reads of `out` to read `inp`.
         std::unordered_map<int, Arg> remap;
         std::vector<Ptr<Layer> > newprog;
         newprog.reserve(nops);
@@ -51,7 +46,7 @@ struct ModelFusionBasic
             Ptr<Layer> layer = prog[i];
             if (!layer) continue;
 
-            // Apply accumulated remapping to this layer's inputs (chase chains).
+            // Chase remap chains so an input points to the ultimate survivor.
             for (Arg& in : layer->inputs) {
                 auto it = remap.find(in.idx);
                 while (it != remap.end()) {
@@ -66,9 +61,6 @@ struct ModelFusionBasic
                     if (eliminateBlankLayers(g)) modified = true;
             }
 
-            // BlankLayer (Dropout/Identity) can be dropped when it has a single
-            // input, no output is a graph output, and any extra outputs (e.g.
-            // ONNX Dropout's optional mask) have no downstream uses.
             BlankLayer* blank = dynamic_cast<BlankLayer*>(layer.get());
             if (blank && layer->inputs.size() == 1 && !layer->outputs.empty() &&
                 canDropBlank(layer, prog, i, output_set))
@@ -84,9 +76,7 @@ struct ModelFusionBasic
         return modified;
     }
 
-    // Walks the program once, trying each fusion pattern against the current
-    // layer. Returns true if any fusion was applied — the outer `fuse()` loop
-    // re-runs until the graph reaches a fixed point.
+    // One fusion sweep over `graph`; returns true if any pattern matched.
     bool fuseGraph(Ptr<Graph>& graph)
     {
         const std::vector<Ptr<Layer> >& prog = graph->prog();
@@ -109,7 +99,7 @@ struct ModelFusionBasic
             const std::vector<Arg>& inputs = layer->inputs;
             const std::vector<Arg>& outputs = layer->outputs;
 
-            // Try each pattern in priority order; first match wins.
+            // First match wins; each helper short-circuits on mismatch.
             FuseResult r;
             bool fused =
                 tryFuseTransposeTranspose(ctx, layer, inputs, r) ||
@@ -151,9 +141,8 @@ struct ModelFusionBasic
         return modified;
     }
 
-    // Can we drop a BlankLayer at index `self` in `prog`?  Requires that no
-    // output is a graph output and that any extra outputs (e.g. Dropout's mask)
-    // are unused by downstream layers.
+    // Safe to drop when no output is a graph output and extra outputs (e.g.
+    // Dropout's optional mask) are unused downstream.
     bool canDropBlank(const Ptr<Layer>& layer, const std::vector<Ptr<Layer> >& prog,
                       size_t self, const std::unordered_set<int>& output_set) const
     {

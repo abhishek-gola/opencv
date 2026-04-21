@@ -10,17 +10,16 @@
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-// Result slot populated by a successful fusion helper.
+// Outcome of a successful fusion; untouched when the helper returns false.
 struct FuseResult
 {
-    int layer_idx = -1;             // index of the surviving layer in `newprog`
-    std::vector<Arg> new_inputs;    // if non-empty, replaces the surviving layer's inputs
-    std::vector<Arg> removed_args;  // args whose use-count must be cleared
+    int layer_idx = -1;
+    std::vector<Arg> new_inputs;
+    std::vector<Arg> removed_args;
 };
 
-// Bundles the per-graph state threaded through every fusion helper.
-// `usecounts` and `producer_of` may be mutated by helpers that create new
-// graph args (e.g. merged weight/bias tensors for multi-branch conv fusions).
+// Per-graph state threaded through every fusion helper. Helpers that add new
+// graph args (merged weights/biases) mutate `usecounts` and `producer_of`.
 struct FusionContext
 {
     Net::Impl* netimpl;
@@ -29,35 +28,29 @@ struct FusionContext
     std::vector<int>& usecounts;
 };
 
-// Each helper returns true iff its pattern matched the current layer. In that
-// case `r` is populated with the fusion outcome; otherwise `r` is untouched.
-
-// Transpose(perm1) -> Transpose(perm2)  =>  Transpose(perm1 ∘ perm2)
-// (or drops both if the composed permutation is the identity).
+// Transpose(a) -> Transpose(b) => single Transpose(a∘b), or drop both if identity.
 bool tryFuseTransposeTranspose(const FusionContext& ctx, const Ptr<Layer>& layer,
                                const std::vector<Arg>& inputs, FuseResult& r);
 
-// Fold BatchNorm into the preceding Conv. Requires BN's scale/bias/mean/var
-// to already be frozen by constArgs() so that BN->inputs has shrunk to size 1.
+// Conv -> BatchNorm => Conv. Requires BN's scale/bias/mean/var to have been
+// frozen by constArgs() (so BN->inputs.size() == 1).
 bool tryFuseConvBatchNorm(const FusionContext& ctx, const Ptr<Layer>& layer,
                           const std::vector<Arg>& inputs, FuseResult& r);
 
-// Fold a residual Add/Sum into the Conv that produces one of its operands
-// (the later-scheduled operand, so the other is already materialized).
+// Conv + residual-Add/Sum => Conv; merges into the later-scheduled operand.
 bool tryFuseConvAddResidual(const FusionContext& ctx, const Ptr<Layer>& layer,
                             const std::vector<Arg>& inputs, FuseResult& r);
 
-// Split -> {N identical Convs} -> Concat  =>  a single grouped Conv (ngroups=N).
+// Split -> N identical Convs -> Concat => single grouped Conv (ngroups=N).
 bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
                             const std::vector<Arg>& inputs, FuseResult& r);
 
-// {N Convs sharing the same input} -> Concat  =>  a single wider Conv.
-// Matches SqueezeNet-style "fire" modules; supports per-branch kernel sizes
-// by zero-padding smaller kernels to the max so centered weights are preserved.
+// N Convs sharing the same input -> Concat => single wider Conv.
+// Per-branch kernels may differ; smaller kernels are zero-padded to the max.
 bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
                                const std::vector<Arg>& inputs, FuseResult& r);
 
-// Fuse an activation into the preceding Conv.
+// Conv -> Activation => Conv with activation fused into its epilogue.
 bool tryFuseConvActivation(const FusionContext& ctx, const Ptr<Layer>& layer,
                            const std::vector<Arg>& inputs, FuseResult& r);
 

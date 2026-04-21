@@ -16,9 +16,7 @@ _LayerType* getLayer(std::vector<Ptr<Layer> >& newprog, int op_idx)
     return op_idx >= 0 ? dynamic_cast<_LayerType*>(newprog.at(op_idx).get()) : nullptr;
 }
 
-// Collect the Conv producers of every Concat input. Each conv must be the
-// sole consumer of its output (usecount == 1) and satisfy `per_conv_ok`.
-// Fails fast on the first mismatch.
+// Every concat input must be produced by a Conv that has usecount==1 and passes `per_conv_ok`.
 template<typename Predicate>
 bool collectConcatConvs(const FusionContext& ctx, const std::vector<Arg>& inputs,
                         Predicate&& per_conv_ok,
@@ -39,8 +37,7 @@ bool collectConcatConvs(const FusionContext& ctx, const std::vector<Arg>& inputs
     return true;
 }
 
-// Pull constant weight and (optional) bias tensors from each conv. All
-// branches must have identical channel axis (C_in) and matching dims/type.
+// All branches must share dims/type/C_in; weights and (optional) biases must be const.
 bool gatherConvWeights(const FusionContext& ctx, const std::vector<Conv2Layer*>& convs,
                        std::vector<Mat>& weights, std::vector<Mat>& biases)
 {
@@ -69,10 +66,8 @@ bool gatherConvWeights(const FusionContext& ctx, const std::vector<Conv2Layer*>&
     return true;
 }
 
-// Copy a convolution filter bank `src` (shape [oc, C_in, k_spatial...]) into
-// `dst` (shape [total_oc, C_in, max_k_spatial...]) starting at row
-// `dst_filter_offset`, centering each source filter inside the (possibly
-// larger) max-kernel footprint. `dst` must be pre-zeroed.
+// Zero-pads `src` filters into `dst` starting at row `dst_filter_offset`, centering each
+// source kernel inside the larger max-kernel footprint. `dst` must be pre-zeroed.
 void embedFilterBank(const Mat& src, Mat& dst, int dst_filter_offset,
                      const std::vector<int>& max_k_spatial)
 {
@@ -94,8 +89,7 @@ void embedFilterBank(const Mat& src, Mat& dst, int dst_filter_offset,
     const size_t dst_filter_bytes = (size_t)C_in * dst_spatial * esz;
     const size_t inner_bytes = (size_t)src.size[src.dims - 1] * esz;
 
-    // Innermost spatial dim is copied by memcpy; outer spatial dims
-    // [0..nspatial-2] are iterated via a multi-index counter `sidx`.
+    // Innermost dim is a single memcpy; outer spatial dims walk via a multi-index counter.
     const int outer = std::max(nspatial - 1, 0);
     std::vector<int> sidx(outer, 0);
 
@@ -129,7 +123,6 @@ void embedFilterBank(const Mat& src, Mat& dst, int dst_filter_offset,
     }
 }
 
-// Called after a multi-branch fusion grows the arg table.
 void resizeIndexedState(FusionContext& ctx)
 {
     const size_t n = ctx.netimpl->args.size();
@@ -164,7 +157,7 @@ bool tryFuseTransposeTranspose(const FusionContext& ctx, const Ptr<Layer>& layer
         if (composed[d] != (int)d) is_identity = false;
 
     r.layer_idx = prev_idx;
-    if (is_identity) r.new_inputs = prev->inputs;  // both transposes cancel
+    if (is_identity) r.new_inputs = prev->inputs;
     else             prev->perm = composed;
     r.removed_args.push_back(inputs[0]);
     return true;
@@ -198,7 +191,7 @@ bool tryFuseConvAddResidual(const FusionContext& ctx, const Ptr<Layer>& layer,
     const int op1 = ctx.producer_of.at(inputs[1].idx);
     if (op0 < 0 || op1 < 0) return false;
 
-    // Pick the later-scheduled op as the Conv target; the other operand is the residual.
+    // Fold into the later-scheduled operand so the residual is already materialized.
     const int conv_out_i = (op0 > op1) ? 0 : 1;
     const int conv_idx   = (op0 > op1) ? op0 : op1;
     const Arg residual   = inputs[1 - conv_out_i];
@@ -227,7 +220,6 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
             convs, conv_idx))
         return false;
 
-    // Stride/dilation/pads must match exactly across branches.
     const Conv2Layer* c0 = convs[0];
     for (size_t k = 1; k < N; k++) {
         if (convs[k]->strides   != c0->strides ||
@@ -236,7 +228,6 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
             return false;
     }
 
-    // All branches must read from the same Split2 producer.
     const int split_idx = ctx.producer_of.at(convs[0]->inputs[0].idx);
     auto* split_layer = getLayer<Split2Layer>(ctx.newprog, split_idx);
     if (!split_layer || split_layer->inputs.size() != 1) return false;
@@ -244,7 +235,7 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
         if (ctx.producer_of.at(convs[k]->inputs[0].idx) != split_idx) return false;
     }
 
-    // Gather weights/biases; require identical kernel shape across branches.
+    // Require identical kernel shape across branches so weights can be flat-concatenated.
     std::vector<Mat> weights(N), biases(N);
     int outCn_per_group = -1;
     for (size_t k = 0; k < N; k++) {
@@ -269,7 +260,6 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
     }
     if (outCn_per_group <= 0) return false;
 
-    // Concatenate weights along axis 0; identical trailing shape ⇒ flat memcpy.
     std::vector<int> mshape(weights[0].dims);
     mshape[0] = outCn_per_group * (int)N;
     for (int d = 1; d < weights[0].dims; d++) mshape[d] = weights[0].size[d];
@@ -278,7 +268,7 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
     for (size_t k = 0; k < N; k++)
         std::memcpy(merged_w.data + k * slab_bytes, weights[k].data, slab_bytes);
 
-    // Biases: require all-or-none; stack per-group along output channels.
+    // Biases are all-or-none; stack per-group along output channels.
     bool have_bias = !biases[0].empty();
     Mat merged_b;
     if (have_bias) {
@@ -292,7 +282,6 @@ bool tryFuseSplitConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
         }
     }
 
-    // Rewire: convs[0] becomes the grouped conv; split + siblings are dropped.
     Arg w_arg = ctx.netimpl->newConstArg(convs[0]->name + "_merged_weight", merged_w);
     r.new_inputs = { split_layer->inputs[0], w_arg };
     if (have_bias) {
@@ -327,14 +316,11 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
             convs, conv_idx))
         return false;
 
-    // All branches must share the same input data arg (the Split-based variant
-    // is handled by tryFuseSplitConvConcat).
+    // All branches must share the same input arg (Split-based variant handled elsewhere).
     const int in_idx = convs[0]->inputs[0].idx;
     for (size_t k = 1; k < N; k++)
         if (convs[k]->inputs[0].idx != in_idx) return false;
 
-    // Stride/dilation must match; kernels and pads may differ provided every
-    // branch uses centered "same" padding.
     const Conv2Layer* c0 = convs[0];
     for (size_t k = 1; k < N; k++) {
         if (convs[k]->strides   != c0->strides ||
@@ -352,13 +338,12 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
     const int nspatial = ndims_w - 2;
     const int C_in = weights[0].size[1];
 
-    // Per-dim max kernel; every branch must use odd kernel and centered
-    // "same" padding so output spatial shapes match across branches.
     std::vector<int> max_k(nspatial, 0);
     for (int d = 0; d < nspatial; d++)
         for (size_t k = 0; k < N; k++)
             max_k[d] = std::max(max_k[d], weights[k].size[d + 2]);
 
+    // Odd kernels + centered "same" padding keep output spatial shapes aligned across branches.
     const std::vector<int>& dils = convs[0]->dilations;
     for (size_t k = 0; k < N; k++) {
         for (int d = 0; d < nspatial; d++) {
@@ -374,7 +359,6 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
         }
     }
 
-    // Biases must be uniformly present or absent across branches.
     bool have_any = false, have_all = true;
     for (size_t k = 0; k < N; k++) {
         if (biases[k].empty()) have_all = false;
@@ -383,7 +367,6 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
     if (have_any && !have_all) return false;
     const bool have_bias = have_any;
 
-    // Build merged weight tensor [sum(oc_k), C_in, max_k_spatial...].
     int total_outCn = 0;
     for (size_t k = 0; k < N; k++) total_outCn += weights[k].size[0];
     std::vector<int> mshape(ndims_w);
@@ -398,7 +381,6 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
         out_offset += weights[k].size[0];
     }
 
-    // Merged bias is a flat concatenation along output channels.
     Mat merged_b;
     if (have_bias) {
         merged_b.create(1, &total_outCn, biases[0].type());
@@ -411,7 +393,6 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
         }
     }
 
-    // Rewire: convs[0] becomes the merged conv; siblings are dropped.
     Arg w_arg = ctx.netimpl->newConstArg(convs[0]->name + "_parallel_merged_weight", merged_w);
     r.new_inputs = { convs[0]->inputs[0], w_arg };
     if (have_bias) {
