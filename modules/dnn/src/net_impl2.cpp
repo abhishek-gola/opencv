@@ -547,17 +547,20 @@ void Net::Impl::prepareForInference()
     if (!prepared) {
         fuseQDQ();
         constFold();
-        // Structural fusions that need to inspect/concatenate constant weight args
-        // (split-conv-concat, input-convs-concat) must run BEFORE constArgs() — once
-        // constArgs() moves the weight/bias tensors into each Conv2Layer, they are no
-        // longer reachable as graph args.
+        // Structural fusions (split-conv-concat, input-convs-concat) read
+        // constant weight tensors via conv->inputs[1] and must run BEFORE
+        // constArgs() — it moves those tensors into each Conv2Layer and
+        // shrinks conv->inputs to 1, after which the weights are no longer
+        // reachable as graph args.
         fuseBasic();
         constArgs();
-        // Second pass: now that weights are folded into the conv layers, fuse
-        // batch-norm and activations into their producing convs.
+        // Second pass: constArgs() calls BatchNorm2Layer::freezeScaleBias(),
+        // which shrinks BN's inputs from 5 to 1. The Conv+BN fusion check
+        // requires bn->inputs.size() == 1, so Conv+BN (and the downstream
+        // Activation/AddResidual fusions that chain off it) can only happen
+        // after constArgs() has run.
         fuseBasic();
         useBlockLayout();
-        fuseBasic();
         assignBuffers();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
         prepared = true;

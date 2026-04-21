@@ -392,18 +392,10 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
 #endif
 
-// Compute number of spatial chunks for load balancing across threads.
-// We aim for roughly nthreads*4 tasks — enough to let the runtime hide any
-// per-thread imbalance but not so many that the per-task setup (coefficient
-// buffers, stack scratch, tiny memcpys) starts to dominate. When the output
-// channel dimension already provides that many blocks we leave spatial
-// chunking disabled; otherwise we subdivide the spatial plane just enough to
-// reach the target, capped so each chunk still does a meaningful amount of
-// work (>= min_per_chunk spatial positions).
 static int computeSpatChunks(int total_blocks, int planeblocks, int min_per_chunk = 16) {
     int nSpatChunks = 1;
     int nthreads = cv::getNumThreads();
-    int target_tasks = nthreads * 4;
+    int target_tasks = nthreads * 8;
     if (total_blocks < target_tasks && planeblocks > min_per_chunk) {
         nSpatChunks = (target_tasks + total_blocks - 1) / total_blocks;
         int max_chunks = planeblocks / min_per_chunk;
