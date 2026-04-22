@@ -18,7 +18,7 @@ struct ModelFusionBasic
 
     void fuse()
     {
-        eliminateBlankLayers(netimpl->mainGraph);
+        eliminateBlankLayers(netimpl->mainGraph);  // temporarily disabled
         netimpl->useCounts(usecounts);
         for (int i = 0; i < 10; i++) {
             if (!fuseGraph(netimpl->mainGraph))
@@ -76,7 +76,6 @@ struct ModelFusionBasic
         return modified;
     }
 
-    // One fusion sweep over `graph`; returns true if any pattern matched.
     bool fuseGraph(Ptr<Graph>& graph)
     {
         const std::vector<Ptr<Layer> >& prog = graph->prog();
@@ -99,7 +98,6 @@ struct ModelFusionBasic
             const std::vector<Arg>& inputs = layer->inputs;
             const std::vector<Arg>& outputs = layer->outputs;
 
-            // First match wins; each helper short-circuits on mismatch.
             FuseResult r;
             bool fused =
                 tryFuseTransposeTranspose(ctx, layer, inputs, r) ||

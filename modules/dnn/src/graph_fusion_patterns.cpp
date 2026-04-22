@@ -316,7 +316,6 @@ bool tryFuseParallelConvConcat(FusionContext& ctx, const Ptr<Layer>& layer,
             convs, conv_idx))
         return false;
 
-    // All branches must share the same input arg (Split-based variant handled elsewhere).
     const int in_idx = convs[0]->inputs[0].idx;
     for (size_t k = 1; k < N; k++)
         if (convs[k]->inputs[0].idx != in_idx) return false;
