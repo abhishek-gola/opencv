@@ -392,7 +392,6 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
 #endif
 
-// Compute number of spatial chunks for load balancing across threads.
 static int computeSpatChunks(int total_blocks, int planeblocks, int min_per_chunk = 16) {
     int nSpatChunks = 1;
     int nthreads = cv::getNumThreads();

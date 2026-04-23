@@ -3,173 +3,162 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "precomp.hpp"
-#include "net_impl.hpp"
+#include "graph_fusion_patterns.hpp"
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cv { namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
 
-using std::vector;
-using std::string;
-
-typedef std::pair<int, int> int_pair;
-typedef std::pair<int, Arg> int_arg_pair;
-
+// Drives the fusion pass: strips BlankLayer no-ops, then iterates the pattern
+// matchers in graph_fusion_patterns until the graph hits a fixed point.
 struct ModelFusionBasic
 {
-    ModelFusionBasic(Net::Impl* netimpl_) : netimpl(netimpl_) {}
+    explicit ModelFusionBasic(Net::Impl* netimpl_) : netimpl(netimpl_) {}
 
     void fuse()
     {
-        int i, niter = 10;
+        eliminateBlankLayers(netimpl->mainGraph);  // temporarily disabled
         netimpl->useCounts(usecounts);
-        for (i = 0; i < niter; i++) {
-            bool fused_any = fuseGraph(netimpl->mainGraph);
-            if (!fused_any)
+        for (int i = 0; i < 10; i++) {
+            if (!fuseGraph(netimpl->mainGraph))
                 break;
         }
     }
 
-    template<typename _LayerType> _LayerType*
-    getLayer(std::vector<Ptr<Layer> >& newprog, int op_idx) const
+    // Drops Dropout/Identity passthroughs and rewires downstream consumers to read
+    // the layer's input directly.
+    bool eliminateBlankLayers(Ptr<Graph>& graph)
     {
-        return op_idx >= 0 ? dynamic_cast<_LayerType*>(newprog.at(op_idx).get()) : 0;
+        if (!graph) return false;
+        const std::vector<Ptr<Layer> >& prog = graph->prog();
+        const size_t nops = prog.size();
+
+        std::unordered_set<int> output_set;
+        for (const Arg& a : graph->outputs()) output_set.insert(a.idx);
+
+        std::unordered_map<int, Arg> remap;
+        std::vector<Ptr<Layer> > newprog;
+        newprog.reserve(nops);
+        bool modified = false;
+
+        for (size_t i = 0; i < nops; i++) {
+            Ptr<Layer> layer = prog[i];
+            if (!layer) continue;
+
+            // Chase remap chains so an input points to the ultimate survivor.
+            for (Arg& in : layer->inputs) {
+                auto it = remap.find(in.idx);
+                while (it != remap.end()) {
+                    in = it->second;
+                    modified = true;
+                    it = remap.find(in.idx);
+                }
+            }
+
+            if (auto* subgraphs = layer->subgraphs()) {
+                for (Ptr<Graph>& g : *subgraphs)
+                    if (eliminateBlankLayers(g)) modified = true;
+            }
+
+            BlankLayer* blank = dynamic_cast<BlankLayer*>(layer.get());
+            if (blank && layer->inputs.size() == 1 && !layer->outputs.empty() &&
+                canDropBlank(layer, prog, i, output_set))
+            {
+                remap[layer->outputs[0].idx] = layer->inputs[0];
+                modified = true;
+                continue;
+            }
+            newprog.push_back(layer);
+        }
+
+        if (modified) graph->setProg(newprog);
+        return modified;
     }
 
     bool fuseGraph(Ptr<Graph>& graph)
     {
-        vector<Arg> removed_args;
-        bool modified = false;
         const std::vector<Ptr<Layer> >& prog = graph->prog();
-        size_t i, nargs = netimpl->args.size(), nops = prog.size();
-        std::vector<int> producer_of(nargs, -1);
+        const size_t nops = prog.size();
+        std::vector<int> producer_of(netimpl->args.size(), -1);
         std::vector<Ptr<Layer> > newprog;
-        std::vector<Arg> fused_inputs;
+        newprog.reserve(nops);
+        bool modified = false;
 
-        for (i = 0; i < nops; i++) {
+        FusionContext ctx{netimpl, newprog, producer_of, usecounts};
+
+        for (size_t i = 0; i < nops; i++) {
             const Ptr<Layer>& layer = prog[i];
-            Layer* layer_ptr = (Layer*)layer.get();
-            int fused_layer_idx = -1;
-            std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
-            if (subgraphs) {
-                for (Ptr<Graph>& g: *subgraphs) {
-                    if (fuseGraph(g))
-                        modified = true;
-                }
+
+            if (auto* subgraphs = layer->subgraphs()) {
+                for (Ptr<Graph>& g : *subgraphs)
+                    if (fuseGraph(g)) modified = true;
             }
+
             const std::vector<Arg>& inputs = layer->inputs;
             const std::vector<Arg>& outputs = layer->outputs;
-            size_t ninputs = inputs.size();
-            removed_args.clear();
-            fused_inputs.clear(); // leave it empty in the merge patterns below to re-use original fused node inputs as-is.
 
-            for(;;) {
-                BatchNorm2Layer* bn = dynamic_cast<BatchNorm2Layer*>(layer_ptr);
-                ActivationLayer* activ = dynamic_cast<ActivationLayer*>(layer_ptr);
-                NaryEltwiseLayer* elemwise = dynamic_cast<NaryEltwiseLayer*>(layer_ptr);
+            FuseResult r;
+            bool fused =
+                tryFuseTransposeTranspose(ctx, layer, inputs, r) ||
+                tryFuseConvBatchNorm     (ctx, layer, inputs, r) ||
+                tryFuseConvAddResidual   (ctx, layer, inputs, r) ||
+                tryFuseSplitConvConcat   (ctx, layer, inputs, r) ||
+                tryFuseParallelConvConcat(ctx, layer, inputs, r) ||
+                tryFuseConvActivation    (ctx, layer, inputs, r);
 
-                // merge convolution and batch norm
-                if (bn && ninputs == 1 &&
-                    usecounts.at(inputs[0].idx) == 1) {
-                    Arg bn_inp = inputs[0];
-                    int conv_layer_idx = producer_of.at(bn_inp.idx);
-                    Conv2Layer* conv = getLayer<Conv2Layer>(newprog, conv_layer_idx);
-                    if (conv) {
-                        bool ok = conv->fuseBatchNorm(layer);
-                        if (ok) {
-                            fused_layer_idx = conv_layer_idx;
-                            removed_args.push_back(bn_inp);
-                            break;
-                        }
-                    }
-                }
-
-                // merge residual 'add' into 'conv' node
-                if (elemwise && (elemwise->op == NaryEltwiseLayer::OPERATION::ADD ||
-                    elemwise->op == NaryEltwiseLayer::OPERATION::SUM) &&
-                    ninputs == 2) {
-
-                    int op0 = producer_of.at(inputs[0].idx);
-                    int op1 = producer_of.at(inputs[1].idx);
-
-                    if (op0 >= 0 && op1 >= 0) {
-                        int conv_layer_idx;
-                        Arg residual, conv_out;
-
-                        if (op0 > op1) { // choose the latter op to ensure that the other component is already computed
-                            conv_layer_idx = op0;
-                            conv_out = inputs[0];
-                            residual = inputs[1];
-                        } else {
-                            conv_layer_idx = op1;
-                            conv_out = inputs[1];
-                            residual = inputs[0];
-                        }
-
-                        Conv2Layer* conv = getLayer<Conv2Layer>(newprog, conv_layer_idx);
-                        if (conv && usecounts[conv_out.idx] == 1 &&
-                            conv->fuseAddResidual(residual)) {
-                            fused_layer_idx = conv_layer_idx;
-                            removed_args.push_back(conv_out);
-                            break;
-                        }
-                    }
-                }
-
-                // merge convolution and activation
-                if (activ && ninputs == 1 &&
-                    usecounts.at(inputs[0].idx) == 1) {
-                    Arg activ_inp = inputs[0];
-                    int conv_layer_idx = producer_of.at(activ_inp.idx);
-                    Conv2Layer* conv = getLayer<Conv2Layer>(newprog, conv_layer_idx);
-                    if (conv) {
-                        bool ok = conv->fuseActivation(layer);
-                        if (ok) {
-                            fused_layer_idx = conv_layer_idx;
-                            removed_args.push_back(activ_inp);
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-
-            if (fused_layer_idx >= 0) {
+            if (fused) {
                 modified = true;
-                Layer* fused_layer = newprog[fused_layer_idx];
-                fused_layer->outputs = outputs;
-                for (Arg new_out: outputs)
-                    producer_of[new_out.idx] = fused_layer_idx;
-                for (Arg old_out: removed_args) {
-                    usecounts.at(old_out.idx) = 0;
-                    producer_of.at(old_out.idx) = -1;
+                Layer* surv = newprog[r.layer_idx].get();
+                surv->outputs = outputs;
+                if (!r.new_inputs.empty()) surv->inputs = r.new_inputs;
+                for (const Arg& o : outputs) producer_of[o.idx] = r.layer_idx;
+                for (const Arg& a : r.removed_args) {
+                    usecounts.at(a.idx) = 0;
+                    producer_of.at(a.idx) = -1;
                 }
             } else {
-                for (auto out: outputs)
-                    producer_of[out.idx] = (int)newprog.size();
+                for (const Arg& o : outputs)
+                    producer_of[o.idx] = (int)newprog.size();
                 newprog.push_back(layer);
             }
         }
 
         if (modified) {
-            size_t i, j = 0, newops = newprog.size();
-            for (i = 0; i < newops; i++) {
-                if (!newprog[i].empty()) {
-                    if (j < i)
-                        newprog[j] = newprog[i];
+            // Compact null slots left behind by multi-layer fusions.
+            size_t j = 0;
+            for (size_t i = 0; i < newprog.size(); i++) {
+                if (newprog[i]) {
+                    if (j < i) newprog[j] = std::move(newprog[i]);
                     j++;
                 }
             }
             newprog.resize(j);
-            //printf("fused some ops in graph %s. size before: %zu ops, size after: %zu ops\n",
-            //       graph->name().data(), nops, j);
             graph->setProg(newprog);
         }
-
         return modified;
     }
 
+    // Safe to drop when no output is a graph output and extra outputs (e.g.
+    // Dropout's optional mask) are unused downstream.
+    bool canDropBlank(const Ptr<Layer>& layer, const std::vector<Ptr<Layer> >& prog,
+                      size_t self, const std::unordered_set<int>& output_set) const
+    {
+        for (const Arg& o : layer->outputs)
+            if (output_set.count(o.idx)) return false;
+        for (size_t k = 1; k < layer->outputs.size(); k++) {
+            const int extra_idx = layer->outputs[k].idx;
+            for (size_t m = 0; m < prog.size(); m++) {
+                if (!prog[m] || m == self) continue;
+                for (const Arg& in : prog[m]->inputs)
+                    if (in.idx == extra_idx) return false;
+            }
+        }
+        return true;
+    }
+
     Net::Impl* netimpl;
-    vector<int> usecounts;
+    std::vector<int> usecounts;
 };
 
 void Net::Impl::fuseBasic()

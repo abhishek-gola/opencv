@@ -233,6 +233,20 @@ public:
         return false;
     }
 
+    virtual bool sameFusedOp(const Conv2Layer* other) const CV_OVERRIDE
+    {
+        const Conv2LayerImpl* o = dynamic_cast<const Conv2LayerImpl*>(other);
+        if (!o) return false;
+        if (fusedBatchNorm != o->fusedBatchNorm) return false;
+        if (addResidual != o->addResidual) return false;
+        if (fastActivation != o->fastActivation) return false;
+        if (activationFunc != o->activationFunc) return false;
+        if (activParams != o->activParams) return false;
+        if (activ.get() != o->activ.get()) return false;
+        if (batchNorm.get() != o->batchNorm.get()) return false;
+        return true;
+    }
+
     virtual int64_t getFLOPS(const std::vector<MatShape>& inputs,
                              const std::vector<MatShape>& outputs) const CV_OVERRIDE
     {
@@ -286,6 +300,10 @@ public:
         desiredInputs[0] = DATA_LAYOUT_BLOCK;
         for (size_t i = 1; i < ninputs; i++)
             desiredInputs[i] = DATA_LAYOUT_UNKNOWN;
+        // The fused residual tensor is added directly into the convolution's
+        // blocked output buffer, so it must arrive in the same BLOCK layout.
+        if (addResidual && ninputs >= 2)
+            desiredInputs[ninputs - 1] = DATA_LAYOUT_BLOCK;
         outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
         return getNetImpl(this)->defaultC0;
     }
