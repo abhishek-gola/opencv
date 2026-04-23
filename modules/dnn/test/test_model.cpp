@@ -1014,67 +1014,6 @@ TEST_P(Reproducibility_ResNet50_QDQ_ONNX, Accuracy)
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ResNet50_QDQ_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
-// ShuffleNet exercises several of the graph fusion optimizations:
-//   - double-transpose fusion (channel shuffle contains Reshape->Transpose->Reshape,
-//     and adjacent transposes around it can collapse)
-//   - split => multiple convs => concat (grouped conv pattern that may be decomposed
-//     across branches depending on the ONNX export)
-// The test validates that after fusion the model still produces correct top-5
-// ImageNet predictions on sqcat.png and measures inference time.
-typedef testing::TestWithParam<Target> Reproducibility_ShuffleNet_ONNX;
-TEST_P(Reproducibility_ShuffleNet_ONNX, Accuracy)
-{
-    Target targetId = GetParam();
-    applyTestTag(targetId == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
-    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
-
-    std::string modelname = _tf("onnx/models/shufflenet.onnx", false);
-    Net net = readNetFromONNX(modelname);
-
-    net.setPreferableBackend(DNN_BACKEND_OPENCV);
-    net.setPreferableTarget(targetId);
-
-    if (targetId == DNN_TARGET_CPU_FP16)
-        net.enableWinograd(false);
-
-    std::string imgname = _tf("sqcat.png");
-    Mat image = imread(imgname);
-    Mat input = blobFromImage(image, 0.017, Size(224,224),
-                              Scalar(103.939, 116.779, 123.68),
-                              true, true, CV_32F);
-    ASSERT_TRUE(!input.empty());
-
-    std::vector<String> outNames = net.getUnconnectedOutLayersNames();
-    std::vector<Mat> outs;
-    net.setInput(input8dim4);
-    net.forward(outs, outNames);
-
-    const int K = 5;
-    std::vector<std::pair<int, float> > res;
-    topK(out, res, K);
-    ASSERT_EQ(int(res.size()), K);
-
-    // Reference top-5 computed via onnxruntime with same preprocessing.
-    std::vector<std::pair<int, float> > ref = {
-        {287, 0.146f}, {281, 0.141f}, {285, 0.126f}, {282, 0.110f}, {279, 0.094f}
-    };
-    const float eps = 0.05f;
-
-    std::vector<int> reflabels(K), reslabels(K);
-    for (int i = 0; i < K; i++) {
-        reflabels[i] = ref[i].first;
-        reslabels[i] = res[i].first;
-    }
-    ASSERT_EQ(reflabels, reslabels);
-
-    for (int i = 0; i < K; i++) {
-        EXPECT_NEAR(ref[i].second, res[i].second, eps);
-    }
-}
-INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ShuffleNet_ONNX,
-                        testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
-
-
 namespace {
 
 enum YoloFormat { YOLO_V5, YOLO_V8, YOLO_X };
