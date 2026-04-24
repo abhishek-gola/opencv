@@ -8,6 +8,7 @@
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/hal/interface.h>
+#include "opencv2/core/hal/intrin.hpp"
 #include <limits>
 #include <cfloat>
 #include <algorithm>
@@ -67,6 +68,10 @@ public:
         return backendId == DNN_BACKEND_OPENCV;
     }
 
+    // Clip rewrites values in place of the input layout — let the allocator alias
+    // input/output so the fused-clamp loop writes directly into the input buffer.
+    virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
+
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,
                          std::vector<MatShape> &outputs,
@@ -121,6 +126,42 @@ public:
         double actualMin = dynMin ? getScalar(inputs[1]) : (hasMin ? minValue : typeMin(data.depth()));
         double actualMax = dynMax ? getScalar(inputs[2]) : (hasMax ? maxValue : typeMax(data.depth()));
         CV_Assert(actualMin <= actualMax);
+
+        // Fused single-pass clamp for contiguous CV_32F. Halves memory traffic
+        // vs the cv::max + cv::min pair, and lets the allocator run it in-place.
+        if (data.depth() == CV_32F && data.isContinuous() && dst.isContinuous() &&
+            data.total() == dst.total()) {
+            const float lo = (float)actualMin;
+            const float hi = (float)actualMax;
+            const size_t total = data.total();
+            const float* src = data.ptr<float>();
+            float* out = dst.ptr<float>();
+            const size_t CHUNK = 16384;
+            int nChunks = (int)((total + CHUNK - 1) / CHUNK);
+            parallel_for_(Range(0, nChunks), [&](const Range& r) {
+                for (int c = r.start; c < r.end; c++) {
+                    size_t start = (size_t)c * CHUNK;
+                    size_t end = std::min(start + CHUNK, total);
+                    size_t i = start;
+#if CV_SIMD
+                    const int lanes = VTraits<v_float32>::nlanes;
+                    v_float32 vlo = vx_setall_f32(lo);
+                    v_float32 vhi = vx_setall_f32(hi);
+                    for (; i + lanes * 4 <= end; i += lanes * 4) {
+                        v_store(out + i,             v_min(v_max(vx_load(src + i),             vlo), vhi));
+                        v_store(out + i + lanes,     v_min(v_max(vx_load(src + i + lanes),     vlo), vhi));
+                        v_store(out + i + lanes * 2, v_min(v_max(vx_load(src + i + lanes * 2), vlo), vhi));
+                        v_store(out + i + lanes * 3, v_min(v_max(vx_load(src + i + lanes * 3), vlo), vhi));
+                    }
+                    for (; i + lanes <= end; i += lanes)
+                        v_store(out + i, v_min(v_max(vx_load(src + i), vlo), vhi));
+#endif
+                    for (; i < end; i++)
+                        out[i] = std::min(std::max(src[i], lo), hi);
+                }
+            });
+            return;
+        }
 
         Scalar lowS  = Scalar::all(actualMin);
         Scalar highS = Scalar::all(actualMax);

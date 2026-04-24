@@ -30,9 +30,11 @@ void softmax(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep){
     size_t outerStep = src.total(axis);
     size_t cnStep = src.total(axis + 1);
 
-    // multi-threads
+    // multi-threads: use total work (tasks * axisStep) so large axis lengths are parallelized
+    // even when outerSize*innerSize is small (e.g. axis=-1 softmax of [4,256,13294] -> 1024 tasks).
     size_t totalTasks = outerSize * innerSize;
-    double nstripes = (double) totalTasks / 1024.0;
+    double nstripes = (double) totalTasks * (double) axisStep / 8192.0;
+    if (nstripes < 1.0) nstripes = 1.0;
     // make the channel axis to be multiple of 8
     size_t channelAxis = (axisStep + 7) & -8;
 
