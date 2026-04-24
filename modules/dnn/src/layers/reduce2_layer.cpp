@@ -10,6 +10,7 @@
 #include "../op_cann.hpp"
 #include "layers_common.hpp"
 #include "../dnn_common.hpp"
+#include "opencv2/core/hal/intrin.hpp"
 
 namespace cv {
 namespace dnn {
@@ -521,7 +522,175 @@ public:
         outputs_arr.getMatVector(outputs);
         Mat& dst = outputs[0];
 
+        // Fast path: reduce-all (scalar output) over a contiguous float tensor.
+        // The generic ReduceInvoker path drives this with total=1, i.e. single
+        // threaded over millions of elements. Split across threads with SIMD.
+        // LogSumExp is not covered because partial merging would need log/exp
+        // round-trips that change the numerically-stable single-pass form.
+        if (dst.total() == 1 && src.depth() == CV_32F && src.isContinuous() &&
+            reduce_type != ReduceType::LOG_SUM_EXP) {
+            reduceAllFloatParallel(src, dst);
+            return;
+        }
+
         typeDispatch(dst.type(), src, dst, axes, noop_with_empty_axes);
+    }
+
+    void reduceAllFloatParallel(const Mat& src, Mat& dst) const
+    {
+        const float* p = src.ptr<const float>();
+        const size_t total = src.total();
+        const int nThreads = std::max(1, cv::getNumThreads());
+        const int stripes = std::max(1, std::min<int>(
+            (int)((total + 16383) / 16384), nThreads));
+
+        const ReduceType rt = reduce_type;
+
+        // init value depends on the accumulator's identity
+        float init_f = 0.0f;
+        if (rt == ReduceType::MAX)       init_f = -FLT_MAX;
+        else if (rt == ReduceType::MIN)  init_f = FLT_MAX;
+        else if (rt == ReduceType::PROD) init_f = 1.0f;
+
+        std::vector<float>  partial_f(stripes, init_f);
+        std::vector<double> partial_d(stripes, (rt == ReduceType::PROD) ? 1.0 : 0.0);
+
+        parallel_for_(Range(0, stripes), [&](const Range& r) {
+            for (int s = r.start; s < r.end; s++) {
+                size_t start = (size_t)s * total / stripes;
+                size_t end   = (size_t)(s + 1) * total / stripes;
+                const float* q = p + start;
+                size_t n = end - start, i = 0;
+#if CV_SIMD
+                const int L = VTraits<v_float32>::nlanes;
+#endif
+                switch (rt) {
+                case ReduceType::MAX: {
+                    float acc = -FLT_MAX;
+#if CV_SIMD
+                    v_float32 va = vx_setall_f32(-FLT_MAX);
+                    for (; i + L <= n; i += L) va = v_max(va, vx_load(q + i));
+                    acc = v_reduce_max(va);
+#endif
+                    for (; i < n; i++) acc = acc > q[i] ? acc : q[i];
+                    partial_f[s] = acc;
+                    break;
+                }
+                case ReduceType::MIN: {
+                    float acc = FLT_MAX;
+#if CV_SIMD
+                    v_float32 va = vx_setall_f32(FLT_MAX);
+                    for (; i + L <= n; i += L) va = v_min(va, vx_load(q + i));
+                    acc = v_reduce_min(va);
+#endif
+                    for (; i < n; i++) acc = acc < q[i] ? acc : q[i];
+                    partial_f[s] = acc;
+                    break;
+                }
+                case ReduceType::SUM:
+                case ReduceType::MEAN:
+                case ReduceType::LOG_SUM: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    v_float32 va = vx_setzero_f32();
+                    for (; i + L <= n; i += L) va = v_add(va, vx_load(q + i));
+                    acc += (double)v_reduce_sum(va);
+#endif
+                    for (; i < n; i++) acc += q[i];
+                    partial_d[s] = acc;
+                    break;
+                }
+                case ReduceType::L1: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    v_float32 va = vx_setzero_f32();
+                    for (; i + L <= n; i += L) va = v_add(va, v_abs(vx_load(q + i)));
+                    acc += (double)v_reduce_sum(va);
+#endif
+                    for (; i < n; i++) acc += std::fabs(q[i]);
+                    partial_d[s] = acc;
+                    break;
+                }
+                case ReduceType::L2:
+                case ReduceType::SUM_SQUARE: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    v_float32 va = vx_setzero_f32();
+                    for (; i + L <= n; i += L) {
+                        v_float32 x = vx_load(q + i);
+                        va = v_add(va, v_mul(x, x));
+                    }
+                    acc += (double)v_reduce_sum(va);
+#endif
+                    for (; i < n; i++) { double x = q[i]; acc += x * x; }
+                    partial_d[s] = acc;
+                    break;
+                }
+                case ReduceType::PROD: {
+                    double acc = 1.0;
+#if CV_SIMD
+                    v_float32 va = vx_setall_f32(1.0f);
+                    for (; i + L <= n; i += L) va = v_mul(va, vx_load(q + i));
+                    float lanes_buf[VTraits<v_float32>::max_nlanes];
+                    v_store(lanes_buf, va);
+                    for (int k = 0; k < L; k++) acc *= (double)lanes_buf[k];
+#endif
+                    for (; i < n; i++) acc *= (double)q[i];
+                    partial_d[s] = acc;
+                    break;
+                }
+                default: CV_Error(Error::StsInternal, "reduceAllFloatParallel: unhandled type");
+                }
+            }
+        });
+
+        float* out = dst.ptr<float>();
+        switch (rt) {
+        case ReduceType::MAX: {
+            float m = -FLT_MAX;
+            for (int s = 0; s < stripes; s++) m = m > partial_f[s] ? m : partial_f[s];
+            *out = m;
+            break;
+        }
+        case ReduceType::MIN: {
+            float m = FLT_MAX;
+            for (int s = 0; s < stripes; s++) m = m < partial_f[s] ? m : partial_f[s];
+            *out = m;
+            break;
+        }
+        case ReduceType::SUM: {
+            double acc = 0.0; for (int s = 0; s < stripes; s++) acc += partial_d[s];
+            *out = (float)acc;
+            break;
+        }
+        case ReduceType::MEAN: {
+            double acc = 0.0; for (int s = 0; s < stripes; s++) acc += partial_d[s];
+            *out = total > 0 ? (float)(acc / (double)total) : 0.0f;
+            break;
+        }
+        case ReduceType::L1:
+        case ReduceType::SUM_SQUARE: {
+            double acc = 0.0; for (int s = 0; s < stripes; s++) acc += partial_d[s];
+            *out = (float)acc;
+            break;
+        }
+        case ReduceType::L2: {
+            double acc = 0.0; for (int s = 0; s < stripes; s++) acc += partial_d[s];
+            *out = (float)std::sqrt(acc);
+            break;
+        }
+        case ReduceType::LOG_SUM: {
+            double acc = 0.0; for (int s = 0; s < stripes; s++) acc += partial_d[s];
+            *out = total > 0 ? (float)std::log(acc) : -std::numeric_limits<float>::infinity();
+            break;
+        }
+        case ReduceType::PROD: {
+            double acc = 1.0; for (int s = 0; s < stripes; s++) acc *= partial_d[s];
+            *out = (float)acc;
+            break;
+        }
+        default: CV_Error(Error::StsInternal, "reduceAllFloatParallel: unhandled type");
+        }
     }
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE

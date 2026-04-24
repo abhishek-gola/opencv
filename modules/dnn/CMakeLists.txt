@@ -24,6 +24,7 @@ if(CV_AVX2 OR ";${CPU_BASELINE_FINAL};" MATCHES ";AVX2;" OR ";${CPU_DISPATCH_FIN
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/clip_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/transpose_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/gridsample_layer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/layers/reduce2_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/cpu_kernels/softmax.cpp"
   )
   set_source_files_properties(${_dnn_avx2_boost_files}
