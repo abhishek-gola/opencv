@@ -522,18 +522,45 @@ public:
         outputs_arr.getMatVector(outputs);
         Mat& dst = outputs[0];
 
-        // Fast path: reduce-all (scalar output) over a contiguous float tensor.
-        // The generic ReduceInvoker path drives this with total=1, i.e. single
-        // threaded over millions of elements. Split across threads with SIMD.
-        // LogSumExp is not covered because partial merging would need log/exp
-        // round-trips that change the numerically-stable single-pass form.
-        if (dst.total() == 1 && src.depth() == CV_32F && src.isContinuous() &&
+        // Fast paths for contiguous float, LogSumExp excluded (partial merging
+        // would need log/exp round-trips that change the stable single-pass form).
+        if (src.depth() == CV_32F && src.isContinuous() && dst.isContinuous() &&
             reduce_type != ReduceType::LOG_SUM_EXP) {
-            reduceAllFloatParallel(src, dst);
-            return;
+            // (1) reduce-all -> scalar.
+            if (dst.total() == 1) {
+                reduceAllFloatParallel(src, dst);
+                return;
+            }
+            // (2) reduce a contiguous trailing block of axes. Each output element
+            // reduces a contiguous inner run of `innerLen` floats; parallelize
+            // over outputs and SIMD-reduce the inner run.
+            size_t innerLen = 1;
+            if (reduceTrailingAxesLen(src, axes, innerLen) && innerLen > 1) {
+                reduceLastAxesFloatParallel(src, dst, innerLen);
+                return;
+            }
         }
 
         typeDispatch(dst.type(), src, dst, axes, noop_with_empty_axes);
+    }
+
+    // Return true iff the reduced axes cover exactly the trailing dims of src,
+    // leaving the remaining leading dims as independent output rows.
+    static bool reduceTrailingAxesLen(const Mat& src, const std::vector<int>& axes,
+                                      size_t& innerLen)
+    {
+        MatShape s = shape(src);
+        int nd = s.dims;
+        if (axes.empty() || (int)axes.size() > nd) return false;
+        std::vector<int> sorted_axes(axes.begin(), axes.end());
+        std::sort(sorted_axes.begin(), sorted_axes.end());
+        // Must be the trailing [nd - k .. nd - 1] block.
+        int k = (int)sorted_axes.size();
+        for (int i = 0; i < k; i++)
+            if (sorted_axes[i] != nd - k + i) return false;
+        innerLen = 1;
+        for (int i = nd - k; i < nd; i++) innerLen *= (size_t)s[i];
+        return true;
     }
 
     void reduceAllFloatParallel(const Mat& src, Mat& dst) const
@@ -691,6 +718,121 @@ public:
         }
         default: CV_Error(Error::StsInternal, "reduceAllFloatParallel: unhandled type");
         }
+    }
+
+    // Reduce a contiguous trailing block of axes for contiguous CV_32F input.
+    // Produces nOut = src.total() / innerLen output elements, each a SIMD+scalar
+    // reduction of `innerLen` contiguous floats starting at row*innerLen.
+    // Parallelizes across output rows.
+    void reduceLastAxesFloatParallel(const Mat& src, Mat& dst, size_t innerLen) const
+    {
+        const float* p = src.ptr<const float>();
+        float* q = dst.ptr<float>();
+        const size_t nOut = src.total() / innerLen;
+
+        const ReduceType rt = reduce_type;
+        const double inv_inner = innerLen > 0 ? 1.0 / (double)innerLen : 0.0;
+
+        parallel_for_(Range(0, (int)nOut), [&](const Range& r) {
+            for (int row = r.start; row < r.end; row++) {
+                const float* s0 = p + (size_t)row * innerLen;
+                size_t i = 0, n = innerLen;
+#if CV_SIMD
+                const int L = VTraits<v_float32>::nlanes;
+#endif
+                switch (rt) {
+                case ReduceType::MAX: {
+                    float acc = -FLT_MAX;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setall_f32(-FLT_MAX);
+                        for (; i + L <= n; i += L) va = v_max(va, vx_load(s0 + i));
+                        acc = v_reduce_max(va);
+                    }
+#endif
+                    for (; i < n; i++) acc = acc > s0[i] ? acc : s0[i];
+                    q[row] = acc;
+                    break;
+                }
+                case ReduceType::MIN: {
+                    float acc = FLT_MAX;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setall_f32(FLT_MAX);
+                        for (; i + L <= n; i += L) va = v_min(va, vx_load(s0 + i));
+                        acc = v_reduce_min(va);
+                    }
+#endif
+                    for (; i < n; i++) acc = acc < s0[i] ? acc : s0[i];
+                    q[row] = acc;
+                    break;
+                }
+                case ReduceType::SUM:
+                case ReduceType::MEAN:
+                case ReduceType::LOG_SUM: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setzero_f32();
+                        for (; i + L <= n; i += L) va = v_add(va, vx_load(s0 + i));
+                        acc += (double)v_reduce_sum(va);
+                    }
+#endif
+                    for (; i < n; i++) acc += s0[i];
+                    if (rt == ReduceType::MEAN)       q[row] = (float)(acc * inv_inner);
+                    else if (rt == ReduceType::LOG_SUM) q[row] = (float)std::log(acc);
+                    else                              q[row] = (float)acc;
+                    break;
+                }
+                case ReduceType::L1: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setzero_f32();
+                        for (; i + L <= n; i += L) va = v_add(va, v_abs(vx_load(s0 + i)));
+                        acc += (double)v_reduce_sum(va);
+                    }
+#endif
+                    for (; i < n; i++) acc += std::fabs(s0[i]);
+                    q[row] = (float)acc;
+                    break;
+                }
+                case ReduceType::L2:
+                case ReduceType::SUM_SQUARE: {
+                    double acc = 0.0;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setzero_f32();
+                        for (; i + L <= n; i += L) {
+                            v_float32 x = vx_load(s0 + i);
+                            va = v_add(va, v_mul(x, x));
+                        }
+                        acc += (double)v_reduce_sum(va);
+                    }
+#endif
+                    for (; i < n; i++) { double x = s0[i]; acc += x * x; }
+                    q[row] = (rt == ReduceType::L2) ? (float)std::sqrt(acc) : (float)acc;
+                    break;
+                }
+                case ReduceType::PROD: {
+                    double acc = 1.0;
+#if CV_SIMD
+                    if (n >= (size_t)L) {
+                        v_float32 va = vx_setall_f32(1.0f);
+                        for (; i + L <= n; i += L) va = v_mul(va, vx_load(s0 + i));
+                        float buf[VTraits<v_float32>::max_nlanes];
+                        v_store(buf, va);
+                        for (int k = 0; k < L; k++) acc *= (double)buf[k];
+                    }
+#endif
+                    for (; i < n; i++) acc *= (double)s0[i];
+                    q[row] = (float)acc;
+                    break;
+                }
+                default: CV_Error(Error::StsInternal, "reduceLastAxesFloatParallel: unhandled type");
+                }
+            }
+        }, (double)nOut * (double)innerLen / 16384.0);
     }
 
     virtual std::ostream& dumpAttrs(std::ostream& strm, int indent) const CV_OVERRIDE

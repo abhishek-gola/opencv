@@ -657,9 +657,13 @@ public:
                 }
             };
             // Use total work (planes * plane_size) so large broadcasts parallelize
-            // even when nplanes alone is below the old nstripes threshold.
-            double nstripes = (double)nplanes * plane_size * sizeof(T) / double(block_size);
+            // even when nplanes alone is below the old nstripes threshold. Target
+            // ~16KB of output work per stripe so even tiny plane_size ops (e.g.
+            // 2-element broadcast rows) spread across threads instead of running
+            // serially.
+            double nstripes = (double)nplanes * plane_size * sizeof(T) / 16384.0;
             if (nstripes < 1.0) nstripes = 1.0;
+            (void)block_size;
             parallel_for_(Range(0, nplanes), worker, nstripes);
         }
     }

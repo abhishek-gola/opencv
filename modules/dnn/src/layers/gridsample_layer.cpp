@@ -8,6 +8,7 @@
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/utility.hpp>
+#include "opencv2/core/hal/intrin.hpp"
 
 // ONNX operator: GridSample
 // Spec: https://onnx.ai/onnx/operators/onnx__GridSample.html
@@ -155,6 +156,83 @@ static inline void gridSampleComputeRows(
                         interior[w] = (x0 >= 0 && y0 >= 0 && x0 + 1 < W && y0 + 1 < H);
                     }
                 }
+
+#if CV_SIMD
+                // SIMD-over-channels kernel for CV_32F bilinear interior case:
+                // for each w, gather 4 corner values for L=nlanes channels,
+                // bilinear-interpolate with SIMD, scatter 8 outputs.
+                if (MODE == M_BILINEAR && std::is_same<T, float>::value) {
+                    const int L = VTraits<v_float32>::nlanes;
+                    for (int w = 0; w < Wout; w++) {
+                        const int x0 = px[w], y0 = py[w];
+                        const float fx = dx[w], fy = dy[w];
+                        if (interior[w]) {
+                            const float w00 = (1.f - fx) * (1.f - fy);
+                            const float w01 = fx * (1.f - fy);
+                            const float w10 = (1.f - fx) * fy;
+                            const float w11 = fx * fy;
+                            v_float32 vw00 = vx_setall_f32(w00);
+                            v_float32 vw01 = vx_setall_f32(w01);
+                            v_float32 vw10 = vx_setall_f32(w10);
+                            v_float32 vw11 = vx_setall_f32(w11);
+                            size_t off00 = (size_t)y0 * xHStride + x0;
+                            size_t off01 = off00 + 1;
+                            size_t off10 = off00 + xHStride;
+                            size_t off11 = off10 + 1;
+
+                            int c = 0;
+                            float buf00[VTraits<v_float32>::max_nlanes];
+                            float buf01[VTraits<v_float32>::max_nlanes];
+                            float buf10[VTraits<v_float32>::max_nlanes];
+                            float buf11[VTraits<v_float32>::max_nlanes];
+                            float bufo[VTraits<v_float32>::max_nlanes];
+                            for (; c + L <= C; c += L) {
+                                for (int k = 0; k < L; k++) {
+                                    const float* pNC = (const float*)(baseN + (c + k) * xCStride);
+                                    buf00[k] = pNC[off00];
+                                    buf01[k] = pNC[off01];
+                                    buf10[k] = pNC[off10];
+                                    buf11[k] = pNC[off11];
+                                }
+                                v_float32 v00 = vx_load(buf00);
+                                v_float32 v01 = vx_load(buf01);
+                                v_float32 v10 = vx_load(buf10);
+                                v_float32 v11 = vx_load(buf11);
+                                v_float32 res = v_add(v_add(v_mul(v00, vw00), v_mul(v01, vw01)),
+                                                      v_add(v_mul(v10, vw10), v_mul(v11, vw11)));
+                                v_store(bufo, res);
+                                for (int k = 0; k < L; k++) {
+                                    float* outP = (float*)(Yptr + n * yNStride + (c + k) * yCStride + h * yHStride);
+                                    outP[w] = bufo[k];
+                                }
+                            }
+                            for (; c < C; c++) {
+                                const float* pNC = (const float*)(baseN + c * xCStride);
+                                float v00 = pNC[off00];
+                                float v01 = pNC[off01];
+                                float v10 = pNC[off10];
+                                float v11 = pNC[off11];
+                                float* outP = (float*)(Yptr + n * yNStride + c * yCStride + h * yHStride);
+                                outP[w] = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
+                            }
+                        } else {
+                            // Fallback: non-interior w; do per-channel scalar with fetch().
+                            for (int c = 0; c < C; c++) {
+                                const T* baseNC = baseN + c * xCStride;
+                                float v00 = fetch(baseNC, y0,     x0);
+                                float v01 = fetch(baseNC, y0,     x0 + 1);
+                                float v10 = fetch(baseNC, y0 + 1, x0);
+                                float v11 = fetch(baseNC, y0 + 1, x0 + 1);
+                                float vx0 = v00 + (v01 - v00) * fx;
+                                float vx1 = v10 + (v11 - v10) * fx;
+                                float outv = vx0 + (vx1 - vx0) * fy;
+                                Yptr[n * yNStride + c * yCStride + h * yHStride + w] = saturate_cast<T>(outv);
+                            }
+                        }
+                    }
+                    continue;
+                }
+#endif
 
                 for (int c = 0; c < C; c++) {
                     const T* baseNC = baseN + c * xCStride;
