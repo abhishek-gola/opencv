@@ -169,6 +169,63 @@ static void transpose(const Mat& inp, const std::vector<int>& perm, Mat& out)
         }
     }
 
+    // Fast path: the innermost dim is preserved by perm (perm[-1] == ndims-1).
+    // Then each output outer index just memcpys a contiguous inner_size block
+    // from a permuted input position. Common case: attn-style perm (0,2,1,3)
+    // on [B,L,H,D] -> [B,H,L,D] with D inner.
+    if (inp.isContinuous() && out.isContinuous() &&
+        ndims >= 2 && (int)perm.size() == ndims &&
+        perm[ndims - 1] == ndims - 1)
+    {
+        // Inner stride must be 1 in input frame (i.e. row-major contiguous tail).
+        // Compute per-axis input strides in elements (excluding innermost).
+        std::vector<int64_t> inStride(ndims, 0);
+        inStride[ndims - 1] = 1;
+        for (int i = ndims - 2; i >= 0; i--)
+            inStride[i] = inStride[i + 1] * (int64_t)inpShape[i + 1];
+        const int64_t inner = inpShape[ndims - 1];
+
+        // Output outer extents (drop the innermost dim).
+        std::vector<int> outOuterShape(ndims - 1);
+        for (int i = 0; i < ndims - 1; i++) outOuterShape[i] = outShape[i];
+        int64_t outerTotal = 1;
+        for (int i = 0; i < ndims - 1; i++) outerTotal *= outOuterShape[i];
+
+        if (outerTotal > 0 && inner > 0) {
+            const size_t innerBytes = (size_t)inner * esz;
+            const char* in_base = (const char*)inp.data;
+            char* out_base = (char*)out.data;
+
+            parallel_for_(Range(0, (int)outerTotal), [&](const Range& r) {
+                std::vector<int> outIdx(ndims - 1, 0);
+                // initialize outIdx to r.start in row-major
+                int64_t rem = r.start;
+                for (int k = ndims - 2; k >= 0; k--) {
+                    outIdx[k] = (int)(rem % outOuterShape[k]);
+                    rem /= outOuterShape[k];
+                }
+                for (int64_t idx = r.start; idx < r.end; idx++) {
+                    // Compute input outer offset using perm.
+                    int64_t inOff = 0;
+                    for (int i = 0; i < ndims - 1; i++) {
+                        // perm[i] is the input axis providing this output axis.
+                        inOff += (int64_t)outIdx[i] * inStride[perm[i]];
+                    }
+                    // Output position: linear idx * inner.
+                    std::memcpy(out_base + (size_t)idx * innerBytes,
+                                in_base + (size_t)inOff * esz,
+                                innerBytes);
+                    // Advance outIdx (row-major over outOuterShape).
+                    for (int k = ndims - 2; k >= 0; k--) {
+                        if (++outIdx[k] < outOuterShape[k]) break;
+                        outIdx[k] = 0;
+                    }
+                }
+            }, std::max(1.0, (double)outerTotal * (double)innerBytes / 16384.0));
+            return;
+        }
+    }
+
     int perm_[TRANSPOSE_MAX_DIMS];
     int inpShape_[TRANSPOSE_MAX_DIMS];
     int outShape_[TRANSPOSE_MAX_DIMS];

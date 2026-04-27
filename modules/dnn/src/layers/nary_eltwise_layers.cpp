@@ -796,7 +796,9 @@ public:
                     }
                 }
             };
-            double nstripes = nplanes * (1.0 / double(block_size));
+            double nstripes = (double)nplanes * plane_size * sizeof(T) / 16384.0;
+            if (nstripes < 1.0) nstripes = 1.0;
+            (void)block_size;
             parallel_for_(Range(0, nplanes), worker, nstripes);
         }
     }
@@ -935,7 +937,9 @@ public:
                     }
                 }
             };
-            double nstripes = nplanes * (1.0 / double(block_size));
+            double nstripes = (double)nplanes * plane_size * (sizeof(T_INP1) + sizeof(T_OUT)) / 16384.0;
+            if (nstripes < 1.0) nstripes = 1.0;
+            (void)block_size;
             parallel_for_(Range(0, nplanes), worker, nstripes);
         }
     }
