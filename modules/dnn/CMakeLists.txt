@@ -15,6 +15,7 @@ ocv_add_dispatched_file("layers/cpu_kernels/conv2_kernels" AVX AVX2 NEON NEON_FP
 ocv_add_dispatched_file_force_all("int8layers/conv2_int8_kernels" AVX2)
 ocv_add_dispatched_file("layers/cpu_kernels/activation_kernels" AVX AVX2 NEON NEON_FP16)
 ocv_add_dispatched_file_force_all("layers/cpu_kernels/reduce2_kernels" AVX AVX2 NEON)
+ocv_add_dispatched_file_force_all("layers/cpu_kernels/transpose_kernels" AVX AVX2 NEON)
 # softmax + clip kernels live in activation_kernels.simd.hpp and dispatch
 # through the same activation_kernels infrastructure (no separate .simd.hpp).
 
@@ -24,7 +25,6 @@ ocv_add_dispatched_file_force_all("layers/cpu_kernels/reduce2_kernels" AVX AVX2 
 if(CV_AVX2 OR ";${CPU_BASELINE_FINAL};" MATCHES ";AVX2;" OR ";${CPU_DISPATCH_FINAL};" MATCHES ";AVX2;")
   set(_dnn_avx2_boost_files
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/nary_eltwise_layers.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/layers/transpose_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/gridsample_layer.cpp"
   )
   set_source_files_properties(${_dnn_avx2_boost_files}
