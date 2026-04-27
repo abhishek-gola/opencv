@@ -3,6 +3,14 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+
+// activation_kernels-style dispatch for the SIMD binary float kernel. Must
+// precede layers_common.hpp because that header undef's the namespace macros.
+#include "cpu_kernels/nary_eltwise_kernels.simd.hpp"
+#include "layers/cpu_kernels/nary_eltwise_kernels.simd_declarations.hpp"
+#define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
+#define CV_CPU_OPTIMIZATION_NAMESPACE_END }
+
 #include "../net_impl.hpp"
 #include "layers_common.hpp"
 #include "../op_cuda.hpp"
@@ -34,6 +42,16 @@ static int _mod(int x, int y) {
         res += y;
     }
     return res;
+}
+
+// Wrapper that turns the CV_CPU_DISPATCH return-chain into a normal call.
+// CV_CPU_DISPATCH expands to a sequence of `if (cpu_supports) return X::fn(args);`
+// statements ending with an unconditional baseline return, so it must be the
+// last statement of a function with a matching return type.
+static inline int simd_binop_f32_dispatch(const float* a, const float* b,
+                                          float* out, int n, int op) {
+    CV_CPU_DISPATCH(simd_binop_f32_, (a, b, out, n, op),
+                    NEON, AVX2, AVX, BASELINE);
 }
 
 }
@@ -500,50 +518,10 @@ public:
         const bool is_div = (this->op == OPERATION::DIV);
         const bool simd_f32 = std::is_same<T, float>::value && std::is_same<RESULT_T, float>::value &&
                               (is_add || is_sub || is_mul || is_div);
-
-        // Apply op on n contiguous floats. Returns first non-vectorized index.
-        auto simd_bin_f32 = [&](const float* p1, const float* p2, float* po, int n) -> int {
-            int i = 0;
-            const int lanes = VTraits<v_float32>::nlanes;
-            if (is_add) {
-                for (; i <= n - lanes * 4; i += lanes * 4) {
-                    v_store(po + i,             v_add(vx_load(p1 + i),             vx_load(p2 + i)));
-                    v_store(po + i + lanes,     v_add(vx_load(p1 + i + lanes),     vx_load(p2 + i + lanes)));
-                    v_store(po + i + lanes * 2, v_add(vx_load(p1 + i + lanes * 2), vx_load(p2 + i + lanes * 2)));
-                    v_store(po + i + lanes * 3, v_add(vx_load(p1 + i + lanes * 3), vx_load(p2 + i + lanes * 3)));
-                }
-                for (; i <= n - lanes; i += lanes)
-                    v_store(po + i, v_add(vx_load(p1 + i), vx_load(p2 + i)));
-            } else if (is_mul) {
-                for (; i <= n - lanes * 4; i += lanes * 4) {
-                    v_store(po + i,             v_mul(vx_load(p1 + i),             vx_load(p2 + i)));
-                    v_store(po + i + lanes,     v_mul(vx_load(p1 + i + lanes),     vx_load(p2 + i + lanes)));
-                    v_store(po + i + lanes * 2, v_mul(vx_load(p1 + i + lanes * 2), vx_load(p2 + i + lanes * 2)));
-                    v_store(po + i + lanes * 3, v_mul(vx_load(p1 + i + lanes * 3), vx_load(p2 + i + lanes * 3)));
-                }
-                for (; i <= n - lanes; i += lanes)
-                    v_store(po + i, v_mul(vx_load(p1 + i), vx_load(p2 + i)));
-            } else if (is_sub) {
-                for (; i <= n - lanes * 4; i += lanes * 4) {
-                    v_store(po + i,             v_sub(vx_load(p1 + i),             vx_load(p2 + i)));
-                    v_store(po + i + lanes,     v_sub(vx_load(p1 + i + lanes),     vx_load(p2 + i + lanes)));
-                    v_store(po + i + lanes * 2, v_sub(vx_load(p1 + i + lanes * 2), vx_load(p2 + i + lanes * 2)));
-                    v_store(po + i + lanes * 3, v_sub(vx_load(p1 + i + lanes * 3), vx_load(p2 + i + lanes * 3)));
-                }
-                for (; i <= n - lanes; i += lanes)
-                    v_store(po + i, v_sub(vx_load(p1 + i), vx_load(p2 + i)));
-            } else if (is_div) {
-                for (; i <= n - lanes * 4; i += lanes * 4) {
-                    v_store(po + i,             v_div(vx_load(p1 + i),             vx_load(p2 + i)));
-                    v_store(po + i + lanes,     v_div(vx_load(p1 + i + lanes),     vx_load(p2 + i + lanes)));
-                    v_store(po + i + lanes * 2, v_div(vx_load(p1 + i + lanes * 2), vx_load(p2 + i + lanes * 2)));
-                    v_store(po + i + lanes * 3, v_div(vx_load(p1 + i + lanes * 3), vx_load(p2 + i + lanes * 3)));
-                }
-                for (; i <= n - lanes; i += lanes)
-                    v_store(po + i, v_div(vx_load(p1 + i), vx_load(p2 + i)));
-            }
-            return i;
-        };
+        const int simd_bin_op = is_add ? cpu_baseline::SIMD_BIN_ADD :
+                                is_sub ? cpu_baseline::SIMD_BIN_SUB :
+                                is_mul ? cpu_baseline::SIMD_BIN_MUL :
+                                is_div ? cpu_baseline::SIMD_BIN_DIV : -1;
 
         // Fast path: fully-flat contiguous float binop -> one big parallel SIMD loop.
         if (simd_f32 && ndims == 1 && dp1 == 1 && dp2 == 1 && dp == 1) {
@@ -558,7 +536,7 @@ public:
                     int64_t start = c * chunk;
                     int64_t end = std::min(start + chunk, total);
                     int n = (int)(end - start);
-                    int i = simd_bin_f32(p1 + start, p2 + start, po + start, n);
+                    int i = simd_binop_f32_dispatch(p1 + start, p2 + start, po + start, n, simd_bin_op);
                     if (is_add)      for (; i < n; i++) po[start + i] = p1[start + i] + p2[start + i];
                     else if (is_mul) for (; i < n; i++) po[start + i] = p1[start + i] * p2[start + i];
                     else if (is_sub) for (; i < n; i++) po[start + i] = p1[start + i] - p2[start + i];
@@ -582,7 +560,7 @@ public:
                         const float* p2 = (const float*)(const void*)&ptr2[r.start];
                         float* po = (float*)(void*)&ptr[r.start];
                         int len = r.end - r.start;
-                        int j = simd_bin_f32(p1, p2, po, len);
+                        int j = simd_binop_f32_dispatch(p1, p2, po, len, simd_bin_op);
                         i = r.start + j;
                     }
                 #endif
@@ -631,9 +609,10 @@ public:
                         int i = 0;
                     #if CV_SIMD
                         if (simd_f32) {
-                            i = simd_bin_f32((const float*)(const void*)ptr1,
-                                             (const float*)(const void*)ptr2,
-                                             (float*)(void*)ptr, plane_size);
+                            i = simd_binop_f32_dispatch((const float*)(const void*)ptr1,
+                                                        (const float*)(const void*)ptr2,
+                                                        (float*)(void*)ptr,
+                                                        plane_size, simd_bin_op);
                         }
                     #endif
                         for(; i < plane_size; i++) {
