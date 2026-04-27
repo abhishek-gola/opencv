@@ -3,9 +3,18 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
+
+// activation_kernels-style dispatch: emit the cpu_baseline body inline (no
+// DECLARATIONS_ONLY) and pull in per-ISA declarations from the simd_declarations
+// chain. Must precede layers_common.hpp because that header undef's the
+// CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN/END macros at its tail.
+#include "cpu_kernels/transpose_kernels.simd.hpp"
+#include "layers/cpu_kernels/transpose_kernels.simd_declarations.hpp"
+#define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
+#define CV_CPU_OPTIMIZATION_NAMESPACE_END }
+
 #include "layers_common.hpp"
 #include "../net_impl.hpp"
-#include "opencv2/core/hal/intrin.hpp"
 //#include "../op_cuda.hpp"
 //#include "../op_inf_engine.hpp"
 //#include "../ie_ngraph.hpp"

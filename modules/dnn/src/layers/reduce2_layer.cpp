@@ -6,13 +6,14 @@
 
 #include "../precomp.hpp"
 
-// fast_gemm-style dispatch: declarations only, then dispatch via CV_CPU_DISPATCH.
-// Must come BEFORE layers_common.hpp because layers_common's own simd_declarations
-// chain undef's the namespace macros.
-#define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
-#include "reduce2_layer.simd.hpp"
-#include "layers/reduce2_layer.simd_declarations.hpp"
-#undef CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
+// activation_kernels-style dispatch: emit the cpu_baseline body inline (no
+// DECLARATIONS_ONLY) and pull in per-ISA declarations from the simd_declarations
+// chain. Must precede layers_common.hpp because that header's own dispatch
+// include undef's the namespace macros at its tail.
+#include "cpu_kernels/reduce2_kernels.simd.hpp"
+#include "layers/cpu_kernels/reduce2_kernels.simd_declarations.hpp"
+// Restore the baseline-TU namespace macros so layers_common.hpp's own dispatch
+// include (which uses the same macro pair) compiles cleanly.
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
 #define CV_CPU_OPTIMIZATION_NAMESPACE_END }
 
