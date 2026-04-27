@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/utility.hpp>
@@ -14,11 +16,10 @@
 namespace cv { namespace dnn {
 CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
-// Reduce-all over a contiguous CV_32F src (output is 1 element).
-// LogSumExp is unsupported (partial merging is not numerically stable).
+// Reduce-all over a contiguous CV_32F src
 void reduceAllFloatParallel_(const Mat& src, Mat& dst, int reduce_type);
 
-// Reduce a contiguous trailing block of axes for CV_32F src. nOut = src.total() / innerLen.
+// Reduce a contiguous trailing block of axes for CV_32F src.
 void reduceLastAxesFloatParallel_(const Mat& src, Mat& dst, size_t innerLen, int reduce_type);
 
 CV_CPU_OPTIMIZATION_NAMESPACE_END

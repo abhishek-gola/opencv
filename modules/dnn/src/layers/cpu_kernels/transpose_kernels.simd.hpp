@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/utility.hpp>
@@ -11,8 +13,7 @@
 namespace cv { namespace dnn {
 CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
-// Blocked 2D float transpose. Per batch: input layout [cols][rows] contiguous,
-// output layout [rows][cols] contiguous; out[r,c] = in[c,r].
+// Blocked 2D float transpose.
 void transpose2D_f32_(const float* inp, float* out,
                       int64_t outer, int64_t rows, int64_t cols);
 

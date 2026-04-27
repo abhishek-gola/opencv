@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include <opencv2/core.hpp>
 #include "opencv2/core/hal/intrin.hpp"
@@ -10,17 +12,6 @@ namespace cv { namespace dnn {
 CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
 // SIMD-over-channels bilinear kernel for f32 GridSample, INTERIOR positions only.
-// For each w in [0, Wout) where interior[w] != 0, gathers the 4 corners across
-// L=nlanes channels at a time and bilinearly interpolates with v_float32.
-// Non-interior w's are skipped — the caller handles those (since border/zero/
-// reflection padding depends on the templated PAD parameter).
-//
-//   baseN     : Xptr + n * xNStride
-//   outBase   : Yptr + n * yNStride + h * yHStride
-//   px,py     : per-w x0/y0 (size Wout)
-//   dx,dy     : per-w fractional offsets (size Wout)
-//   interior  : per-w flag (1 = SIMD path applies, 0 = caller will handle)
-//   C, Wout, xCStride, xHStride, yCStride : geometry
 void gridSampleBilinearF32InteriorRow_(
     const float* baseN,
     float* outBase,

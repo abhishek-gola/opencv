@@ -7,8 +7,6 @@
 #include "../precomp.hpp"
 
 // activation_kernels-style dispatch for the SIMD-over-channels bilinear kernel.
-// Must precede layers_common.hpp because that header undef's
-// CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN/END at its tail.
 #include "cpu_kernels/gridsample_kernels.simd.hpp"
 #include "layers/cpu_kernels/gridsample_kernels.simd_declarations.hpp"
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
@@ -129,17 +127,12 @@ static inline void gridSampleComputeRows(
         return (float)(*p);
     };
 
-    // Fast path: bilinear / nearest with enough channels — parallelize over (N, Hout)
-    // and amortize the (x,y) decoding + per-w branch selection across all C channels.
-    // This cuts Range size from N*C*Hout to N*Hout (e.g. 3.4M -> 106K) and turns the
-    // per-channel inner loop into a tight contiguous-write kernel.
     if ((MODE == M_BILINEAR || MODE == M_NEAREST) && C >= 8 && Wout <= 64) {
         const int parallel_rows = N * Hout;
         float xscale, yscale, xdelta, ydelta;
         computeNormToPixParams(W, H, align_corners, xscale, yscale, xdelta, ydelta);
 
         parallel_for_(Range(0, parallel_rows), [&](const Range& range) {
-            // Per-w precomputed indices (Wout typically small, e.g. 4).
             int px[64], py[64];       // NEAREST: px/py; BILINEAR: x0/y0
             float dx[64], dy[64];     // BILINEAR: fractional offsets
             bool interior[64];        // BILINEAR: fast path (all 4 corners in-bounds)
@@ -167,9 +160,6 @@ static inline void gridSampleComputeRows(
                     }
                 }
 
-                // SIMD-over-channels kernel handles all interior bilinear w's at
-                // once. Non-interior w's use the templated `fetch` (border/zero/
-                // reflection padding) and stay scalar in this caller.
                 if (MODE == M_BILINEAR && std::is_same<T, float>::value) {
                     CV_CPU_DISPATCH(gridSampleBilinearF32InteriorRow_,
                                     ((const float*)baseN,

@@ -18,12 +18,6 @@ ocv_add_dispatched_file_force_all("layers/cpu_kernels/reduce2_kernels" AVX AVX2 
 ocv_add_dispatched_file_force_all("layers/cpu_kernels/transpose_kernels" AVX AVX2 NEON)
 ocv_add_dispatched_file_force_all("layers/cpu_kernels/gridsample_kernels" AVX AVX2 NEON)
 ocv_add_dispatched_file_force_all("layers/cpu_kernels/nary_eltwise_kernels" AVX AVX2 NEON)
-# softmax + clip kernels live in activation_kernels.simd.hpp and dispatch
-# through the same activation_kernels infrastructure (no separate .simd.hpp).
-
-# All hot SIMD layer kernels are now dispatched via .simd.hpp pairs in
-# cpu_kernels/. The previous COMPILE_OPTIONS=-mavx2 hack on individual layer
-# .cpp files is no longer needed.
 
 ocv_add_module(dnn opencv_core opencv_imgproc WRAP python java objc js)
 

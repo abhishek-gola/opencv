@@ -12,9 +12,6 @@
 #include "../../precomp.hpp"
 #include "softmax.hpp"
 
-// fast_gemm-style dispatch: declarations only, then dispatch via CV_CPU_DISPATCH.
-// Reuses activation_kernels' dispatch infrastructure rather than introducing
-// a separate dispatched file.
 #define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
 #include "activation_kernels.simd.hpp"
 #include "layers/cpu_kernels/activation_kernels.simd_declarations.hpp"
@@ -36,4 +33,4 @@ void logSoftmax(Mat &dst, const Mat &src, int axis) {
     log(dst, dst);
 }
 
-}}  // cv::dnn
+}} // cv::dnn

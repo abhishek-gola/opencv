@@ -3,11 +3,6 @@
 // of this distribution and at http://opencv.org/license.html.
 
 #include "../precomp.hpp"
-
-// activation_kernels-style dispatch: emit the cpu_baseline body inline (no
-// DECLARATIONS_ONLY) and pull in per-ISA declarations from the simd_declarations
-// chain. Must precede layers_common.hpp because that header undef's the
-// CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN/END macros at its tail.
 #include "cpu_kernels/transpose_kernels.simd.hpp"
 #include "layers/cpu_kernels/transpose_kernels.simd_declarations.hpp"
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
@@ -65,36 +60,25 @@ static void transpose(const Mat& inp, const std::vector<int>& perm, Mat& out)
     size_t esz = inp.elemSize();
     CV_Assert(esz == 1 || esz == 2 || esz == 4 || esz == 8);
 
-    // Fast path: innermost two dims swapped (e.g. [B, L, D] -> [B, D, L]).
-    // This is the dominant transpose pattern in attention blocks.
-    {
-        int64_t outer = 1, rows = 0, cols = 0;
-        if (is_swap_last_two_f32(inpShape, perm, (int)esz, outer, rows, cols)
-            && inp.isContinuous() && out.isContinuous()) {
-            CV_CPU_DISPATCH(transpose2D_f32_,
-                            (inp.ptr<float>(), out.ptr<float>(), outer, rows, cols),
-                            NEON, AVX2, AVX, BASELINE);
-            return;
-        }
+    int64_t outer = 1, rows = 0, cols = 0;
+    if (is_swap_last_two_f32(inpShape, perm, (int)esz, outer, rows, cols)
+        && inp.isContinuous() && out.isContinuous()) {
+        CV_CPU_DISPATCH(transpose2D_f32_,
+                        (inp.ptr<float>(), out.ptr<float>(), outer, rows, cols),
+                        NEON, AVX2, AVX, BASELINE);
+        return;
     }
 
-    // Fast path: the innermost dim is preserved by perm (perm[-1] == ndims-1).
-    // Then each output outer index just memcpys a contiguous inner_size block
-    // from a permuted input position. Common case: attn-style perm (0,2,1,3)
-    // on [B,L,H,D] -> [B,H,L,D] with D inner.
     if (inp.isContinuous() && out.isContinuous() &&
         ndims >= 2 && (int)perm.size() == ndims &&
         perm[ndims - 1] == ndims - 1)
     {
-        // Inner stride must be 1 in input frame (i.e. row-major contiguous tail).
-        // Compute per-axis input strides in elements (excluding innermost).
         std::vector<int64_t> inStride(ndims, 0);
         inStride[ndims - 1] = 1;
         for (int i = ndims - 2; i >= 0; i--)
             inStride[i] = inStride[i + 1] * (int64_t)inpShape[i + 1];
         const int64_t inner = inpShape[ndims - 1];
 
-        // Output outer extents (drop the innermost dim).
         std::vector<int> outOuterShape(ndims - 1);
         for (int i = 0; i < ndims - 1; i++) outOuterShape[i] = outShape[i];
         int64_t outerTotal = 1;

@@ -5,18 +5,23 @@
 // Copyright (C) 2025, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 #include "../precomp.hpp"
-// fast_gemm-style dispatch via the existing activation_kernels dispatched file.
-// Must come BEFORE layers_common.hpp because layers_common's own simd_declarations
-// chain undef's CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN/END at the end; we need those
-// macros defined while activation_kernels.simd.hpp's declarations are emitted.
 #define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
 #include "cpu_kernels/activation_kernels.simd.hpp"
 #include "layers/cpu_kernels/activation_kernels.simd_declarations.hpp"
 #undef CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
-// Our simd_declarations chain just undef'd these; restore the baseline-TU
-// definitions so layers_common.hpp's own dispatch include compiles.
+
+namespace cv { namespace dnn { namespace {
+static inline void clampFloatChunkDispatch(const float* src, float* dst,
+                                           size_t n, float lo, float hi) {
+    CV_CPU_DISPATCH(clampFloatChunk_, (src, dst, n, lo, hi),
+                    CV_CPU_DISPATCH_MODES_ALL);
+}
+}}}
+
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
 #define CV_CPU_OPTIMIZATION_NAMESPACE_END }
+#undef CV_CPU_DISPATCH_MODES_ALL
+
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/hal/interface.h>
@@ -79,8 +84,7 @@ public:
         return backendId == DNN_BACKEND_OPENCV;
     }
 
-    // Clip rewrites values in place of the input layout — let the allocator alias
-    // input/output so the fused-clamp loop writes directly into the input buffer.
+    // Clip rewrites values in place of the input layout.
     virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -153,14 +157,8 @@ public:
                 for (int c = r.start; c < r.end; c++) {
                     size_t start = (size_t)c * CHUNK;
                     size_t end = std::min(start + CHUNK, total);
-                    // Explicit dispatch chain matches activation_kernels'
-                    // ocv_add_dispatched_file modes; can't use
-                    // CV_CPU_DISPATCH_MODES_ALL because layers_common.hpp's own
-                    // simd_declarations chain redefines that macro and adds
-                    // ISAs (e.g. AVX512_SKX) we don't have variants for.
-                    CV_CPU_DISPATCH(clampFloatChunk_,
-                                    (src + start, out + start, end - start, lo, hi),
-                                    NEON_FP16, NEON, AVX2, AVX, BASELINE);
+                    clampFloatChunkDispatch(src + start, out + start,
+                                            end - start, lo, hi);
                 }
             });
             return;

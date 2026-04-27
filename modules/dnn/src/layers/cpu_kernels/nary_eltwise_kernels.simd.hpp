@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 #include <opencv2/core.hpp>
 #include "opencv2/core/hal/intrin.hpp"
@@ -11,9 +13,7 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 // Op codes that simd_binop_f32_ understands.
 enum SimdBinOp { SIMD_BIN_ADD = 0, SIMD_BIN_SUB = 1, SIMD_BIN_MUL = 2, SIMD_BIN_DIV = 3 };
 
-// Apply binary op on n contiguous floats. Caller handles the scalar tail
-// after the returned offset.
-//   out[i] = a[i] OP b[i]   for i in [0, returned_count)
+// Apply binary op on n contiguous floats.
 int simd_binop_f32_(const float* a, const float* b, float* out, int n, int op);
 
 CV_CPU_OPTIMIZATION_NAMESPACE_END

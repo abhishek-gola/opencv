@@ -6,14 +6,8 @@
 
 #include "../precomp.hpp"
 
-// activation_kernels-style dispatch: emit the cpu_baseline body inline (no
-// DECLARATIONS_ONLY) and pull in per-ISA declarations from the simd_declarations
-// chain. Must precede layers_common.hpp because that header's own dispatch
-// include undef's the namespace macros at its tail.
 #include "cpu_kernels/reduce2_kernels.simd.hpp"
 #include "layers/cpu_kernels/reduce2_kernels.simd_declarations.hpp"
-// Restore the baseline-TU namespace macros so layers_common.hpp's own dispatch
-// include (which uses the same macro pair) compiles cleanly.
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
 #define CV_CPU_OPTIMIZATION_NAMESPACE_END }
 
@@ -533,19 +527,13 @@ public:
         outputs_arr.getMatVector(outputs);
         Mat& dst = outputs[0];
 
-        // Fast paths for contiguous float, LogSumExp excluded (partial merging
-        // would need log/exp round-trips that change the stable single-pass form).
         if (src.depth() == CV_32F && src.isContinuous() && dst.isContinuous() &&
             reduce_type != ReduceType::LOG_SUM_EXP) {
-            // (1) reduce-all -> scalar.
             if (dst.total() == 1) {
                 CV_CPU_DISPATCH(reduceAllFloatParallel_, (src, dst, (int)reduce_type),
                                 NEON, AVX2, AVX, BASELINE);
                 return;
             }
-            // (2) reduce a contiguous trailing block of axes. Each output element
-            // reduces a contiguous inner run of `innerLen` floats; parallelize
-            // over outputs and SIMD-reduce the inner run.
             size_t innerLen = 1;
             if (reduceTrailingAxesLen(src, axes, innerLen) && innerLen > 1) {
                 CV_CPU_DISPATCH(reduceLastAxesFloatParallel_, (src, dst, innerLen, (int)reduce_type),
@@ -557,8 +545,6 @@ public:
         typeDispatch(dst.type(), src, dst, axes, noop_with_empty_axes);
     }
 
-    // Return true iff the reduced axes cover exactly the trailing dims of src,
-    // leaving the remaining leading dims as independent output rows.
     static bool reduceTrailingAxesLen(const Mat& src, const std::vector<int>& axes,
                                       size_t& innerLen)
     {

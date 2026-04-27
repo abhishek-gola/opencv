@@ -18,7 +18,7 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
 cv::dnn::ActivationFunc getActivationFunc_(int type);
 
-// Per-row softmax over a contiguous Mat axis. Used by softmax_layer / Softmax2.
+// Per-row softmax over a contiguous Mat axis.
 void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep);
 
 // Fused clamp on a single contiguous chunk, 4x unrolled. Used by clip_layer.

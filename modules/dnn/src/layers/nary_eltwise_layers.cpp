@@ -4,8 +4,6 @@
 
 #include "../precomp.hpp"
 
-// activation_kernels-style dispatch for the SIMD binary float kernel. Must
-// precede layers_common.hpp because that header undef's the namespace macros.
 #include "cpu_kernels/nary_eltwise_kernels.simd.hpp"
 #include "layers/cpu_kernels/nary_eltwise_kernels.simd_declarations.hpp"
 #define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
@@ -45,9 +43,6 @@ static int _mod(int x, int y) {
 }
 
 // Wrapper that turns the CV_CPU_DISPATCH return-chain into a normal call.
-// CV_CPU_DISPATCH expands to a sequence of `if (cpu_supports) return X::fn(args);`
-// statements ending with an unconditional baseline return, so it must be the
-// last statement of a function with a matching return type.
 static inline int simd_binop_f32_dispatch(const float* a, const float* b,
                                           float* out, int n, int op) {
     CV_CPU_DISPATCH(simd_binop_f32_, (a, b, out, n, op),
@@ -473,8 +468,6 @@ public:
                              const char* data2, const std::vector<size_t>& step2_in,
                              char* data, const std::vector<size_t>& step_in, size_t block_size) {
         // Collapse consecutive dims that are contiguous in all three tensors.
-        // Turns [B,H,L,D] op [B,1,L,D] into [B,H,L*D] op [B,1,L*D], dramatically
-        // reducing per-plane overhead and enabling long SIMD runs.
         std::vector<int> shape(shape_in.begin(), shape_in.begin() + ndims);
         std::vector<size_t> step1(step1_in.begin(), step1_in.begin() + ndims);
         std::vector<size_t> step2(step2_in.begin(), step2_in.begin() + ndims);
