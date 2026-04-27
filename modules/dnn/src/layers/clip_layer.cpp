@@ -5,10 +5,21 @@
 // Copyright (C) 2025, BigVision LLC, all rights reserved.
 // Third party copyrights are property of their respective owners.
 #include "../precomp.hpp"
+// fast_gemm-style dispatch via the existing activation_kernels dispatched file.
+// Must come BEFORE layers_common.hpp because layers_common's own simd_declarations
+// chain undef's CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN/END at the end; we need those
+// macros defined while activation_kernels.simd.hpp's declarations are emitted.
+#define CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
+#include "cpu_kernels/activation_kernels.simd.hpp"
+#include "layers/cpu_kernels/activation_kernels.simd_declarations.hpp"
+#undef CV_CPU_OPTIMIZATION_DECLARATIONS_ONLY
+// Our simd_declarations chain just undef'd these; restore the baseline-TU
+// definitions so layers_common.hpp's own dispatch include compiles.
+#define CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN namespace cpu_baseline {
+#define CV_CPU_OPTIMIZATION_NAMESPACE_END }
 #include "layers_common.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <opencv2/core/hal/interface.h>
-#include "opencv2/core/hal/intrin.hpp"
 #include <limits>
 #include <cfloat>
 #include <algorithm>
@@ -142,22 +153,14 @@ public:
                 for (int c = r.start; c < r.end; c++) {
                     size_t start = (size_t)c * CHUNK;
                     size_t end = std::min(start + CHUNK, total);
-                    size_t i = start;
-#if CV_SIMD
-                    const int lanes = VTraits<v_float32>::nlanes;
-                    v_float32 vlo = vx_setall_f32(lo);
-                    v_float32 vhi = vx_setall_f32(hi);
-                    for (; i + lanes * 4 <= end; i += lanes * 4) {
-                        v_store(out + i,             v_min(v_max(vx_load(src + i),             vlo), vhi));
-                        v_store(out + i + lanes,     v_min(v_max(vx_load(src + i + lanes),     vlo), vhi));
-                        v_store(out + i + lanes * 2, v_min(v_max(vx_load(src + i + lanes * 2), vlo), vhi));
-                        v_store(out + i + lanes * 3, v_min(v_max(vx_load(src + i + lanes * 3), vlo), vhi));
-                    }
-                    for (; i + lanes <= end; i += lanes)
-                        v_store(out + i, v_min(v_max(vx_load(src + i), vlo), vhi));
-#endif
-                    for (; i < end; i++)
-                        out[i] = std::min(std::max(src[i], lo), hi);
+                    // Explicit dispatch chain matches activation_kernels'
+                    // ocv_add_dispatched_file modes; can't use
+                    // CV_CPU_DISPATCH_MODES_ALL because layers_common.hpp's own
+                    // simd_declarations chain redefines that macro and adds
+                    // ISAs (e.g. AVX512_SKX) we don't have variants for.
+                    CV_CPU_DISPATCH(clampFloatChunk_,
+                                    (src + start, out + start, end - start, lo, hi),
+                                    NEON_FP16, NEON, AVX2, AVX, BASELINE);
                 }
             });
             return;

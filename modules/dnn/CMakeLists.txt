@@ -14,18 +14,18 @@ ocv_add_dispatched_file("layers/cpu_kernels/conv2_depthwise" AVX AVX2 NEON NEON_
 ocv_add_dispatched_file("layers/cpu_kernels/conv2_kernels" AVX AVX2 NEON NEON_FP16)
 ocv_add_dispatched_file_force_all("int8layers/conv2_int8_kernels" AVX2)
 ocv_add_dispatched_file("layers/cpu_kernels/activation_kernels" AVX AVX2 NEON NEON_FP16)
+# softmax + clip kernels live in activation_kernels.simd.hpp and dispatch
+# through the same activation_kernels infrastructure (no separate .simd.hpp).
 
-# Opt in a few hot layers to AVX2+FMA compile flags so universal-intrinsic
-# paths in them use 8-lane v_float32 instead of the 4-lane SSE baseline.
-# Guard on CPU_BASELINE_AVX2 so non-AVX2 baselines still build cleanly.
+# TODO: migrate reduce2, transpose, gridsample, nary_eltwise to the same
+# dispatch pattern. Until then, force-compile them with AVX2 to get 8-lane
+# v_float32 instead of the 4-lane SSE baseline.
 if(CV_AVX2 OR ";${CPU_BASELINE_FINAL};" MATCHES ";AVX2;" OR ";${CPU_DISPATCH_FINAL};" MATCHES ";AVX2;")
   set(_dnn_avx2_boost_files
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/nary_eltwise_layers.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/layers/clip_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/transpose_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/gridsample_layer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/layers/reduce2_layer.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/layers/cpu_kernels/softmax.cpp"
   )
   set_source_files_properties(${_dnn_avx2_boost_files}
     PROPERTIES COMPILE_OPTIONS "-mavx;-mavx2;-mfma"
