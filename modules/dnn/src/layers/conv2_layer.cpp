@@ -400,28 +400,12 @@ public:
 
         ConvFunc func = nullptr;
         const void* wptr_use = wptr;
-        // OPENCV_DNN_WINOGRAD_F63=0 disables the Winograd F(6,3) path. Used for
-        // A/B testing — leave unset (or 1) for normal operation.
-        static const bool wino_enabled = utils::getConfigurationParameterBool("OPENCV_DNN_WINOGRAD_F63", true);
-        static const bool wino_debug = utils::getConfigurationParameterBool("OPENCV_DNN_WINOGRAD_F63_DEBUG", false);
-        bool used_wino = false;
-        if (wino_enabled && !cs.depthwise && useWinogradF63(cs) && !weightsWino.empty()) {
+        if (!cs.depthwise && useWinogradF63(cs) && !weightsWino.empty()) {
             func = getConvFuncWinoF63(inptype, C0);
             wptr_use = weightsWino.data;
-            used_wino = true;
         }
         if (func == nullptr) {
             func = cs.depthwise ? getDepthwiseConvFunc(inptype) : getConvFunc(inptype, C0);
-        }
-        if (wino_debug) {
-            int Hi = inpshape[inpshape.dims-3];
-            int Wi = inpshape[inpshape.dims-2];
-            int K = outshape.channels(), Cc = inpshape.channels();
-            std::fprintf(stderr,
-                "[conv2 fwd] %s K=%d C=%d Hi=%dxWi=%d ngroups=%d kshape=%dx%d strides=%dx%d -> %s\n",
-                this->name.c_str(), K, Cc, Hi, Wi, ngroups,
-                cs.kshape[1], cs.kshape[2], cs.strides[1], cs.strides[2],
-                used_wino ? "WINOGRAD-F63" : "DIRECT");
         }
         CV_Assert(func != nullptr);
         func(inptr, resptr, outptr, cs, wptr_use, scale_data, bias_data);
