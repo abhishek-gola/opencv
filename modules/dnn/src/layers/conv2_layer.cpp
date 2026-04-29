@@ -120,6 +120,19 @@ public:
             repackConvWeights(weights_, weights, wtype, ngroups, C0);
         }
 
+        // Eagerly produce a Winograd F(6,3) packing alongside the regular packing
+        // for any 3x3 ngroups=1 conv. The runtime gate (input H>=12, W>=12,
+        // K%C0==0, C%C0==0, C0==8) is checked in forward() — if it fails we
+        // simply fall back to the direct path and these weights go unused.
+        weightsWino.release();
+        if (!depthwise && ngroups == 1 &&
+            wshape0.dims == 4 && wshape0[2] == 3 && wshape0[3] == 3 && C0 == 8) {
+            Mat weightsF32;
+            if (weights_.type() == CV_32F) weightsF32 = weights_;
+            else weights_.convertTo(weightsF32, CV_32F);
+            repackConvWeightsWinoF63(weightsF32, weightsWino, wtype, ngroups, C0);
+        }
+
         if (!bias_.empty()) {
             CV_Assert(bias_.isContinuous() && bias_.total() == wshape0[0]);
             bias_.convertTo(bias, CV_32F);
@@ -385,9 +398,33 @@ public:
         void* outptr = out.data;
         const void* wptr = weights.data;
 
-        ConvFunc func = cs.depthwise ? getDepthwiseConvFunc(inptype) : getConvFunc(inptype, C0);
+        ConvFunc func = nullptr;
+        const void* wptr_use = wptr;
+        // OPENCV_DNN_WINOGRAD_F63=0 disables the Winograd F(6,3) path. Used for
+        // A/B testing — leave unset (or 1) for normal operation.
+        static const bool wino_enabled = utils::getConfigurationParameterBool("OPENCV_DNN_WINOGRAD_F63", true);
+        static const bool wino_debug = utils::getConfigurationParameterBool("OPENCV_DNN_WINOGRAD_F63_DEBUG", false);
+        bool used_wino = false;
+        if (wino_enabled && !cs.depthwise && useWinogradF63(cs) && !weightsWino.empty()) {
+            func = getConvFuncWinoF63(inptype, C0);
+            wptr_use = weightsWino.data;
+            used_wino = true;
+        }
+        if (func == nullptr) {
+            func = cs.depthwise ? getDepthwiseConvFunc(inptype) : getConvFunc(inptype, C0);
+        }
+        if (wino_debug) {
+            int Hi = inpshape[inpshape.dims-3];
+            int Wi = inpshape[inpshape.dims-2];
+            int K = outshape.channels(), Cc = inpshape.channels();
+            std::fprintf(stderr,
+                "[conv2 fwd] %s K=%d C=%d Hi=%dxWi=%d ngroups=%d kshape=%dx%d strides=%dx%d -> %s\n",
+                this->name.c_str(), K, Cc, Hi, Wi, ngroups,
+                cs.kshape[1], cs.kshape[2], cs.strides[1], cs.strides[2],
+                used_wino ? "WINOGRAD-F63" : "DIRECT");
+        }
         CV_Assert(func != nullptr);
-        func(inptr, resptr, outptr, cs, wptr, scale_data, bias_data);
+        func(inptr, resptr, outptr, cs, wptr_use, scale_data, bias_data);
 
         if (uouts) {
             out.copyTo(uouts->at(0));
@@ -398,12 +435,14 @@ public:
             // very rare situation of dynamic convolution weights,
             // we release temporarily allocated and reordered copy of the weights
             weights.release();
+            weightsWino.release();
         }
     }
 
     std::vector<int> emptyKernelShape;
     Ptr<Layer> activ, batchNorm;
     Mat weights, bias, fusedScale, fusedBias;
+    Mat weightsWino;     // Winograd F(6,3) packed weights, set when usable.
     MatShape wshape0, prevInpshape;
     ConvState cs;
     bool fusedBatchNorm;

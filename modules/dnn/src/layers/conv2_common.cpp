@@ -304,6 +304,128 @@ void repackConvWeights(const Mat& weights, Mat& Wpack, int outtype, int ngroups,
     });
 }
 
+// F(6,3) Winograd weight transform matrix G (8x3). U = G * W * G^T yields
+// the 8x8 transformed kernel for a 3x3 weight matrix W.
+static const float WINO_F63_G[8][3] = {
+    { 1.0f,        0.0f,        0.0f       },
+    {-2.0f / 9,   -2.0f / 9,   -2.0f / 9   },
+    {-2.0f / 9,    2.0f / 9,   -2.0f / 9   },
+    { 1.0f / 90,   1.0f / 45,   2.0f / 45  },
+    { 1.0f / 90,  -1.0f / 45,   2.0f / 45  },
+    {32.0f / 45,  16.0f / 45,   8.0f / 45  },
+    {32.0f / 45, -16.0f / 45,   8.0f / 45  },
+    { 0.0f,        0.0f,        1.0f       }
+};
+
+static inline void winoTransformWeight3x3(const float W[9], float U[64])
+{
+    // tmp = G * W  (8x3)
+    float tmp[8][3];
+    for (int i = 0; i < 8; i++) {
+        float g0 = WINO_F63_G[i][0], g1 = WINO_F63_G[i][1], g2 = WINO_F63_G[i][2];
+        tmp[i][0] = g0*W[0] + g1*W[3] + g2*W[6];
+        tmp[i][1] = g0*W[1] + g1*W[4] + g2*W[7];
+        tmp[i][2] = g0*W[2] + g1*W[5] + g2*W[8];
+    }
+    // U = tmp * G^T  (8x8)
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            U[i*8 + j] = tmp[i][0]*WINO_F63_G[j][0]
+                       + tmp[i][1]*WINO_F63_G[j][1]
+                       + tmp[i][2]*WINO_F63_G[j][2];
+        }
+    }
+}
+
+void repackConvWeightsWinoF63(const Mat& weights, Mat& Wpack, int outtype, int ngroups, int C0_)
+{
+    CV_Assert(weights.isContinuous());
+    CV_Assert_N(weights.type() == CV_32F, outtype == CV_32F);
+    CV_Assert(ngroups > 0);
+    CV_Assert((C0_ & (C0_ - 1)) == 0 && C0_ >= 4);
+
+    MatShape wshape = weights.shape();
+    CV_Assert(wshape.dims == 4 && wshape[2] == 3 && wshape[3] == 3);
+
+    int K = wshape[0], Cg = wshape[1];
+    CV_Assert(K % ngroups == 0);
+    int Kg = K / ngroups, K0 = C0_;
+    int Kblk = (Kg + K0 - 1) / K0;
+    int C1Max = 0;
+    for (int g = 0; g < ngroups; ++g) {
+        int c_start = g * Cg;
+        int c00 = c_start & (C0_ - 1);
+        int cblocks = (c00 + Cg + C0_ - 1) / C0_;
+        C1Max = std::max(C1Max, cblocks);
+    }
+
+    if (!Wpack.isContinuous())
+        Wpack.release();
+    int wpackDims[5] = { ngroups, Kblk, 64, C1Max, C0_ * K0 };
+    Wpack.create(5, wpackDims, CV_32F);
+    Wpack.setZero();
+
+    parallel_for_(Range(0, K), [&](const Range& range) {
+        const int C0 = C0_;
+        const float* wdata = weights.ptr<float>();
+        float* Wpackdata = Wpack.ptr<float>();
+
+        for (int k = range.start; k < range.end; ++k) {
+            int g = k / Kg;
+            int kin = k - g * Kg;
+            int kblk = kin / K0;
+            int k0   = kin & (K0 - 1);
+
+            int c_start = g * Cg;
+            int c00 = c_start & (C0 - 1);
+
+            for (int c = 0; c < Cg; ++c) {
+                int ch = c00 + c;
+                int c1 = ch / C0;
+                int c0 = ch & (C0 - 1);
+
+                const float* wptr = wdata + (k * Cg + c) * 9;
+                float U[64];
+                winoTransformWeight3x3(wptr, U);
+
+                // Wpack[g, kblk, atom, c1, c0*K0 + k0] = U[atom]
+                float* wpackptr = Wpackdata + (((g * Kblk + kblk) * 64) * C1Max + c1) * (C0 * K0) + c0 * K0 + k0;
+                const size_t atom_step = (size_t)C1Max * C0 * K0;
+                for (int atom = 0; atom < 64; ++atom) {
+                    wpackptr[atom * atom_step] = U[atom];
+                }
+            }
+        }
+    });
+}
+
+bool useWinogradF63(const ConvState& cs)
+{
+    if (cs.depthwise) return false;
+    if (cs.ngroups != 1) return false;
+    if (cs.nspatialdims != 2) return false;
+
+    // kshape and inner indices use [MAX_CONV_DIMS - nspatialdims..MAX_CONV_DIMS-1].
+    // For 2D: indices 1 and 2.
+    if (cs.kshape[1] != 3 || cs.kshape[2] != 3) return false;
+    if (cs.strides[1] != 1 || cs.strides[2] != 1) return false;
+    if (cs.dilations[1] != 1 || cs.dilations[2] != 1) return false;
+
+    if (cs.inpshape.layout != DATA_LAYOUT_BLOCK) return false;
+    int ndims = cs.inpshape.dims;
+    int Hi = cs.inpshape[ndims - 3];
+    int Wi = cs.inpshape[ndims - 2];
+    if (Hi < 12 || Wi < 12) return false;
+
+    int C0 = cs.inpshape.back();
+    int C = cs.inpshape.channels();
+    int K = cs.outshape.channels();
+    if (C0 != 8) return false;
+    if (C % C0 != 0 || K % C0 != 0) return false;
+
+    return true;
+}
+
 
 void ConvState::initPooling(const MatShape& inpshape_,
                             const MatShape& outshape_,
