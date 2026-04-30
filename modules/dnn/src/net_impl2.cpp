@@ -551,6 +551,12 @@ void Net::Impl::prepareForInference()
         constArgs();
         fuseAttention();
         fuseSharedInputGemm();
+        // After attention/QKV fusion has had a chance to consume them, sweep
+        // any leftover Reshape/Transpose chains and absorb Transpose into
+        // MatMul / scalar pre-Softmax Mul into Softmax::scale.
+        fuseReshapeTranspose();
+        fuseTransposeMatMul();
+        fuseScaleSoftmax();
         fuseBasic();
         useBlockLayout();
         assignBuffers();

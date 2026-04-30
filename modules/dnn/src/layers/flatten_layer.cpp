@@ -89,6 +89,11 @@ public:
 
     bool isDataShuffling() const CV_OVERRIDE { return true; }
 
+    // Flatten just re-interprets the same contiguous buffer; let the new-engine
+    // buffer allocator alias input and output so forward() can short-circuit
+    // the copy (mirrors Reshape2 / Squeeze / Unsqueeze).
+    virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
+
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,
                          std::vector<MatShape> &outputs,
@@ -209,18 +214,16 @@ public:
                    outputs_arr.isUMatVector(),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
-        std::vector<Mat> inputs, outputs;
-        inputs_arr.getMatVector(inputs);
-        outputs_arr.getMatVector(outputs);
-
-        for (size_t i = 0; i < inputs.size(); i++)
-        {
-            MatShape outShape = shape(outputs[i]);
-            if (inputs[i].data != outputs[i].data)
-            {
-                inputs[i].reshape(1, (int)outShape.size(), &outShape[0]).copyTo(outputs[i]);
-            }
-        }
+        // Flatten only re-interprets the same contiguous buffer. Use the shared
+        // helper so we (a) skip the copy entirely when the buffer allocator was
+        // able to alias input==output (alwaysSupportInplace path) and (b) parallelize
+        // the memcpy on the fallback path when the input has multiple consumers.
+        // Matches Reshape2 / Squeeze / Unsqueeze.
+        std::vector<Mat> outs;
+        outputs_arr.getMatVector(outs);
+        CV_Assert(!outs.empty());
+        const MatShape outShape = outs[0].shape();
+        reshapeAndCopyFirst(inputs_arr, outputs_arr, outShape);
     }
 
 #ifdef HAVE_CANN

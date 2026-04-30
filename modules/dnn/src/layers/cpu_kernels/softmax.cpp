@@ -19,13 +19,17 @@
 
 namespace cv { namespace dnn {
 
-void softmax(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep) {
-    CV_CPU_DISPATCH(softmax_, (dst, src, axis, axisBias, axisStep),
+void softmax(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep, float scale) {
+    CV_CPU_DISPATCH(softmax_, (dst, src, axis, axisBias, axisStep, scale),
                     CV_CPU_DISPATCH_MODES_ALL);
 }
 
 void softmax(Mat &dst, const Mat &src, int axis) {
-    softmax(dst, src, axis, 0, src.size[axis]);
+    softmax(dst, src, axis, 0, src.size[axis], 1.f);
+}
+
+void softmax(Mat &dst, const Mat &src, int axis, float scale) {
+    softmax(dst, src, axis, 0, src.size[axis], scale);
 }
 
 void logSoftmax(Mat &dst, const Mat &src, int axis) {

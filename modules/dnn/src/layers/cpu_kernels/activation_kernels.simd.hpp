@@ -19,7 +19,7 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 cv::dnn::ActivationFunc getActivationFunc_(int type);
 
 // Per-row softmax over a contiguous Mat axis.
-void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep);
+void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep, float scale);
 
 // Fused clamp on a single contiguous chunk, 4x unrolled. Used by clip_layer.
 void clampFloatChunk_(const float* src, float* dst, size_t n, float lo, float hi);
@@ -329,11 +329,12 @@ void clampFloatChunk_(const float* src, float* dst, size_t n, float lo, float hi
         dst[i] = std::min(std::max(src[i], lo), hi);
 }
 
-void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep) {
+void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep, float scale) {
     CV_Assert(src.type() == CV_32F);
     CV_Assert(src.isContinuous() && dst.isContinuous());
     CV_Assert(src.size == dst.size);
     axis = normalize_axis(axis, src.dims);
+    const bool scaled = scale != 1.f;
 
     size_t outerSize = src.total(0, axis),
            innerSize = src.total(axis + 1);
@@ -374,6 +375,22 @@ void softmax_(Mat &dst, const Mat &src, int axis, int axisBias, int axisStep) {
 #endif
             for (; _cnDim < axisStep; _cnDim++)
                 axisBuf[_cnDim] = srcPtr[srcOffset + (_cnDim + axisBias) * cnStep];
+
+            // Bake the fused pre-Softmax scale into the buffer once. axisBuf
+            // already lives in L1 from the load above, so this pass is short.
+            if (scaled) {
+                int sk = 0;
+#if (CV_SIMD || CV_SIMD_SCALABLE)
+                v_float32 vscale = vx_setall_f32(scale);
+                for (; sk <= axisStep - nlanes; sk += nlanes) {
+                    v_float32 val = vx_load(axisBuf + sk);
+                    val = v_mul(val, vscale);
+                    v_store(axisBuf + sk, val);
+                }
+#endif
+                for (; sk < axisStep; sk++)
+                    axisBuf[sk] *= scale;
+            }
 
             float maxVal = -FLT_MAX;
             int cnDim = 0;

@@ -487,6 +487,18 @@ if(NOT EMSCRIPTEN)
   endif()
 endif()
 
+# Vendored MLAS (Microsoft Linear Algebra Subprograms) from ONNX Runtime.
+# Builds to an OBJECT library; its objects link directly into opencv_dnn.
+set(HAVE_MLAS 0)
+add_subdirectory(mlas)
+if(HAVE_MLAS)
+  add_definitions(-DHAVE_MLAS=1)
+  list(APPEND include_dirs ${MLAS_INCLUDE_DIRS})
+  message(STATUS "DNN: MLAS (vendored) enabled.")
+else()
+  message(STATUS "DNN: MLAS (vendored) disabled — host arch/OS not wired up.")
+endif()
+
 ocv_module_include_directories(${include_dirs})
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   ocv_append_source_files_cxx_compiler_options(fw_srcs "-Wno-suggest-override")  # GCC
@@ -534,7 +546,7 @@ endif()
 
 ocv_install_used_external_targets(${libs} ${dnn_runtime_libs})
 
-ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs} ${webnn_srcs})
+ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs} ${webnn_srcs} ${MLAS_OBJECTS})
 ocv_create_module(${libs} ${dnn_runtime_libs})
 ocv_add_samples()
 ocv_add_accuracy_tests(${dnn_runtime_libs})

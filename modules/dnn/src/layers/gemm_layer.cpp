@@ -17,6 +17,7 @@ using namespace cv::dnn::cuda4dnn;
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/mlas_gemm.hpp"
 
 namespace cv { namespace dnn {
 
@@ -306,6 +307,22 @@ public:
         }
 
         if (constB(mode)) {
+#ifdef HAVE_MLAS
+            // MLAS path: skip OpenCV's packed_B and call MlasGemm with the
+            // raw constant blob. MLAS does its own internal packing per call,
+            // which is wasted work for repeated forwards on the same B —
+            // future improvement: pre-pack via MlasGemmPackB at finalize().
+            const Mat& Bmat = blobs[0];
+            const int ldb = Bmat.size[Bmat.dims - 1];
+            if (mlasSgemm(trans_a, trans_b, M, N, K,
+                          alpha,
+                          A.ptr<const float>(), na,
+                          Bmat.ptr<const float>(), ldb,
+                          1.f,
+                          Y.ptr<float>(), N)) {
+                return;
+            }
+#endif
             CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
             fastGemm(trans_a, M, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
         } else {
