@@ -669,7 +669,15 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     dimvalues.assign(nsymdims, -1);
     layersTimings.assign(totalLayers + 1, 0.);
 
+    bool wasFinalize = finalizeLayers;
     forwardGraph(mainGraph, inputs, outputs, true);
+
+    // After the first forward (when layers were just finalized), apply a global
+    // memory budget on Winograd-packed weights — keeping all of them resident on
+    // models like ResNet-50 thrashes L3 between layers and undoes Winograd's per-layer wins.
+    if (wasFinalize) {
+        applyWinogradMemoryBudget(mainGraph);
+    }
 
     // reset finalizeLayer so that layers are only initialized once.
     // [TODO] if a target or backend change or there are some other important
@@ -1396,6 +1404,60 @@ void Net::Impl::useCounts(std::vector<int>& usecounts) const
     usecounts.assign(nargs, 0);
     usecounts[0] = 1; // empty Arg() is always useful
     updateUseCounts(mainGraph, usecounts);
+}
+
+static void collectWinogradLayers(const Ptr<Graph>& graph,
+                                  std::vector<Ptr<Conv2Layer> >& out)
+{
+    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    for (const Ptr<Layer>& layer : prog) {
+        Ptr<Conv2Layer> conv = layer.dynamicCast<Conv2Layer>();
+        if (!conv.empty() && conv->getWinogradWeightBytes() > 0) {
+            out.push_back(conv);
+        }
+        const std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
+        if (subgraphs) {
+            for (const Ptr<Graph>& sg : *subgraphs)
+                collectWinogradLayers(sg, out);
+        }
+    }
+}
+
+void Net::Impl::applyWinogradMemoryBudget(const Ptr<Graph>& graph)
+{
+    // Default 18 MB ≈ half of a 36 MB L3 (i9-14900K class). Leaves room for activations.
+    // [TODO] derive from a runtime cache query rather than a hardcoded default.
+    static size_t budget_mb = utils::getConfigurationParameterSizeT("OPENCV_WINO_BUDGET_MB", 18);
+    if (budget_mb == 0)
+        return;  // disable budget; keep all Winograd layers
+    const size_t budget = budget_mb * (size_t(1) << 20);
+
+    std::vector<Ptr<Conv2Layer> > entries;
+    collectWinogradLayers(graph, entries);
+    if (entries.empty())
+        return;
+
+    // Sort ascending by per-layer Winograd footprint. Smaller layers fit alongside
+    // others and tend to win bigger relative speedups, so we keep them first.
+    std::sort(entries.begin(), entries.end(),
+              [](const Ptr<Conv2Layer>& a, const Ptr<Conv2Layer>& b) {
+                  return a->getWinogradWeightBytes() < b->getWinogradWeightBytes();
+              });
+
+    size_t accum = 0;
+    int kept = 0, demoted = 0;
+    for (const Ptr<Conv2Layer>& c : entries) {
+        size_t bytes = c->getWinogradWeightBytes();
+        if (accum + bytes <= budget) {
+            accum += bytes;
+            kept++;
+        } else {
+            c->disableWinograd();
+            demoted++;
+        }
+    }
+    CV_LOG_INFO(NULL, "DNN Winograd budget: kept=" << kept << " demoted=" << demoted
+                      << " accumMB=" << (accum >> 20) << " budgetMB=" << budget_mb);
 }
 
 int Net::Impl::updateGraphOfs(const Ptr<Graph>& graph, int currofs, bool ismain)

@@ -375,6 +375,10 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool fuseBatchNorm(const Ptr<Layer>& bn) = 0;
         virtual bool fuseActivation(const Ptr<Layer>& activ) = 0;
         virtual bool fuseAddResidual(Arg residual) = 0;
+        // Bytes of pre-packed Winograd F(6,3) weights, or 0 if Winograd is not in use for this layer.
+        virtual size_t getWinogradWeightBytes() const = 0;
+        // Release the Winograd F(6,3) weight buffer; subsequent forwards take the GEMM path.
+        virtual void disableWinograd() = 0;
 
         std::vector<int> strides, dilations, pads;
         int ngroups;

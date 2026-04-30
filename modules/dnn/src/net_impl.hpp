@@ -331,6 +331,8 @@ struct Net::Impl : public detail::NetImplBase
             std::vector<size_t>& blobs) /*const*/;
     int64 getPerfProfile(std::vector<double>& timings) const;
 
+    void applyWinogradMemoryBudget(const Ptr<Graph>& graph);
+
     // TODO drop
     LayerPin getLatestLayerPin(const std::vector<LayerPin>& pins) const;
 

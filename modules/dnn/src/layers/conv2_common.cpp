@@ -401,6 +401,10 @@ void repackConvWeightsWinoF63(const Mat& weights, Mat& Wpack, int outtype, int n
 
 bool useWinogradF63(const ConvState& cs)
 {
+    // Kill switch for benchmarking: forces the GEMM/im2col path even when Winograd would qualify.
+    static bool disabled = utils::getConfigurationParameterBool("OPENCV_DISABLE_WINOGRAD", false);
+    if (disabled) return false;
+
     if (cs.depthwise) return false;
     if (cs.ngroups != 1) return false;
     if (cs.nspatialdims != 2) return false;

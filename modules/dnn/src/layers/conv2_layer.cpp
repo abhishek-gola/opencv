@@ -423,6 +423,16 @@ public:
         }
     }
 
+    size_t getWinogradWeightBytes() const CV_OVERRIDE
+    {
+        return weightsWino.empty() ? size_t(0) : weightsWino.total() * weightsWino.elemSize();
+    }
+
+    void disableWinograd() CV_OVERRIDE
+    {
+        weightsWino.release();
+    }
+
     std::vector<int> emptyKernelShape;
     Ptr<Layer> activ, batchNorm;
     Mat weights, bias, fusedScale, fusedBias;
