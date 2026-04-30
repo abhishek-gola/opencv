@@ -55,6 +55,24 @@ bool mlasSgemmBatch(size_t batch,
                     float beta,
                     float* C_base, int ldc);
 
+// Pre-pack B into MLAS's internal layout. The returned size is in bytes;
+// the caller allocates that buffer (any 64B-aligned memory works) and
+// hands it to mlasSgemmPackB(). Then mlasSgemmPacked() can be called many
+// times against the same packed B without re-packing.
+size_t mlasSgemmPackBSize(bool trans_a, bool trans_b, int N, int K);
+
+bool mlasSgemmPackB(bool trans_a, bool trans_b, int N, int K,
+                    const float* B, int ldb, void* packed_B);
+
+// Same shape as mlasSgemm, but B is already packed via mlasSgemmPackB.
+bool mlasSgemmPacked(bool trans_a, bool trans_b,
+                     int M, int N, int K,
+                     float alpha,
+                     const float* A, int lda,
+                     const void* packed_B,
+                     float beta,
+                     float* C, int ldc);
+
 #else  // HAVE_MLAS
 
 inline bool mlasAvailable() { return false; }
@@ -67,6 +85,11 @@ inline bool mlasSgemmBatch(size_t, const size_t*, const size_t*, const size_t*,
                            bool, bool, int, int, int, float,
                            const float*, int, const float*, int,
                            float, float*, int) { return false; }
+
+inline size_t mlasSgemmPackBSize(bool, bool, int, int) { return 0; }
+inline bool mlasSgemmPackB(bool, bool, int, int, const float*, int, void*) { return false; }
+inline bool mlasSgemmPacked(bool, bool, int, int, int, float,
+                            const float*, int, const void*, float, float*, int) { return false; }
 
 #endif  // HAVE_MLAS
 

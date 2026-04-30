@@ -125,6 +125,66 @@ bool mlasSgemmBatch(size_t batch,
     return true;
 }
 
+size_t mlasSgemmPackBSize(bool trans_a, bool trans_b, int N, int K)
+{
+    if (!mlasAvailable()) return 0;
+    if (N <= 0 || K <= 0) return 0;
+    return MlasGemmPackBSize(trans_a ? CblasTrans : CblasNoTrans,
+                             trans_b ? CblasTrans : CblasNoTrans,
+                             static_cast<size_t>(N),
+                             static_cast<size_t>(K),
+                             /*BackendKernelSelectorConfig=*/nullptr);
+}
+
+bool mlasSgemmPackB(bool trans_a, bool trans_b, int N, int K,
+                    const float* B, int ldb, void* packed_B)
+{
+    if (!mlasAvailable()) return false;
+    if (N <= 0 || K <= 0 || B == nullptr || packed_B == nullptr) return false;
+    MlasGemmPackB(trans_a ? CblasTrans : CblasNoTrans,
+                  trans_b ? CblasTrans : CblasNoTrans,
+                  static_cast<size_t>(N),
+                  static_cast<size_t>(K),
+                  B, static_cast<size_t>(ldb),
+                  packed_B,
+                  /*BackendKernelSelectorConfig=*/nullptr);
+    return true;
+}
+
+bool mlasSgemmPacked(bool trans_a, bool trans_b,
+                     int M, int N, int K,
+                     float alpha,
+                     const float* A, int lda,
+                     const void* packed_B,
+                     float beta,
+                     float* C, int ldc)
+{
+    if (!mlasAvailable()) { g_mlas_counter.single_skipped++; return false; }
+    if (M <= 0 || N <= 0 || K <= 0) { g_mlas_counter.single_skipped++; return false; }
+
+    MLAS_SGEMM_DATA_PARAMS data;
+    data.A = A;
+    data.lda = static_cast<size_t>(lda);
+    data.B = static_cast<const float*>(packed_B);
+    data.ldb = 0;  // ignored when BIsPacked
+    data.C = C;
+    data.ldc = static_cast<size_t>(ldc);
+    data.alpha = alpha;
+    data.beta = beta;
+    data.BIsPacked = true;
+
+    MlasGemm(trans_a ? CblasTrans : CblasNoTrans,
+             trans_b ? CblasTrans : CblasNoTrans,
+             static_cast<size_t>(M),
+             static_cast<size_t>(N),
+             static_cast<size_t>(K),
+             data,
+             /*ThreadPool=*/nullptr,
+             /*BackendKernelSelectorConfig=*/nullptr);
+    g_mlas_counter.single++;
+    return true;
+}
+
 }}  // cv::dnn
 
 #endif  // HAVE_MLAS
