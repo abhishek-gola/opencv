@@ -254,12 +254,20 @@ struct Net::Impl : public detail::NetImplBase
     void finalizeOrt();
     void refreshOrtMainGraphOutputs();
     void applyStagedOrtInputs();
+    // Drains the JSON file ORT writes when session profiling is enabled and
+    // populates ort_profile_data with (layer_name, op_type, ms_per_run) tuples.
+    // Idempotent: subsequent calls return the already-collected data.
+    void collectOrtProfileData() const;
     std::vector<std::pair<std::string, Mat>> ort_staged_inputs;
     std::shared_ptr<Ort::Env> ort_env;
     std::shared_ptr<Ort::Session> ort_session;
     std::shared_ptr<OrtNamesCache> ort_names_cache;
     bool useOrtEngine = false;   // true only when user explicitly selected ENGINE_ORT
     bool ortNeedsReinit = false;  // session needs (re)creation on next finalizeNet
+    std::string ort_profile_path_prefix;          // prefix passed to EnableProfiling
+    mutable bool ort_profile_collected = false;   // EndProfiling was already called once
+    mutable int  ort_profile_runs = 0;            // number of session.Run calls since profiling started (warmup + timed)
+    mutable std::vector<std::tuple<String, String, double>> ort_profile_data;  // (name, type, ms_per_run)
 #endif
 
     void allocateLayer(int lid, const LayersShapesMap& layersShapes);
@@ -330,6 +338,9 @@ struct Net::Impl : public detail::NetImplBase
             std::vector<int>& layerIds, std::vector<size_t>& weights,
             std::vector<size_t>& blobs) /*const*/;
     int64 getPerfProfile(std::vector<double>& timings) const;
+    void collectLayerInfo(std::vector<String>& names, std::vector<String>& types) const;
+    std::vector<std::pair<String, double>> profile() const;
+    void printProfile() const;
 
     void applyWinogradMemoryBudget(const Ptr<Graph>& graph);
 
