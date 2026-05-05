@@ -130,6 +130,52 @@ public:
 
     bool isDataShuffling() const CV_OVERRIDE { return true; }
 
+    int getLayouts(const std::vector<DataLayout>& actualInputs,
+                   std::vector<DataLayout>& desiredInputs,
+                   const int requiredOutputs,
+                   std::vector<DataLayout>& outputs) const CV_OVERRIDE
+    {
+        // Slice preserves block layout iff every sliced axis maps cleanly into
+        // the BLOCK 5D shape. We resolve axes from the static member if set,
+        // otherwise from input[3] when it's a const tensor (the typical ONNX form).
+        // Rules:
+        //   * non-channel axes (N/H/W): same index in 5D BLOCK as in NCHW 4D -> safe.
+        //   * channel axis: would slice the outer C/c block. Only safe when starts
+        //     and ends are multiples of c — too restrictive to bother, demote to NCHW.
+        //   * negative axes: would resolve to a different dim against the 5D shape -> reject.
+        //   * implicit axes (no axes input and member empty): means slice axes
+        //     are 0..nstarts-1, almost always includes the channel axis -> reject.
+        auto* netimpl_ = getNetImpl(this);
+        DataLayout defaultLayout = netimpl_->originalLayout;
+        const size_t ninputs = actualInputs.size();
+        desiredInputs = actualInputs;
+        outputs.assign(requiredOutputs, DATA_LAYOUT_UNKNOWN);
+
+        const bool inputIsBlock = ninputs >= 1 && actualInputs[0] == DATA_LAYOUT_BLOCK;
+
+        std::vector<int> resolvedAxes = axes;
+        if (resolvedAxes.empty() && this->inputs.size() > 3 &&
+            netimpl_->isConstArg(this->inputs[3])) {
+            Mat axesT = netimpl_->argTensor(this->inputs[3]);
+            tensorToIntVec(axesT, resolvedAxes);
+        }
+        bool axesOK = !resolvedAxes.empty();
+        if (axesOK) {
+            const int channelAxis = (defaultLayout == DATA_LAYOUT_NCHW) ? 1 :
+                                    (defaultLayout == DATA_LAYOUT_NHWC) ? 3 : -1;
+            for (int a : resolvedAxes) {
+                if (a < 0 || a == channelAxis) { axesOK = false; break; }
+            }
+        }
+
+        if (inputIsBlock && axesOK) {
+            outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
+        } else if (inputIsBlock) {
+            desiredInputs[0] = defaultLayout;
+        }
+        return outputs[0] == DATA_LAYOUT_BLOCK ? netimpl_->defaultC0 : 0;
+    }
+
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int,
                          std::vector<MatShape> &outputs,
