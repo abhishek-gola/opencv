@@ -76,8 +76,7 @@ public:
         return backendId == DNN_BACKEND_OPENCV;
     }
 
-    // Reshape just re-interprets the same contiguous buffer. Let the graph
-    // buffer allocator alias input and output so the memcpy in forward() is a no-op.
+    // Reshape just re-interprets the same contiguous buffer.
     virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
 
     bool haveShapeSpec() const

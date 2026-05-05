@@ -162,17 +162,6 @@ public:
                    const int requiredOutputs,
                    std::vector<DataLayout>& outputs) const CV_OVERRIDE
     {
-        // Concat preserves block layout whenever every input is already in BLOCK
-        // form (which guarantees each input's C is divisible by c by construction):
-        //  - non-channel axis (N/H/W): same index in BLOCK 5D as in NCHW 4D
-        //    since BLOCK = [N, C/c, H, W, c] only splits the channel dim.
-        //  - channel axis (NCHW=1): resolves to BLOCK axis 1 (outer C/c). Each
-        //    input's outer dim is already a whole number of c-blocks, so simply
-        //    concatenating those gives a valid BLOCK output with total C still
-        //    divisible by c.
-        // The existing concat() loop handles both with no special-casing.
-        // Negative axis values are still rejected — they'd map to a different
-        // dim against the 5D shape and silently misroute the concat.
         auto* netimpl_ = getNetImpl(this);
         DataLayout defaultLayout = netimpl_->originalLayout;
         const size_t ninputs = actualInputs.size();

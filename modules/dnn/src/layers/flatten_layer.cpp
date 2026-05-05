@@ -89,9 +89,7 @@ public:
 
     bool isDataShuffling() const CV_OVERRIDE { return true; }
 
-    // Flatten just re-interprets the same contiguous buffer; let the new-engine
-    // buffer allocator alias input and output so forward() can short-circuit
-    // the copy (mirrors Reshape2 / Squeeze / Unsqueeze).
+    // Flatten just re-interprets the same contiguous buffer
     virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
 
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
@@ -214,11 +212,6 @@ public:
                    outputs_arr.isUMatVector(),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
-        // Flatten only re-interprets the same contiguous buffer. Use the shared
-        // helper so we (a) skip the copy entirely when the buffer allocator was
-        // able to alias input==output (alwaysSupportInplace path) and (b) parallelize
-        // the memcpy on the fallback path when the input has multiple consumers.
-        // Matches Reshape2 / Squeeze / Unsqueeze.
         std::vector<Mat> outs;
         outputs_arr.getMatVector(outs);
         CV_Assert(!outs.empty());

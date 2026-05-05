@@ -135,16 +135,6 @@ public:
                    const int requiredOutputs,
                    std::vector<DataLayout>& outputs) const CV_OVERRIDE
     {
-        // Slice preserves block layout iff every sliced axis maps cleanly into
-        // the BLOCK 5D shape. We resolve axes from the static member if set,
-        // otherwise from input[3] when it's a const tensor (the typical ONNX form).
-        // Rules:
-        //   * non-channel axes (N/H/W): same index in 5D BLOCK as in NCHW 4D -> safe.
-        //   * channel axis: would slice the outer C/c block. Only safe when starts
-        //     and ends are multiples of c — too restrictive to bother, demote to NCHW.
-        //   * negative axes: would resolve to a different dim against the 5D shape -> reject.
-        //   * implicit axes (no axes input and member empty): means slice axes
-        //     are 0..nstarts-1, almost always includes the channel axis -> reject.
         auto* netimpl_ = getNetImpl(this);
         DataLayout defaultLayout = netimpl_->originalLayout;
         const size_t ninputs = actualInputs.size();

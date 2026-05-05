@@ -45,7 +45,6 @@ static inline void transpose8x8(const _Tp* inp_, size_t istep,
 #if defined(__AVX2__)
     if (sizeof(_Tp) == 4u) {
         // 8x8 32-bit transpose via 256-bit AVX2: 8 unpack + 8 shuffle + 8 perm.
-        // Roughly 2x faster than the four v_transpose4x4 path on AVX2 hosts.
         const float* inp = (const float*)inp_;
         float* out = (float*)out_;
         __m256 r0 = _mm256_loadu_ps(inp + istep*0);
