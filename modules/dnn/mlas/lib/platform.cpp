@@ -288,6 +288,108 @@ MLAS_INTERNAL_DATA MLAS_DECLSPEC_ALIGN(const uint32_t MlasMaskMoveTableLasx[16],
 };
 
 #endif
+
+// =============================================================================
+// SGEMM-only constructor (vendor-local patch).
+//
+// When MLAS_GEMM_ONLY is defined, replace the original platform-init ctor
+// with a stripped-down version that only assigns the four (-ish) dispatch
+// fields read by sgemm.cpp:
+//   - GemmFloatKernel
+//   - KernelM1Routine            (x86_64 only)
+//   - KernelM1TransposeBRoutine  (x86_64 only)
+//   - TransposePackB16x4Routine  (x86_64 / loongarch only)
+// Plus, on the SBGemm aarch64+linux path, the SBGemm batch overrides — but
+// those are nullptr-default and we don't enable SBGemm here.
+//
+// Every other dispatch field stays at its in-class default (most are
+// `= nullptr`). Calling any non-SGEMM MLAS API in this build is undefined.
+//
+// The original full ORT ctor is preserved unchanged below the #else for
+// future re-vendoring — drop MLAS_GEMM_ONLY to use it.
+// =============================================================================
+#ifdef MLAS_GEMM_ONLY
+MLAS_PLATFORM::MLAS_PLATFORM(void)
+{
+#if defined(MLAS_TARGET_AMD64_IX86)
+    // SSE2 baseline (every x86 since 2003).
+    this->GemmFloatKernel = MlasGemmFloatKernelSse;
+#if defined(MLAS_TARGET_AMD64)
+    this->TransposePackB16x4Routine = MlasSgemmTransposePackB16x4Sse;
+#endif
+
+    unsigned Cpuid1[4];
+#if defined(_WIN32)
+    __cpuid((int*)Cpuid1, 1);
+#else
+    __cpuid(1, Cpuid1[0], Cpuid1[1], Cpuid1[2], Cpuid1[3]);
+#endif
+    // AVX + OSXSAVE bits (matches the original ctor's checks).
+    if ((Cpuid1[2] & 0x18000000) == 0x18000000) {
+        uint64_t xcr0 = MlasReadExtendedControlRegister(_XCR_XFEATURE_ENABLED_MASK);
+        if ((xcr0 & 0x6) == 0x6) {
+            this->GemmFloatKernel = MlasGemmFloatKernelAvx;
+#if defined(MLAS_TARGET_AMD64)
+            this->KernelM1Routine            = MlasSgemmKernelM1Avx;
+            this->KernelM1TransposeBRoutine  = MlasSgemmKernelM1TransposeBAvx;
+            this->TransposePackB16x4Routine  = MlasSgemmTransposePackB16x4Avx;
+#endif
+            unsigned Cpuid7[4];
+#if defined(_WIN32)
+            __cpuidex((int*)Cpuid7, 7, 0);
+#else
+            __cpuid_count(7, 0, Cpuid7[0], Cpuid7[1], Cpuid7[2], Cpuid7[3]);
+#endif
+            // AVX2 + FMA3.
+            if (((Cpuid1[2] & 0x1000) != 0) && ((Cpuid7[1] & 0x20) != 0)) {
+                this->GemmFloatKernel = MlasGemmFloatKernelFma3;
+                // AVX-512F + ZMM-state save.
+                if (((Cpuid7[1] & 0x10000) != 0) && ((xcr0 & 0xE0) == 0xE0)) {
+                    this->GemmFloatKernel = MlasGemmFloatKernelAvx512F;
+                }
+            }
+        }
+    }
+#endif // MLAS_TARGET_AMD64_IX86
+
+#if defined(MLAS_TARGET_POWER)
+    // Default to the base SgemmKernelPower; the POWER10 detection branch in
+    // the original ctor is omitted because the POWER10 SgemmKernel symbol
+    // (MlasSgemmKernelPOWER10) is only present when -mcpu=power10 was
+    // detectable at configure time. CMake conditionally compiles it; the
+    // base kernel is always available.
+    this->GemmFloatKernel = MlasSgemmKernel;
+#endif
+
+#if defined(MLAS_TARGET_S390X)
+    this->GemmFloatKernel = MlasSgemmKernel;
+#endif
+
+#if defined(MLAS_TARGET_RISCV64)
+    this->GemmFloatKernel = nullptr;
+#if defined(MLAS_USE_RVV)
+    bool has_rvv = true;
+#if defined(__linux__)
+    has_rvv = (getauxval(AT_HWCAP) & COMPAT_HWCAP_ISA_V) != 0;
+#endif
+    if (has_rvv) {
+        this->GemmFloatKernel = MlasGemmFloatKernelRvv;
+    }
+#endif // MLAS_USE_RVV
+#endif // MLAS_TARGET_RISCV64
+
+#if defined(MLAS_TARGET_LARCH64)
+    // No fine-grained LSX/LASX detection here — pick LASX (256-bit) since
+    // the LoongArch64 spec requires it; LSX (128-bit) is the fallback.
+    this->GemmFloatKernel           = MlasGemmFloatKernelLasx;
+    this->TransposePackB16x4Routine = MlasSgemmTransposePackB16x4Lasx;
+#endif
+
+    // ARM64 and WASM intentionally do nothing here — sgemm.cpp's #else branch
+    // calls MlasSgemmKernelZero / MlasSgemmKernelAdd directly without going
+    // through GetMlasPlatform().GemmFloatKernel.
+}
+#else  // !MLAS_GEMM_ONLY
 MLAS_PLATFORM::MLAS_PLATFORM(
     void
     )
@@ -909,6 +1011,7 @@ Return Value:
 #endif // MLAS_TARGET_LARCH64
 
 }
+#endif // MLAS_GEMM_ONLY
 
 size_t
 MLASCALL

@@ -17,8 +17,16 @@
 //   2. The three threaded entry points below dispatch to cv::parallel_for_.
 
 #include "lib/mlasi.h"
+#include "lib/qgemm.h"   // for MLAS_GEMM_QUANT_DISPATCH definition (stub below)
 
 #include <opencv2/core/utility.hpp>
+
+// MLAS_GEMM_ONLY stub: mlasi.h's MLAS_PLATFORM struct uses
+//   GemmS8S8Dispatch{&MlasGemmQuantDispatchDefault}
+// as in-class initializers. The real definition lives in qgemm_kernel_default.cpp
+// which we don't compile in the SGEMM-only build. Provide a zero-initialized
+// instance so mlasi.h links — it's never read because we never call MlasQgemm.
+extern "C++" const MLAS_GEMM_QUANT_DISPATCH MlasGemmQuantDispatchDefault{};
 
 extern "C" int opencv_dnn_mlas_max_threads()
 {

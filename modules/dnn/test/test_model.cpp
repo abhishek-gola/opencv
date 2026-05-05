@@ -1370,6 +1370,94 @@ TEST_P(Reproducibility_YOLOv8n_ONNX, Accuracy)
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_YOLOv8n_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
+typedef testing::TestWithParam<Target> Benchmark_RTDETR_ONNX;
+TEST_P(Benchmark_RTDETR_ONNX, Accuracy)
+{
+    Target targetId = GetParam();
+    auto engine_forced = static_cast<EngineType>(
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
+    if (engine_forced == ENGINE_CLASSIC)
+    {
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
+        return;
+    }
+
+    applyTestTag(CV_TEST_TAG_MEMORY_2GB, CV_TEST_TAG_LONG);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("onnx/models/rtdetr.onnx", false);
+    Net net = readNetFromONNX(modelname);
+
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(targetId);
+
+    if (targetId == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+
+    std::string imgname = _tf("basketball1.png");
+    Mat image = imread(imgname);
+    ASSERT_TRUE(!image.empty());
+
+    Mat input = blobFromImage(image, 1.0/255.0, Size(640, 640), Scalar(), true, false, CV_32F);
+    net.setInput(input);
+
+    const int warmupIters = 5;
+    const int benchIters = 20;
+
+    // Warmup
+    for (int i = 0; i < warmupIters; ++i)
+        net.forward();
+
+    // Benchmark
+    double freq = cv::getTickFrequency();
+    double sum = 0.0;
+    double mn = std::numeric_limits<double>::infinity();
+    double mx = 0.0;
+    for (int i = 0; i < benchIters; ++i)
+    {
+        int64 t0 = cv::getTickCount();
+        net.forward();
+        int64 t1 = cv::getTickCount();
+        double ms = (double)(t1 - t0) * 1000.0 / freq;
+        sum += ms;
+        if (ms < mn) mn = ms;
+        if (ms > mx) mx = ms;
+    }
+    double avg = sum / benchIters;
+
+    const char* engineName =
+        engine_forced == ENGINE_NEW    ? "ENGINE_NEW" :
+        engine_forced == ENGINE_ORT    ? "ENGINE_ORT" :
+        engine_forced == ENGINE_AUTO   ? "ENGINE_AUTO" :
+                                         "UNKNOWN";
+
+    printf("RT-DETR benchmark [%s, target=%d]: warmup=%d iters=%d  avg=%.2f ms  min=%.2f ms  max=%.2f ms\n",
+           engineName, (int)targetId, warmupIters, benchIters, avg, mn, mx);
+
+    // Sanity check on the output: shape (1, 300, 84) — [cx,cy,w,h, 80 class scores]
+    Mat out = net.forward();
+    if (out.type() != CV_32F) out.convertTo(out, CV_32F);
+    ASSERT_GE(out.dims, 2);
+    int nq = (out.dims == 3) ? out.size[1] : out.size[0];
+    int nch = (out.dims == 3) ? out.size[2] : out.size[1];
+    ASSERT_EQ(nq, 300);
+    ASSERT_EQ(nch, 84);
+
+    int dets = 0;
+    const float confTh = 0.5f;
+    Mat out2 = out.reshape(1, nq);  // 300 x 84
+    for (int q = 0; q < nq; ++q)
+    {
+        float bestScore = 0.f;
+        for (int c = 4; c < nch; ++c)
+            bestScore = std::max(bestScore, out2.at<float>(q, c));
+        if (bestScore >= confTh) ++dets;
+    }
+    printf("  detections (conf >= %.2f): %d\n", confTh, dets);
+}
+INSTANTIATE_TEST_CASE_P(/**/, Benchmark_RTDETR_ONNX,
+                        testing::Values(DNN_TARGET_CPU));
+
 
 typedef testing::TestWithParam<Target> Reproducibility_YOLOXS_ONNX;
 TEST_P(Reproducibility_YOLOXS_ONNX, Accuracy)
