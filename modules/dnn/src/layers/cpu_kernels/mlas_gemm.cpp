@@ -29,8 +29,11 @@ struct MlasCallCounter {
         if (e && std::string(e) == "0") return;
         std::fprintf(stderr,
             "[MLAS] mlasSgemm calls: %zu, mlasSgemmBatch calls: %zu, "
-            "skipped (unavailable/strided): %zu\n",
-            single.load(), batched.load(), single_skipped.load());
+            "skipped (unavailable/strided): %zu, mlasAvailable=%d, "
+            "MlasGetPreferredBufferAlignment=%zu\n",
+            single.load(), batched.load(), single_skipped.load(),
+            (int)cv::dnn::mlasAvailable(),
+            (size_t)MlasGetPreferredBufferAlignment());
     }
 };
 MlasCallCounter g_mlas_counter;
