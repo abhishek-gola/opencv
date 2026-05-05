@@ -5,7 +5,6 @@
 #include "../precomp.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include "./cpu_kernels/fast_norm.hpp"
-#include "../net_impl.hpp"
 
 // CUDA backend
 #include "../op_cuda.hpp"
@@ -47,7 +46,7 @@ public:
         const auto &bias = inputs[2];
         CV_CheckGE(input.size(), static_cast<size_t>(3), "DNN/GroupNorm: input dimension >= 3 is required");
 
-        int C = input.layout == DATA_LAYOUT_BLOCK ? input.C : input[1];
+        int C = input[1];
         int scale_dim = std::accumulate(scale.begin(), scale.end(), 1, std::multiplies<int>());
         CV_CheckEQ(scale_dim, C, "DNN/InstanceNorm: scale must be a 1d tensor and match the channel of input");
         int bias_dim = std::accumulate(bias.begin(), bias.end(), 1, std::multiplies<int>());
@@ -55,16 +54,6 @@ public:
 
         outputs.assign(1, inputs[0]);
         return false;
-    }
-
-    int getLayouts(const std::vector<DataLayout>& actualInputs,
-                   std::vector<DataLayout>& desiredInputs,
-                   const int requiredOutputs,
-                   std::vector<DataLayout>& outputs) const CV_OVERRIDE {
-        CV_Assert(!actualInputs.empty());
-        desiredInputs = actualInputs;
-        outputs.assign(requiredOutputs, actualInputs[0]);
-        return 0;
     }
 
     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE {
