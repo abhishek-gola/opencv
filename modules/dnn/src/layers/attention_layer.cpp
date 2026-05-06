@@ -379,19 +379,29 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
             auto qk_head_size = qkv_head_sizes[0];
             auto qk_inner_size = seq_len * qk_head_size;
 
-            // Compute scale * matmul(Q, K)
-            opt.multi_thread = false;
-            parallel_for_(Range(0, loops), [&] (const Range r) {
-                for (int i = r.start; i < r.end; i++) {
-                    const int output_offset = i * seq_len_square;
-
-                    const auto *q = Q + qk_inner_size * i, *k = K + qk_inner_size * i;
-                    fastGemm(false, true, seq_len, qk_head_size, seq_len, qk_head_size,
-                             scale, q, qk_head_size, 1,
-                             k, qk_head_size, 1, 0.f,
-                             output + output_offset, seq_len, opt);
-                }
-            }, loops * seq_len * qk_head_size * seq_len * (1 / 1024.0));
+            // Compute scale * matmul(Q, K^T) for all (batch, head) pairs as a
+            // single batched call. Wrapping the per-head fastGemm in an outer
+            // parallel_for_ caused nested parallelism — the inner mlasSgemm
+            // dispatches its own cv::parallel_for_ over the M/N partition,
+            // and OpenCV's executor doesn't reliably handle nested ranges,
+            // so the inner work serialized on most threads. fastGemmBatch
+            // hands the whole batch to MlasGemmBatch, which threads the
+            // (batch * tiles) work as a single 1D partition.
+            std::vector<size_t> qk_a_offs(loops), qk_b_offs(loops), qk_c_offs(loops);
+            for (int i = 0; i < (int)loops; i++) {
+                qk_a_offs[i] = (size_t)i * qk_inner_size;
+                qk_b_offs[i] = (size_t)i * qk_inner_size;
+                qk_c_offs[i] = (size_t)i * seq_len_square;
+            }
+            opt.multi_thread = true;
+            // For B (the K tensor) we want op(B) = B^T. Storage is [seq_len,
+            // qk_head_size]; passing ldb0=1, ldb1=qk_head_size makes
+            // fastGemmBatch's stride detection emit the trans_b form.
+            fastGemmBatch(loops, qk_a_offs.data(), qk_b_offs.data(), qk_c_offs.data(),
+                          (int)seq_len, (int)seq_len, (int)qk_head_size,
+                          scale, Q, (int)qk_head_size, 1,
+                          K, 1, (int)qk_head_size, 0.f,
+                          output, (int)seq_len, opt);
 
             // Additive attention mask applied before softmax. Supports BERT-style mask
             // shapes [B, 1, 1, S] (per-batch) and [1, 1, 1, S] (global broadcast).
@@ -444,29 +454,37 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
             auto v_head_size = qkv_head_sizes[2];
             auto v_inner_size = seq_len * v_head_size;
 
-            opt.multi_thread = false;
-            parallel_for_(Range(0, loops), [&] (const Range &r) {
+            // Batched matmul(prob, V) — same nested-parallelism rationale as
+            // QK^T: hand all (batch, head) entries to MLAS in one call.
+            std::vector<size_t> av_a_offs(loops), av_b_offs(loops), av_c_offs(loops);
+            for (int i = 0; i < (int)loops; i++) {
+                av_a_offs[i] = (size_t)i * prob_inner_size;
+                av_b_offs[i] = (size_t)i * v_inner_size;
+                av_c_offs[i] = (size_t)i * v_inner_size;
+            }
+            opt.multi_thread = true;
+            fastGemmBatch(loops, av_a_offs.data(), av_b_offs.data(), av_c_offs.data(),
+                          (int)seq_len, (int)v_head_size, (int)seq_len,
+                          1.f, prob, (int)seq_len, 1,
+                          V, (int)v_head_size, 1, 0.f,
+                          output_buff, (int)v_head_size, opt);
+
+            // Transpose-on-the-fly back to [B, S, H*D] layout for downstream
+            // consumers. Done as a separate parallel pass over (batch, head).
+            parallel_for_(Range(0, (int)loops), [&] (const Range &r) {
                 for (int i = r.start; i < r.end; i++) {
-                    const int output_offset = i * v_inner_size;
-
-                    const auto *p = prob + i * prob_inner_size, *v = V + i * v_inner_size;
-                    fastGemm(false, false, seq_len, seq_len, seq_len, v_head_size,
-                             1.f, p, seq_len, 1,
-                             v, v_head_size, 1, 0.f,
-                             output_buff + output_offset, v_head_size, opt);
-
-                    // tranpose on the fly
+                    const int output_offset = i * (int)v_inner_size;
                     const int batch_index = static_cast<int>(i / num_heads);
-                    const int head_index = static_cast<int>(i % num_heads);
-                    auto *src = output_buff + output_offset;
-                    auto *dst = output + (batch_index * seq_len * num_heads + head_index) * v_head_size;
-                    for (int j = 0; j < seq_len; j++) {
+                    const int head_index  = static_cast<int>(i % num_heads);
+                    const float *src = output_buff + output_offset;
+                    float *dst = output + (batch_index * (int)seq_len * (int)num_heads + head_index) * (int)v_head_size;
+                    for (int j = 0; j < (int)seq_len; j++) {
                         std::memcpy(dst, src, v_head_size * sizeof(float));
                         src += v_head_size;
                         dst += qkv_hidden_sizes[2];
                     }
                 }
-            }, loops * seq_len * seq_len * v_head_size * (1 / 1024.0));
+            }, loops * seq_len * v_head_size * (1 / 1024.0));
         }
     }
 
