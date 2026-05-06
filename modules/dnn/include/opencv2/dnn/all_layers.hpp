@@ -1791,6 +1791,12 @@ CV__DNN_INLINE_NS_BEGIN
         bool trans_b;
         float alpha;
         float beta;
+        // When true (default, ONNX-conformant), an ND input A is flattened so
+        // the output is 2D [M*batches, N]. When false, the output keeps A's
+        // leading dims as [..., M, N] — used by the MatMul-with-const-B
+        // rewriter so projection ops can reach the MLAS pre-packed sgemm path
+        // without changing downstream shapes.
+        bool flatten_a;
 
         static Ptr<GemmLayer> create(const LayerParams& params);
     };
@@ -1799,6 +1805,8 @@ CV__DNN_INLINE_NS_BEGIN
      public:
         bool trans_a;
         bool trans_b;
+        float alpha;
+        float beta;
 
         static Ptr<MatMulLayer> create(const LayerParams &params);
     };

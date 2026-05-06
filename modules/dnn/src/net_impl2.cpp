@@ -550,6 +550,11 @@ void Net::Impl::prepareForInference()
         constFold();
         constArgs();
         fuseAttention();
+        // Convert remaining MatMul-with-const-B (the projections that
+        // attention fusion didn't consume) into Gemm so they reach the
+        // MLAS pre-packed sgemm path. Run before fuseSharedInputGemm so
+        // the latter can also bundle these newly-created Gemms.
+        fuseMatMulConstBToGemm();
         fuseSharedInputGemm();
         // After attention/QKV fusion has had a chance to consume them, sweep
         // any leftover Reshape/Transpose chains and absorb Transpose into
