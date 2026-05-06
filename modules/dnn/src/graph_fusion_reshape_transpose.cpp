@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 // Cleans up redundant Reshape/Transpose chains:
 //   - Reshape(A) -> Reshape(B): drop the inner reshape (A's shape is irrelevant
@@ -48,7 +50,6 @@ struct ModelFusionReshapeTranspose
         size_t nops = prog.size();
         bool modified = false;
 
-        // Recurse into subgraphs (control-flow ops).
         for (size_t i = 0; i < nops; i++) {
             if (!prog[i]) continue;
             vector<Ptr<Graph>>* subgraphs = prog[i]->subgraphs();
@@ -58,9 +59,6 @@ struct ModelFusionReshapeTranspose
             }
         }
 
-        // Build producer map and a set of "external" arg indices (graph
-        // outputs). We only redirect consumers when the bypassed arg has no
-        // external reference, so graph outputs stay intact.
         std::map<int, int> producer;
         std::set<int> externalArgs;
         for (Arg out : graph->outputs())
@@ -78,7 +76,7 @@ struct ModelFusionReshapeTranspose
             if (!layer || dropped[i]) continue;
             if (layer->inputs.empty() || layer->outputs.empty()) continue;
 
-            // (3) Identity Transpose: bypass.
+            // Identity Transpose: bypass.
             TransposeLayer* tr = dynamic_cast<TransposeLayer*>(layer.get());
             if (tr && layer->outputs.size() == 1 && isIdentityPerm(tr->perm)) {
                 Arg out = layer->outputs[0];
@@ -91,7 +89,7 @@ struct ModelFusionReshapeTranspose
                 }
             }
 
-            // (2) Transpose + Transpose -> Transpose (compose perms).
+            // Transpose + Transpose -> Transpose (compose perms).
             if (tr && layer->outputs.size() == 1) {
                 auto it = producer.find(layer->inputs[0].idx);
                 if (it != producer.end()) {
@@ -130,7 +128,7 @@ struct ModelFusionReshapeTranspose
                 }
             }
 
-            // (1) Reshape + Reshape -> Reshape (drop the inner reshape).
+            //Reshape + Reshape -> Reshape (drop the inner reshape).
             Reshape2Layer* rs = dynamic_cast<Reshape2Layer*>(layer.get());
             if (rs && layer->outputs.size() == 1) {
                 auto it = producer.find(layer->inputs[0].idx);
@@ -144,9 +142,6 @@ struct ModelFusionReshapeTranspose
                                             && externalArgs.count(prevOut.idx) == 0;
                         if (prevRs && pl->outputs.size() == 1 && single_consumer)
                         {
-                            // Skip the inner reshape: this layer reshapes from
-                            // the original input directly. Our shape spec
-                            // (newShapeDesc / inputs[1]) is unchanged.
                             layer->inputs[0] = pl->inputs[0];
                             dropped[prod_idx] = true;
                             usecounts[prevOut.idx] = 0;

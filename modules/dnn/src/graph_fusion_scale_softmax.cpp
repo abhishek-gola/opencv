@@ -1,6 +1,8 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
 // Folds a scalar Mul / Div immediately preceding Softmax into the Softmax
 // layer's `scale` parameter. The fused softmax bakes the scale into the
@@ -10,14 +12,6 @@
 // Pattern:
 //   X -> Mul(X, c)  -> Softmax     =>   X -> Softmax(scale=c)
 //   X -> Div(X, c)  -> Softmax     =>   X -> Softmax(scale=1/c)
-//
-// Constraints:
-//   - Only fires for the CPU/OpenCV backend; other backends would need their
-//     own scaled-softmax kernel to be safe to fuse.
-//   - The scalar must be a constant (single-element tensor).
-//   - The Mul/Div output must have a single consumer (the Softmax) and not
-//     be a graph output, so removing the Mul/Div is safe.
-//   - log_softmax is excluded — log(softmax(scale*x)) ≠ scale*log(softmax(x)).
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
@@ -121,8 +115,6 @@ struct ModelFusionScaleSoftmax
                                 && externalArgs.count(sm_in.idx) == 0;
             if (!single_consumer) continue;
 
-            // Bake the scalar into the Softmax. Compose with any pre-existing
-            // scale (defaults to 1) so multiple passes can keep accumulating.
             sm->scale *= scalar;
             layer->inputs[0] = pl->inputs[x_slot];
             dropped[prod_idx] = true;
@@ -148,9 +140,6 @@ struct ModelFusionScaleSoftmax
 
 void Net::Impl::fuseScaleSoftmax()
 {
-    // The scale path is implemented for the OpenCV (CPU) backend's Softmax
-    // kernel only. For other backends, leave the Mul/Div + Softmax pair
-    // untouched so the runtime stays correct.
     if (preferableBackend != DNN_BACKEND_OPENCV ||
         preferableTarget  != DNN_TARGET_CPU)
         return;

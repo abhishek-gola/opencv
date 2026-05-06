@@ -1,22 +1,16 @@
 // This file is part of OpenCV project.
 // It is subject to the license terms in the LICENSE file found in the top-level directory
 // of this distribution and at http://opencv.org/license.html.
+// Copyright (C) 2026, BigVision LLC, all rights reserved.
+// Third party copyrights are property of their respective owners.
 
-// Absorbs a Transpose that only swaps the last two dimensions into the
-// trans_a / trans_b parameter of the consuming MatMul. The Transpose is
-// dropped when it has a single consumer (the MatMul) and its input has no
-// external reference.
+// Folds a Transpose-of-last-two-dims into the consuming MatMul's trans_a / trans_b.
 //
 // Pattern:
-//   X -> Transpose(perm=[0,1,..,n-3,n-1,n-2]) -> MatMul(., Y)
-//   X -> MatMul(transA=true, ., Y)
+//   X -> Transpose(perm=[0,..,n-3, n-1, n-2]) -> MatMul(., Y)
+//   =>  X -> MatMul(trans_a=true, ., Y)
 //
-// (and the symmetric case where the transpose feeds the second operand,
-//  which is folded into transB.)
-//
-// MatMul in cv::dnn treats only the last two axes as the matrix dims and
-// broadcasts the leading batch dims, so a perm that leaves all batch axes
-// fixed and only flips the trailing two is equivalent to setting transA/transB.
+// Symmetric on the second operand -> trans_b.
 
 #include "precomp.hpp"
 #include "net_impl.hpp"
@@ -33,7 +27,6 @@ struct ModelFusionTransposeMatMul
 
     void fuse() { fuseGraph(netimpl->mainGraph); }
 
-    // perm leaves [0..n-3] unchanged and swaps [n-2] with [n-1].
     static bool isLastTwoSwap(const vector<int>& perm)
     {
         int n = (int)perm.size();
@@ -80,8 +73,6 @@ struct ModelFusionTransposeMatMul
 
             MatMulLayer* mm = dynamic_cast<MatMulLayer*>(layer.get());
             if (!mm) continue;
-            // Only handle the two-runtime-input form. Variants with a
-            // weight-blob B don't see a Transpose feeding them at runtime.
             if (layer->inputs.size() != 2) continue;
 
             for (int slot = 0; slot < 2; slot++) {
@@ -100,7 +91,6 @@ struct ModelFusionTransposeMatMul
                                     && externalArgs.count(in.idx) == 0;
                 if (!single_consumer) continue;
 
-                // Flip the corresponding trans flag.
                 if (slot == 0) mm->trans_a = !mm->trans_a;
                 else           mm->trans_b = !mm->trans_b;
 
