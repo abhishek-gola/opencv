@@ -629,11 +629,7 @@ public:
                     }
                 }
             };
-            // Use total work (planes * plane_size) so large broadcasts parallelize
-            // even when nplanes alone is below the old nstripes threshold. Target
-            // ~16KB of output work per stripe so even tiny plane_size ops (e.g.
-            // 2-element broadcast rows) spread across threads instead of running
-            // serially.
+            // ~16KB of output bytes per stripe (one L1 cache line page) so broadcasts with many tiny planes still spread across threads.
             double nstripes = (double)nplanes * plane_size * sizeof(T) / 16384.0;
             if (nstripes < 1.0) nstripes = 1.0;
             (void)block_size;

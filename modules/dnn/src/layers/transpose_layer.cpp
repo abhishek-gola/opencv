@@ -33,8 +33,7 @@ namespace dnn
 */
 
 // Detect a "swap innermost two dims" permutation, collapsing leading dims.
-// Returns true and fills outer/rows/cols when applicable.
-static bool is_swap_last_two_f32(const MatShape& inpShape,
+static bool isSwapLastTwo(const MatShape& inpShape,
                                  const std::vector<int>& perm,
                                  int esz,
                                  int64_t& outer, int64_t& rows, int64_t& cols)
@@ -62,7 +61,7 @@ static void transpose(const Mat& inp, const std::vector<int>& perm, Mat& out)
     CV_Assert(esz == 1 || esz == 2 || esz == 4 || esz == 8);
 
     int64_t outer = 1, rows = 0, cols = 0;
-    if (is_swap_last_two_f32(inpShape, perm, (int)esz, outer, rows, cols)
+    if (isSwapLastTwo(inpShape, perm, (int)esz, outer, rows, cols)
         && inp.isContinuous() && out.isContinuous()) {
         CV_CPU_DISPATCH(transpose2D_f32_,
                         (inp.ptr<float>(), out.ptr<float>(), outer, rows, cols),
@@ -92,24 +91,19 @@ static void transpose(const Mat& inp, const std::vector<int>& perm, Mat& out)
 
             parallel_for_(Range(0, (int)outerTotal), [&](const Range& r) {
                 std::vector<int> outIdx(ndims - 1, 0);
-                // initialize outIdx to r.start in row-major
                 int64_t rem = r.start;
                 for (int k = ndims - 2; k >= 0; k--) {
                     outIdx[k] = (int)(rem % outOuterShape[k]);
                     rem /= outOuterShape[k];
                 }
                 for (int64_t idx = r.start; idx < r.end; idx++) {
-                    // Compute input outer offset using perm.
                     int64_t inOff = 0;
                     for (int i = 0; i < ndims - 1; i++) {
-                        // perm[i] is the input axis providing this output axis.
                         inOff += (int64_t)outIdx[i] * inStride[perm[i]];
                     }
-                    // Output position: linear idx * inner.
                     std::memcpy(out_base + (size_t)idx * innerBytes,
                                 in_base + (size_t)inOff * esz,
                                 innerBytes);
-                    // Advance outIdx (row-major over outOuterShape).
                     for (int k = ndims - 2; k >= 0; k--) {
                         if (++outIdx[k] < outOuterShape[k]) break;
                         outIdx[k] = 0;

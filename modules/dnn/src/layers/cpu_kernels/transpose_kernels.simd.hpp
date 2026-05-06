@@ -26,9 +26,7 @@ namespace cv { namespace dnn {
 CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
 
 #if (CV_SIMD || CV_SIMD_SCALABLE)
-// AVX2 8x8 f32 in-register transpose. v_transpose4x4 transposes the two
-// 128-bit halves independently; v_combine_low/high then exchange halves so
-// element k of each target row comes from the right source row.
+// AVX2 8x8 f32 transpose: v_transpose4x4 handles each 128-bit half, then v_combine_low/high swap halves across rows to finish the cross-lane shuffle.
 static inline void transpose_8x8_f32_avx2_(const float* src, int64_t src_stride,
                                            float* dst, int64_t dst_stride)
 {
