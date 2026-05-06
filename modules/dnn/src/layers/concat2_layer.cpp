@@ -172,7 +172,13 @@ public:
         for (size_t i = 0; i < ninputs; ++i)
             if (actualInputs[i] != DATA_LAYOUT_BLOCK) { allBlock = false; break; }
 
-        const bool canKeepBlock = allBlock && axis >= 0;
+        // BLOCK layout splits channels into (C1, C0) and pads the trailing
+        // C0 block with zeros when C is not a multiple of C0. A memcpy-based
+        // concat along the channel axis would interleave that padding into
+        // the middle of the output, so fall back to the original layout.
+        const int channelAxis = (defaultLayout == DATA_LAYOUT_NCHW) ? 1 :
+                                (defaultLayout == DATA_LAYOUT_NHWC) ? 3 : -1;
+        const bool canKeepBlock = allBlock && axis >= 0 && axis != channelAxis;
 
         if (canKeepBlock) {
             outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
