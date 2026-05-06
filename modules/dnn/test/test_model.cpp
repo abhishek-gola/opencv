@@ -1385,21 +1385,15 @@ TEST_P(Reproducibility_RTDETR_ONNX, Accuracy)
     applyTestTag(CV_TEST_TAG_MEMORY_2GB, CV_TEST_TAG_LONG);
     ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
 
-#ifndef HAVE_ONNXRUNTIME
-    GTEST_SKIP() << "ONNX Runtime not built; reference output unavailable.";
-#else
     std::string modelname = _tf("onnx/models/rtdetr.onnx", false);
-    std::string imgname = _tf("basketball1.png");
+    std::string imgname   = _tf("basketball1.png");
     Mat image = imread(imgname);
     ASSERT_TRUE(!image.empty());
 
     Mat input = blobFromImage(image, 1.0/255.0, Size(640, 640), Scalar(), true, false, CV_32F);
 
-    // Reference output captured from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
-    Net netRef = readNetFromONNX(modelname, ENGINE_ORT);
-    netRef.setInput(input);
-    Mat refOut = netRef.forward();
-    if (refOut.type() != CV_32F) refOut.convertTo(refOut, CV_32F);
+    // Reference output captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    Mat refOut = blobFromNPY(_tf("rtdetr_basketball1_ref.npy"));
 
     Net net = readNetFromONNX(modelname);
     net.setPreferableBackend(DNN_BACKEND_OPENCV);
@@ -1418,7 +1412,6 @@ TEST_P(Reproducibility_RTDETR_ONNX, Accuracy)
     double l1   = (targetId == DNN_TARGET_CPU_FP16) ? 5e-3 : 1e-4;
     double lInf = (targetId == DNN_TARGET_CPU_FP16) ? 5e-2 : 1e-3;
     normAssert(refOut, out, "RT-DETR output", l1, lInf);
-#endif
 }
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_RTDETR_ONNX,
                         testing::Values(DNN_TARGET_CPU));
@@ -1439,25 +1432,19 @@ TEST_P(Reproducibility_RFDETR_ONNX, Accuracy)
     applyTestTag(CV_TEST_TAG_MEMORY_2GB, CV_TEST_TAG_LONG);
     ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
 
-#ifndef HAVE_ONNXRUNTIME
-    GTEST_SKIP() << "ONNX Runtime not built; reference output unavailable.";
-#else
     std::string modelname = _tf("onnx/models/rfdetr.onnx", false);
-    std::string imgname = _tf("basketball1.png");
+    std::string imgname   = _tf("basketball1.png");
     Mat image = imread(imgname);
     ASSERT_TRUE(!image.empty());
 
     Mat input = blobFromImage(image, 1.0/255.0, Size(560, 560), Scalar(), true, false, CV_32F);
 
-    // Reference outputs captured from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
-    Net netRef = readNetFromONNX(modelname, ENGINE_ORT);
-    netRef.setInput(input);
-    std::vector<String> outNames = netRef.getUnconnectedOutLayersNames();
-    std::vector<Mat> refOuts;
-    netRef.forward(refOuts, outNames);
-    ASSERT_EQ(refOuts.size(), (size_t)2);
-    for (size_t i = 0; i < refOuts.size(); ++i)
-        if (refOuts[i].type() != CV_32F) refOuts[i].convertTo(refOuts[i], CV_32F);
+    // Reference outputs captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    std::vector<Mat> refOuts = {
+        blobFromNPY(_tf("rfdetr_basketball1_dets_ref.npy")),
+        blobFromNPY(_tf("rfdetr_basketball1_labels_ref.npy")),
+    };
+    std::vector<String> outNames = {"dets", "labels"};
 
     Net net = readNetFromONNX(modelname);
     net.setPreferableBackend(DNN_BACKEND_OPENCV);
@@ -1481,7 +1468,6 @@ TEST_P(Reproducibility_RFDETR_ONNX, Accuracy)
         std::string tag = "RF-DETR output[" + std::to_string(i) + "] (" + outNames[i] + ")";
         normAssert(refOuts[i], outs[i], tag.c_str(), l1, lInf);
     }
-#endif
 }
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_RFDETR_ONNX,
                         testing::Values(DNN_TARGET_CPU));
@@ -1502,11 +1488,8 @@ TEST_P(Reproducibility_GroundingDINO_ONNX, Accuracy)
     applyTestTag(CV_TEST_TAG_MEMORY_6GB, CV_TEST_TAG_LONG);
     ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
 
-#ifndef HAVE_ONNXRUNTIME
-    GTEST_SKIP() << "ONNX Runtime not built; reference output unavailable.";
-#else
     std::string modelname = _tf("onnx/models/ground_dino.onnx", false);
-    std::string imgname = _tf("messi5.jpg");
+    std::string imgname   = _tf("messi5.jpg");
     Mat image = imread(imgname);
     ASSERT_TRUE(!image.empty());
 
@@ -1519,7 +1502,7 @@ TEST_P(Reproducibility_GroundingDINO_ONNX, Accuracy)
     // [CLS]=101, person=2711, .=1012, [SEP]=102. Padded to max_length=256.
     const int max_length = 256;
     int ids_shape[] = {1, max_length};
-    Mat input_ids_i64 = Mat::zeros(2, ids_shape, CV_64S);
+    Mat input_ids_i64      = Mat::zeros(2, ids_shape, CV_64S);
     Mat attention_mask_i64 = Mat::zeros(2, ids_shape, CV_64S);
     Mat token_type_ids_i64 = Mat::zeros(2, ids_shape, CV_64S);
     const int64_t tokens[] = {101, 2711, 1012, 102};
@@ -1532,31 +1515,24 @@ TEST_P(Reproducibility_GroundingDINO_ONNX, Accuracy)
     int pixel_mask_shape[] = {1, 800, 800};
     Mat pixel_mask_i64 = Mat::ones(3, pixel_mask_shape, CV_64S);
 
-    auto setInputs = [&](Net& n) {
-        n.setInput(pixel_values,       "pixel_values");
-        n.setInput(input_ids_i64,      "input_ids");
-        n.setInput(token_type_ids_i64, "token_type_ids");
-        n.setInput(attention_mask_i64, "attention_mask");
-        n.setInput(pixel_mask_i64,     "pixel_mask");
+    // Reference outputs captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    std::vector<Mat> refOuts = {
+        blobFromNPY(_tf("ground_dino_messi_logits_ref.npy")),
+        blobFromNPY(_tf("ground_dino_messi_pred_boxes_ref.npy")),
     };
-
     std::vector<String> outNames = {"logits", "pred_boxes"};
-
-    // Reference outputs captured from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
-    Net netRef = readNetFromONNX(modelname, ENGINE_ORT);
-    setInputs(netRef);
-    std::vector<Mat> refOuts;
-    netRef.forward(refOuts, outNames);
-    ASSERT_EQ(refOuts.size(), (size_t)2);
-    for (size_t i = 0; i < refOuts.size(); ++i)
-        if (refOuts[i].type() != CV_32F) refOuts[i].convertTo(refOuts[i], CV_32F);
 
     Net net = readNetFromONNX(modelname);
     net.setPreferableBackend(DNN_BACKEND_OPENCV);
     net.setPreferableTarget(targetId);
     if (targetId == DNN_TARGET_CPU_FP16)
         net.enableWinograd(false);
-    setInputs(net);
+    net.setInput(pixel_values,       "pixel_values");
+    net.setInput(input_ids_i64,      "input_ids");
+    net.setInput(token_type_ids_i64, "token_type_ids");
+    net.setInput(attention_mask_i64, "attention_mask");
+    net.setInput(pixel_mask_i64,     "pixel_mask");
+
     std::vector<Mat> outs;
     net.forward(outs, outNames);
     ASSERT_EQ(outs.size(), refOuts.size());
@@ -1573,7 +1549,6 @@ TEST_P(Reproducibility_GroundingDINO_ONNX, Accuracy)
         std::string tag = "Grounding DINO output[" + std::to_string(i) + "] (" + outNames[i] + ")";
         normAssert(refOuts[i], outs[i], tag.c_str(), l1, lInf);
     }
-#endif
 }
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_GroundingDINO_ONNX,
                         testing::Values(DNN_TARGET_CPU));
