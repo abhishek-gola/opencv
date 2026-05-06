@@ -403,9 +403,12 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
                           K, 1, (int)qk_head_size, 0.f,
                           output, (int)seq_len, opt);
 
-            // Additive attention mask applied before softmax. Supports BERT-style mask
-            // shapes [B, 1, 1, S] (per-batch) and [1, 1, 1, S] (global broadcast).
-            // Only reached when the fusion pass attached an external mask input.
+            // Additive attention mask applied before softmax. Mask shape is
+            // right-aligned to the [B, H, S, S] attention scores and may broadcast
+            // any of the four dims (size-1 → broadcast). Covers BERT padding
+            // masks ([B,1,1,S], [1,1,1,S]), per-head dense masks ([1,H,S,S],
+            // [B,H,S,S]), 2D/3D variants ([S,S], [B,S,S]), etc. Only reached when
+            // the fusion pass attached an external mask input.
             int num_non_blob_inputs = (int)inputs.size();
             bool has_mask = (!blobs.empty() && num_non_blob_inputs >= 2) ||
                             (blobs.empty() && num_non_blob_inputs >= 4);
@@ -413,26 +416,63 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
                 const Mat &mask_mat = blobs.empty() ? inputs[3] : inputs[1];
                 CV_CheckTypeEQ(mask_mat.type(), CV_32F,
                                "DNN/Attention: mask must be float32");
-                const int mask_last_dim = shape(mask_mat).back();
-                CV_CheckEQ(mask_last_dim, (int)seq_len,
-                           "DNN/Attention: mask last dim must equal seq_len");
-                const size_t mask_total = mask_mat.total();
-                int mask_batch_stride;
-                if (mask_total == batch_size * seq_len)      mask_batch_stride = (int)seq_len;
-                else if (mask_total == seq_len)              mask_batch_stride = 0;
-                else CV_Error(Error::StsNotImplemented,
-                              "DNN/Attention: unsupported mask shape");
+
+                const auto mask_shape = shape(mask_mat);
+                const int mask_ndim = mask_shape.dims;
+                auto fmt_shape = [&]() {
+                    std::ostringstream ss;
+                    for (int d = 0; d < mask_ndim; d++) { if (d) ss << ","; ss << mask_shape[d]; }
+                    return ss.str();
+                };
+                // Right-align to (B, H, Q=S, K=S); missing leading dims default to 1.
+                auto get_dim = [&](int t) -> int {
+                    int md = mask_ndim - 4 + t;
+                    return (md >= 0) ? mask_shape[md] : 1;
+                };
+                // Any extra leading mask dims must be 1.
+                for (int d = 0; d < mask_ndim - 4; d++) {
+                    if (mask_shape[d] != 1)
+                        CV_Error(Error::StsNotImplemented,
+                                 cv::format("DNN/Attention: unsupported mask shape [%s] (B=%d, H=%d, S=%d)",
+                                            fmt_shape().c_str(), (int)batch_size, (int)num_heads, (int)seq_len));
+                }
+                const int dim_b = get_dim(0);
+                const int dim_h = get_dim(1);
+                const int dim_q = get_dim(2);
+                const int dim_k = get_dim(3);
+                auto check_bcast = [&](int md, int td, const char* axis) {
+                    if (md != 1 && md != td)
+                        CV_Error(Error::StsNotImplemented,
+                                 cv::format("DNN/Attention: mask shape [%s] not broadcastable to [%d,%d,%d,%d] (axis %s)",
+                                            fmt_shape().c_str(), (int)batch_size, (int)num_heads,
+                                            (int)seq_len, (int)seq_len, axis));
+                };
+                check_bcast(dim_b, (int)batch_size, "batch");
+                check_bcast(dim_h, (int)num_heads, "head");
+                check_bcast(dim_q, (int)seq_len,   "query");
+                check_bcast(dim_k, (int)seq_len,   "key");
+
+                const size_t mask_b_stride = (dim_b == 1) ? 0 : (size_t)dim_h * dim_q * dim_k;
+                const size_t mask_h_stride = (dim_h == 1) ? 0 : (size_t)dim_q * dim_k;
+                const size_t mask_q_stride = (dim_q == 1) ? 0 : (size_t)dim_k;
+                const bool   mask_k_bcast  = (dim_k == 1);
 
                 const float *mask_data = mask_mat.ptr<const float>();
                 parallel_for_(Range(0, (int)loops), [&](const Range &r) {
                     for (int i = r.start; i < r.end; i++) {
                         const int b = i / (int)num_heads;
-                        const float *m = mask_data + b * mask_batch_stride;
+                        const int h = i % (int)num_heads;
+                        const float *m_bh = mask_data + b * mask_b_stride + h * mask_h_stride;
                         float *prob = output + i * seq_len_square;
                         for (size_t row = 0; row < seq_len; row++) {
+                            const float *m = m_bh + row * mask_q_stride;
                             float *p = prob + row * seq_len;
-                            for (size_t j = 0; j < seq_len; j++)
-                                p[j] += m[j];
+                            if (mask_k_bcast) {
+                                float v = m[0];
+                                for (size_t j = 0; j < seq_len; j++) p[j] += v;
+                            } else {
+                                for (size_t j = 0; j < seq_len; j++) p[j] += m[j];
+                            }
                         }
                     }
                 }, loops * seq_len * (1 / 1024.0));
