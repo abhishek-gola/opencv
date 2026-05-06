@@ -153,10 +153,6 @@ void softmax(Mat &dst, const Mat &src, int axis, float scale) {
     softmax(dst, src, axis, 0, src.size[axis], scale);
 }
 
-void softmax(Mat &dst, const Mat &src, int axis, float scale) {
-    softmax(dst, src, axis, 0, src.size[axis], scale);
-}
-
 void logSoftmax(Mat &dst, const Mat &src, int axis) {
     softmax(dst, src, axis);
     log(dst, dst);
