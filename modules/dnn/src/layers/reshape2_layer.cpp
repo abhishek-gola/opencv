@@ -76,6 +76,9 @@ public:
         return backendId == DNN_BACKEND_OPENCV;
     }
 
+    // Reshape just re-interprets the same contiguous buffer.
+    virtual bool alwaysSupportInplace() const CV_OVERRIDE { return true; }
+
     bool haveShapeSpec() const
     {
         return newShapeDesc.dims >= 0;

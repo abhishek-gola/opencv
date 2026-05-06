@@ -602,6 +602,7 @@ CV__DNN_INLINE_NS_BEGIN
     {
     public:
         bool logSoftMax;
+        float scale;
 
         static Ptr<SoftmaxLayer> create(const LayerParams& params);
     };
