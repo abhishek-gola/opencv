@@ -1370,6 +1370,189 @@ TEST_P(Reproducibility_YOLOv8n_ONNX, Accuracy)
 INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_YOLOv8n_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
+typedef testing::TestWithParam<Target> Reproducibility_RTDETR_ONNX;
+TEST_P(Reproducibility_RTDETR_ONNX, Accuracy)
+{
+    Target targetId = GetParam();
+    auto engine_forced = static_cast<EngineType>(
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
+    if (engine_forced == ENGINE_CLASSIC)
+    {
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
+        return;
+    }
+
+    applyTestTag(CV_TEST_TAG_MEMORY_2GB, CV_TEST_TAG_LONG);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("onnx/models/rtdetr.onnx", false);
+    std::string imgname   = _tf("basketball1.png");
+    Mat image = imread(imgname);
+    ASSERT_TRUE(!image.empty());
+
+    Mat input = blobFromImage(image, 1.0/255.0, Size(640, 640), Scalar(), true, false, CV_32F);
+
+    // Reference output captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    Mat refOut = blobFromNPY(_tf("rtdetr_basketball1_ref.npy"));
+
+    Net net = readNetFromONNX(modelname);
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(targetId);
+    if (targetId == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+    net.setInput(input);
+    Mat out = net.forward();
+    if (out.type() != CV_32F) out.convertTo(out, CV_32F);
+
+    // Output shape: [1, 300, 84] — [cx, cy, w, h, 80 class scores]
+    ASSERT_EQ(refOut.dims, out.dims);
+    for (int i = 0; i < refOut.dims; ++i)
+        ASSERT_EQ(refOut.size[i], out.size[i]);
+
+    double l1   = (targetId == DNN_TARGET_CPU_FP16) ? 5e-3 : 1e-4;
+    double lInf = (targetId == DNN_TARGET_CPU_FP16) ? 5e-2 : 1e-3;
+    normAssert(refOut, out, "RT-DETR output", l1, lInf);
+}
+INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_RTDETR_ONNX,
+                        testing::Values(DNN_TARGET_CPU));
+
+
+typedef testing::TestWithParam<Target> Reproducibility_RFDETR_ONNX;
+TEST_P(Reproducibility_RFDETR_ONNX, Accuracy)
+{
+    Target targetId = GetParam();
+    auto engine_forced = static_cast<EngineType>(
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
+    if (engine_forced == ENGINE_CLASSIC)
+    {
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
+        return;
+    }
+
+    applyTestTag(CV_TEST_TAG_MEMORY_2GB, CV_TEST_TAG_LONG);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("onnx/models/rfdetr.onnx", false);
+    std::string imgname   = _tf("basketball1.png");
+    Mat image = imread(imgname);
+    ASSERT_TRUE(!image.empty());
+
+    Mat input = blobFromImage(image, 1.0/255.0, Size(560, 560), Scalar(), true, false, CV_32F);
+
+    // Reference outputs captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    std::vector<Mat> refOuts = {
+        blobFromNPY(_tf("rfdetr_basketball1_dets_ref.npy")),
+        blobFromNPY(_tf("rfdetr_basketball1_labels_ref.npy")),
+    };
+    std::vector<String> outNames = {"dets", "labels"};
+
+    Net net = readNetFromONNX(modelname);
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(targetId);
+    if (targetId == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+    net.setInput(input);
+    std::vector<Mat> outs;
+    net.forward(outs, outNames);
+    ASSERT_EQ(outs.size(), refOuts.size());
+    for (size_t i = 0; i < outs.size(); ++i)
+        if (outs[i].type() != CV_32F) outs[i].convertTo(outs[i], CV_32F);
+
+    double l1   = (targetId == DNN_TARGET_CPU_FP16) ? 5e-3 : 1e-4;
+    double lInf = (targetId == DNN_TARGET_CPU_FP16) ? 5e-2 : 1e-3;
+    for (size_t i = 0; i < outs.size(); ++i)
+    {
+        ASSERT_EQ(refOuts[i].dims, outs[i].dims);
+        for (int d = 0; d < refOuts[i].dims; ++d)
+            ASSERT_EQ(refOuts[i].size[d], outs[i].size[d]);
+        std::string tag = "RF-DETR output[" + std::to_string(i) + "] (" + outNames[i] + ")";
+        normAssert(refOuts[i], outs[i], tag.c_str(), l1, lInf);
+    }
+}
+INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_RFDETR_ONNX,
+                        testing::Values(DNN_TARGET_CPU));
+
+
+typedef testing::TestWithParam<Target> Reproducibility_GroundingDINO_ONNX;
+TEST_P(Reproducibility_GroundingDINO_ONNX, Accuracy)
+{
+    Target targetId = GetParam();
+    auto engine_forced = static_cast<EngineType>(
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO));
+    if (engine_forced == ENGINE_CLASSIC)
+    {
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
+        return;
+    }
+
+    applyTestTag(CV_TEST_TAG_MEMORY_6GB, CV_TEST_TAG_LONG);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("onnx/models/ground_dino.onnx", false);
+    std::string imgname   = _tf("messi5.jpg");
+    Mat image = imread(imgname);
+    ASSERT_TRUE(!image.empty());
+
+    // Image input: ImageNet-style normalization at 800x800.
+    Mat pixel_values;
+    blobFromImage(image, pixel_values, 1.0/255.0, Size(800, 800),
+                  Scalar(123.675, 116.28, 103.53), true, false);
+
+    // Hardcoded WordPiece tokens for prompt "person." (bert-base-uncased):
+    // [CLS]=101, person=2711, .=1012, [SEP]=102. Padded to max_length=256.
+    const int max_length = 256;
+    int ids_shape[] = {1, max_length};
+    Mat input_ids_i64      = Mat::zeros(2, ids_shape, CV_64S);
+    Mat attention_mask_i64 = Mat::zeros(2, ids_shape, CV_64S);
+    Mat token_type_ids_i64 = Mat::zeros(2, ids_shape, CV_64S);
+    const int64_t tokens[] = {101, 2711, 1012, 102};
+    const int n_tokens = (int)(sizeof(tokens) / sizeof(tokens[0]));
+    for (int i = 0; i < n_tokens; ++i) {
+        input_ids_i64.at<int64_t>(0, i) = tokens[i];
+        attention_mask_i64.at<int64_t>(0, i) = 1;
+    }
+
+    int pixel_mask_shape[] = {1, 800, 800};
+    Mat pixel_mask_i64 = Mat::ones(3, pixel_mask_shape, CV_64S);
+
+    // Reference outputs captured offline from the ONNX Runtime engine (OPENCV_FORCE_DNN_ENGINE=4).
+    std::vector<Mat> refOuts = {
+        blobFromNPY(_tf("ground_dino_messi_logits_ref.npy")),
+        blobFromNPY(_tf("ground_dino_messi_pred_boxes_ref.npy")),
+    };
+    std::vector<String> outNames = {"logits", "pred_boxes"};
+
+    Net net = readNetFromONNX(modelname);
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(targetId);
+    if (targetId == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+    net.setInput(pixel_values,       "pixel_values");
+    net.setInput(input_ids_i64,      "input_ids");
+    net.setInput(token_type_ids_i64, "token_type_ids");
+    net.setInput(attention_mask_i64, "attention_mask");
+    net.setInput(pixel_mask_i64,     "pixel_mask");
+
+    std::vector<Mat> outs;
+    net.forward(outs, outNames);
+    ASSERT_EQ(outs.size(), refOuts.size());
+    for (size_t i = 0; i < outs.size(); ++i)
+        if (outs[i].type() != CV_32F) outs[i].convertTo(outs[i], CV_32F);
+
+    double l1   = (targetId == DNN_TARGET_CPU_FP16) ? 5e-3 : 1e-4;
+    double lInf = (targetId == DNN_TARGET_CPU_FP16) ? 5e-2 : 1e-3;
+    for (size_t i = 0; i < outs.size(); ++i)
+    {
+        ASSERT_EQ(refOuts[i].dims, outs[i].dims);
+        for (int d = 0; d < refOuts[i].dims; ++d)
+            ASSERT_EQ(refOuts[i].size[d], outs[i].size[d]);
+        std::string tag = "Grounding DINO output[" + std::to_string(i) + "] (" + outNames[i] + ")";
+        normAssert(refOuts[i], outs[i], tag.c_str(), l1, lInf);
+    }
+}
+INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_GroundingDINO_ONNX,
+                        testing::Values(DNN_TARGET_CPU));
+
 
 typedef testing::TestWithParam<Target> Reproducibility_YOLOXS_ONNX;
 TEST_P(Reproducibility_YOLOXS_ONNX, Accuracy)

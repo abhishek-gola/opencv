@@ -16,5 +16,10 @@ ConvFunc getConvFunc(int depth, int C0)
     CV_CPU_DISPATCH(getConvFunc_, (depth, C0), CV_CPU_DISPATCH_MODES_ALL);
 }
 
+ConvFunc getConvFuncWinoF63(int depth, int C0)
+{
+    CV_CPU_DISPATCH(getConvFuncWinoF63_, (depth, C0), CV_CPU_DISPATCH_MODES_ALL);
+}
+
 CV__DNN_INLINE_NS_END
 }}

@@ -17,6 +17,7 @@ using namespace cv::dnn::cuda4dnn;
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/mlas_gemm.hpp"
 
 namespace cv { namespace dnn {
 
@@ -58,6 +59,7 @@ public:
         trans_b = params.get<bool>("transB", false);
         alpha = params.get<float>("alpha", 1.0f);
         beta = params.get<float>("beta", 1.0f);
+        flatten_a = params.get<bool>("flatten_a", true);
 
         // The params are not part of ONNX, but set by old ONNX parser
         const_B = params.get<bool>("constB", false);
@@ -164,9 +166,19 @@ public:
             }
         }
 
-        int batches = std::accumulate(shape_A.begin(), shape_A.end() - 2, 1, std::multiplies<int>());
-        MatShape shape_y{M * batches, N};
-        outputs.assign(1, shape_y);
+        if (flatten_a) {
+            int batches = std::accumulate(shape_A.begin(), shape_A.end() - 2, 1, std::multiplies<int>());
+            MatShape shape_y{M * batches, N};
+            outputs.assign(1, shape_y);
+        } else {
+            // Preserve A's leading dims; only the trailing axis changes from K to N.
+            // (trans_a is rejected upstream for this mode, so M corresponds to
+            //  shape_A[-2] and we just rewrite the last axis.)
+            CV_CheckFalse(trans_a, "DNN/Gemm: flatten_a=false requires trans_a=false");
+            MatShape shape_y = shape_A;
+            shape_y[shape_y.size() - 1] = N;
+            outputs.assign(1, shape_y);
+        }
         return false;
     }
 
@@ -245,10 +257,43 @@ public:
         // pack B if it is const
         if (constB(mode)) {
             fastGemmPackB(blobs[0], packed_B, trans_b, opt);
+
+#ifdef HAVE_MLAS
+            // Also pre-pack into MLAS layout. We need N and K for the pack
+            // call; derive them from the input/output shapes available at
+            // finalize() so the pack matches what forward() will request.
+            std::vector<Mat> outputs;
+            outputs_arr.getMatVector(outputs);
+            const auto shape_A = shape(inputs[0]);
+            const auto shape_Y = shape(outputs[0]);
+            const int na = shape_A[shape_A.size() - 1];
+            const int ma = shape_A[shape_A.size() - 2];
+            const int N  = shape_Y[shape_Y.size() - 1];
+            const int M  = shape_Y[shape_Y.size() - 2];
+            const int K  = trans_a ? ma : na;
+            const Mat& Bmat = blobs[0];
+            const int ldb = Bmat.size[Bmat.dims - 1];
+            const size_t packed_bytes = mlasSgemmPackBSize(trans_a, trans_b, N, K);
+            if (packed_bytes > 0) {
+                packed_B_mlas.create(1, static_cast<int>(packed_bytes), CV_8U);
+                if (mlasSgemmPackB(trans_a, trans_b, N, K,
+                                   Bmat.ptr<const float>(), ldb,
+                                   packed_B_mlas.data)) {
+                    packed_B_mlas_M = M;
+                    packed_B_mlas_N = N;
+                    packed_B_mlas_K = K;
+                } else {
+                    packed_B_mlas.release();
+                }
+            }
+#endif
         }
 
-        // also pre-broadcast bias
-        if (constC(mode)) {
+        // also pre-broadcast bias (only meaningful for the flatten_a path,
+        // where the output is 2D and we can size broadcast_C to the full Y).
+        // In flatten_a=false mode the row count is dynamic (depends on A's
+        // leading dims at forward time), so forward() tiles the bias instead.
+        if (constC(mode) && flatten_a) {
             const auto &C = blobs.back();
 
             std::vector<Mat> outputs;
@@ -290,15 +335,37 @@ public:
         int M = shape_Y[dims_Y - 2], N = shape_Y[dims_Y - 1];
         int K = trans_a ? ma : na;
 
+        // In flatten_a=false mode the output keeps A's leading dims, so the
+        // GEMM row count spans those dims as well: rows = total(Y)/N.
+        const int rows = flatten_a ? M : (int)(Y.total() / (size_t)N);
+
         // broadcast C and copy C to output
         if (constC(mode) || inputs.size() >= 3) {
-            if (!constC(mode) || broadcast_C.empty()) {
-                broadcastCWtihBeta(M, N, (inputs.size() >= 3 ? inputs.back() : blobs.back()));
-            }
-            int step = M * N;
-            CV_CheckEQ(broadcast_C.size(), static_cast<size_t>(step), "DNN/Gemm: C is not broadcast properly");
             float *ptr_y = Y.ptr<float>();
-            std::memcpy(ptr_y, broadcast_C.data(), step * sizeof(float));
+            if (flatten_a) {
+                if (!constC(mode) || broadcast_C.empty()) {
+                    broadcastCWtihBeta(M, N, (inputs.size() >= 3 ? inputs.back() : blobs.back()));
+                }
+                int step = M * N;
+                CV_CheckEQ(broadcast_C.size(), static_cast<size_t>(step), "DNN/Gemm: C is not broadcast properly");
+                std::memcpy(ptr_y, broadcast_C.data(), step * sizeof(float));
+            } else {
+                // ND output: tile the (1D / scalar) bias across all `rows`
+                // rows, scaled by beta. The rewriter restricts bias to scalar
+                // or 1D length-N; assert here.
+                const Mat& C = (inputs.size() >= 3) ? inputs.back() : blobs.back();
+                const float* c = C.ptr<const float>();
+                if (C.total() == 1) {
+                    float val = beta * (*c);
+                    std::fill_n(ptr_y, (size_t)rows * (size_t)N, val);
+                } else {
+                    CV_CheckEQ((int)C.total(), N, "DNN/Gemm: bias must be scalar or length-N in flatten_a=false mode");
+                    for (int j = 0; j < N; j++) ptr_y[j] = beta * c[j];
+                    for (int i = 1; i < rows; i++) {
+                        std::memcpy(ptr_y + (size_t)i * N, ptr_y, (size_t)N * sizeof(float));
+                    }
+                }
+            }
         } else { // initialization
             float *ptr_y = Y.ptr<float>();
             size_t total = Y.total();
@@ -306,8 +373,25 @@ public:
         }
 
         if (constB(mode)) {
+#ifdef HAVE_MLAS
+            // Use the MLAS-pre-packed B (allocated in finalize()). Falls
+            // through to the OpenCV packed path if the pre-pack didn't take
+            // (MLAS unavailable or shape mismatch).
+            if (!packed_B_mlas.empty() &&
+                packed_B_mlas_N == N && packed_B_mlas_K == K)
+            {
+                if (mlasSgemmPacked(trans_a, trans_b, rows, N, K,
+                                    alpha,
+                                    A.ptr<const float>(), na,
+                                    packed_B_mlas.data,
+                                    1.f,
+                                    Y.ptr<float>(), N)) {
+                    return;
+                }
+            }
+#endif
             CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
-            fastGemm(trans_a, M, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
+            fastGemm(trans_a, rows, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
@@ -470,6 +554,13 @@ private:
     bool const_C;
     bool have_bias;
     std::vector<float> packed_B;
+    // MLAS-packed copy of B. Allocated once at finalize() when MLAS is
+    // available and constB; reused by every forward(). Uses cv::Mat for its
+    // 64-byte aligned allocator (MLAS kernels load 16/32/64-byte vectors).
+    cv::Mat packed_B_mlas;
+    int packed_B_mlas_M;  // M used at pack time, sanity-checked at forward
+    int packed_B_mlas_N;
+    int packed_B_mlas_K;
     std::vector<float> broadcast_C;
     int real_ndims_C;
     FastGemmOpt opt;

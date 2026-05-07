@@ -375,6 +375,10 @@ CV__DNN_INLINE_NS_BEGIN
         virtual bool fuseBatchNorm(const Ptr<Layer>& bn) = 0;
         virtual bool fuseActivation(const Ptr<Layer>& activ) = 0;
         virtual bool fuseAddResidual(Arg residual) = 0;
+        // Bytes of pre-packed Winograd F(6,3) weights, or 0 if Winograd is not in use for this layer.
+        virtual size_t getWinogradWeightBytes() const = 0;
+        // Release the Winograd F(6,3) weight buffer; subsequent forwards take the GEMM path.
+        virtual void disableWinograd() = 0;
 
         std::vector<int> strides, dilations, pads;
         int ngroups;
@@ -1787,6 +1791,12 @@ CV__DNN_INLINE_NS_BEGIN
         bool trans_b;
         float alpha;
         float beta;
+        // When true (default, ONNX-conformant), an ND input A is flattened so
+        // the output is 2D [M*batches, N]. When false, the output keeps A's
+        // leading dims as [..., M, N] — used by the MatMul-with-const-B
+        // rewriter so projection ops can reach the MLAS pre-packed sgemm path
+        // without changing downstream shapes.
+        bool flatten_a;
 
         static Ptr<GemmLayer> create(const LayerParams& params);
     };
@@ -1795,6 +1805,8 @@ CV__DNN_INLINE_NS_BEGIN
      public:
         bool trans_a;
         bool trans_b;
+        float alpha;
+        float beta;
 
         static Ptr<MatMulLayer> create(const LayerParams &params);
     };

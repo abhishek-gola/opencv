@@ -221,6 +221,7 @@ std::vector<Mat> Net::Impl::runOrtSession(std::vector<Mat> inputBlobs, const std
         Ort::RunOptions{nullptr},
         in_names.data(), input_tensors.data(), input_tensors.size(),
         out_names.data(), out_names.size());
+    if (profilingMode != DNN_PROFILE_NONE) ort_profile_runs++;
 
     CV_CheckEQ(output_tensors.size(), out_names.size(), "DNN/ORT: ORT returned unexpected number of outputs");
 
@@ -549,7 +550,15 @@ void Net::Impl::prepareForInference()
         constFold();
         constArgs();
         fuseAttention();
+        // Convert remaining MatMul-with-const-B (the projections that
+        // attention fusion didn't consume) into Gemm so they reach the
+        // MLAS pre-packed sgemm path. Run before fuseSharedInputGemm so
+        // the latter can also bundle these newly-created Gemms.
+        fuseMatMulConstBToGemm();
         fuseSharedInputGemm();
+        // After attention/QKV fusion has had a chance to consume them, sweep
+        // any leftover Reshape/Transpose chains and absorb Transpose into
+        // MatMul / scalar pre-Softmax Mul into Softmax::scale.
         fuseReshapeTranspose();
         fuseTransposeMatMul();
         fuseScaleSoftmax();
@@ -672,7 +681,15 @@ void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays 
     dimvalues.assign(nsymdims, -1);
     layersTimings.assign(totalLayers + 1, 0.);
 
+    bool wasFinalize = finalizeLayers;
     forwardGraph(mainGraph, inputs, outputs, true);
+
+    // After the first forward (when layers were just finalized), apply a global
+    // memory budget on Winograd-packed weights — keeping all of them resident on
+    // models like ResNet-50 thrashes L3 between layers and undoes Winograd's per-layer wins.
+    if (wasFinalize) {
+        applyWinogradMemoryBudget(mainGraph);
+    }
 
     // reset finalizeLayer so that layers are only initialized once.
     // [TODO] if a target or backend change or there are some other important
@@ -1242,8 +1259,9 @@ void Net::Impl::forwardGraph(Ptr<Graph>& graph, InputArrayOfArrays inputs_,
                     mCond = outputs[0];
                     active = loopLayer->cond(mCond);
 
+                    // Deep-copy: body buffers (and their UMats via Mat::fit reuse) are recycled across iterations.
                     for (int i = 0; i < n_state; i++)
-                        state[i] = outputs[1 + i];
+                        state[i] = outputs[1 + i].clone();
                     for (int i = 0; i < n_accum; i++)
                         history[i].push_back(outputs[1 + n_state + i].clone());
                 }
@@ -1398,6 +1416,60 @@ void Net::Impl::useCounts(std::vector<int>& usecounts) const
     usecounts.assign(nargs, 0);
     usecounts[0] = 1; // empty Arg() is always useful
     updateUseCounts(mainGraph, usecounts);
+}
+
+static void collectWinogradLayers(const Ptr<Graph>& graph,
+                                  std::vector<Ptr<Conv2Layer> >& out)
+{
+    const std::vector<Ptr<Layer> >& prog = graph->prog();
+    for (const Ptr<Layer>& layer : prog) {
+        Ptr<Conv2Layer> conv = layer.dynamicCast<Conv2Layer>();
+        if (!conv.empty() && conv->getWinogradWeightBytes() > 0) {
+            out.push_back(conv);
+        }
+        const std::vector<Ptr<Graph> >* subgraphs = layer->subgraphs();
+        if (subgraphs) {
+            for (const Ptr<Graph>& sg : *subgraphs)
+                collectWinogradLayers(sg, out);
+        }
+    }
+}
+
+void Net::Impl::applyWinogradMemoryBudget(const Ptr<Graph>& graph)
+{
+    // Default 18 MB ≈ half of a 36 MB L3 (i9-14900K class). Leaves room for activations.
+    // [TODO] derive from a runtime cache query rather than a hardcoded default.
+    static size_t budget_mb = utils::getConfigurationParameterSizeT("OPENCV_WINO_BUDGET_MB", 18);
+    if (budget_mb == 0)
+        return;  // disable budget; keep all Winograd layers
+    const size_t budget = budget_mb * (size_t(1) << 20);
+
+    std::vector<Ptr<Conv2Layer> > entries;
+    collectWinogradLayers(graph, entries);
+    if (entries.empty())
+        return;
+
+    // Sort ascending by per-layer Winograd footprint. Smaller layers fit alongside
+    // others and tend to win bigger relative speedups, so we keep them first.
+    std::sort(entries.begin(), entries.end(),
+              [](const Ptr<Conv2Layer>& a, const Ptr<Conv2Layer>& b) {
+                  return a->getWinogradWeightBytes() < b->getWinogradWeightBytes();
+              });
+
+    size_t accum = 0;
+    int kept = 0, demoted = 0;
+    for (const Ptr<Conv2Layer>& c : entries) {
+        size_t bytes = c->getWinogradWeightBytes();
+        if (accum + bytes <= budget) {
+            accum += bytes;
+            kept++;
+        } else {
+            c->disableWinograd();
+            demoted++;
+        }
+    }
+    CV_LOG_INFO(NULL, "DNN Winograd budget: kept=" << kept << " demoted=" << demoted
+                      << " accumMB=" << (accum >> 20) << " budgetMB=" << budget_mb);
 }
 
 int Net::Impl::updateGraphOfs(const Ptr<Graph>& graph, int currofs, bool ismain)

@@ -90,8 +90,23 @@ typedef void (*ConvFunc)(const void* inp, const void* residual, void* out,
 ConvFunc getConvFunc(int depth, int C0);
 ConvFunc getDepthwiseConvFunc(int depth);
 
+// Winograd F(6,3) BLOCK-layout 2D convolution: alternative to getConvFunc()
+// for 3x3 stride=1 dilation=1 spatially-large 2D convolutions. The function
+// returned expects weights pre-packed by repackConvWeightsWinoF63().
+ConvFunc getConvFuncWinoF63(int depth, int C0);
+
+// Returns true if the gating conditions for Winograd F(6,3) are met:
+// 2D, 3x3 kernel, stride=1, dilation=1, ngroups=1, H>=12, W>=12,
+// K%C0==0, C%C0==0.
+bool useWinogradF63(const ConvState& cs);
+
 void repackDepthwiseConvWeights(const Mat& weights, Mat& Wpack, int outtype, int C0);
 void repackConvWeights(const Mat& weights, Mat& Wpack, int outtype, int ngroups, int C0);
+
+// Packs 3x3 weights into Winograd F(6,3) form for the BLOCK layout, computing
+// U = G * W * G^T (8x8 transformed kernel) per (k, c) pair.
+// Output shape: (ngroups, Kblk, 64, C1Max, C0*K0).
+void repackConvWeightsWinoF63(const Mat& weights, Mat& Wpack, int outtype, int ngroups, int C0);
 
 CV__DNN_INLINE_NS_END
 }

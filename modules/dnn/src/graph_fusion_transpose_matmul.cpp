@@ -73,7 +73,6 @@ struct ModelFusionTransposeMatMul
 
             MatMulLayer* mm = dynamic_cast<MatMulLayer*>(layer.get());
             if (!mm) continue;
-
             if (layer->inputs.size() != 2) continue;
 
             for (int slot = 0; slot < 2; slot++) {
