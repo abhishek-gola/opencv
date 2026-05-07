@@ -317,6 +317,7 @@ public:
         size_t dims_Y = shape_Y.size();
         int M = shape_Y[dims_Y - 2], N = shape_Y[dims_Y - 1];
         int K = trans_a ? ma : na;
+        const int rows = (int)(Y.total() / (size_t)N);
 
         // broadcast C and copy C to output
         if (constC(mode) || inputs.size() >= 3) {
@@ -338,7 +339,7 @@ public:
             if (!packed_B_mlas.empty() &&
                 packed_B_mlas_N == N && packed_B_mlas_K == K)
             {
-                if (mlasSgemmPacked(trans_a, trans_b, M, N, K,
+                if (mlasSgemmPacked(trans_a, trans_b, rows, N, K,
                                     alpha,
                                     A.ptr<const float>(), na,
                                     packed_B_mlas.data,
@@ -349,7 +350,7 @@ public:
             }
 #endif
             CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
-            fastGemm(trans_a, M, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
+            fastGemm(trans_a, rows, N, K, alpha, A.ptr<const float>(), na, packed_B.data(), 1.f, Y.ptr<float>(), N, opt);
         } else {
             fastGemmBatch(trans_a, trans_b, alpha, A, inputs[1], 1.f, Y, opt);
         }
