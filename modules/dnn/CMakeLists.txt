@@ -14,6 +14,10 @@ ocv_add_dispatched_file("layers/cpu_kernels/conv2_depthwise" AVX AVX2 NEON NEON_
 ocv_add_dispatched_file("layers/cpu_kernels/conv2_kernels" AVX AVX2 NEON NEON_FP16)
 ocv_add_dispatched_file_force_all("int8layers/conv2_int8_kernels" AVX2)
 ocv_add_dispatched_file("layers/cpu_kernels/activation_kernels" AVX AVX2 NEON NEON_FP16)
+ocv_add_dispatched_file_force_all("layers/cpu_kernels/reduce2_kernels" AVX AVX2 NEON)
+ocv_add_dispatched_file_force_all("layers/cpu_kernels/transpose_kernels" AVX AVX2 NEON)
+ocv_add_dispatched_file_force_all("layers/cpu_kernels/gridsample_kernels" AVX AVX2 NEON)
+ocv_add_dispatched_file_force_all("layers/cpu_kernels/nary_eltwise_kernels" AVX AVX2 NEON)
 
 ocv_add_module(dnn opencv_core opencv_imgproc WRAP python java objc js)
 
@@ -483,6 +487,19 @@ if(NOT EMSCRIPTEN)
   endif()
 endif()
 
+# Vendored MLAS (Microsoft Linear Algebra Subprograms) from ONNX Runtime.
+# Sources live in 3rdparty/mlas/. Builds to an OBJECT library whose objects
+# link directly into opencv_dnn.
+set(HAVE_MLAS 0)
+add_subdirectory("${OpenCV_SOURCE_DIR}/3rdparty/mlas" "${CMAKE_BINARY_DIR}/3rdparty/mlas")
+if(HAVE_MLAS)
+  add_definitions(-DHAVE_MLAS=1)
+  list(APPEND include_dirs ${MLAS_INCLUDE_DIRS})
+  message(STATUS "DNN: MLAS (vendored) enabled.")
+else()
+  message(STATUS "DNN: MLAS (vendored) disabled — host arch/OS not wired up.")
+endif()
+
 ocv_module_include_directories(${include_dirs})
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   ocv_append_source_files_cxx_compiler_options(fw_srcs "-Wno-suggest-override")  # GCC
@@ -530,7 +547,7 @@ endif()
 
 ocv_install_used_external_targets(${libs} ${dnn_runtime_libs})
 
-ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs} ${webnn_srcs})
+ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs} ${webnn_srcs} ${MLAS_OBJECTS})
 ocv_create_module(${libs} ${dnn_runtime_libs})
 ocv_add_samples()
 ocv_add_accuracy_tests(${dnn_runtime_libs})
