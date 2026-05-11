@@ -6,6 +6,13 @@
 
 #include "net_impl.hpp"
 
+#ifdef HAVE_ONNXRUNTIME
+#include <onnxruntime_cxx_api.h>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#endif
+
 namespace cv {
 namespace dnn {
 CV__DNN_INLINE_NS_BEGIN
@@ -2618,6 +2625,319 @@ int64 Net::Impl::getPerfProfile(std::vector<double>& timings) const
     timings = std::vector<double>(layersTimings.begin() + 1, layersTimings.end());
     int64 total = (int64)std::accumulate(timings.begin(), timings.end(), 0.0);
     return total;
+}
+
+void Net::Impl::collectLayerInfo(std::vector<String>& names, std::vector<String>& types) const
+{
+    if (mainGraph) {
+        names.reserve(totalLayers);
+        types.reserve(totalLayers);
+        for (const Ptr<Graph>& graph : allgraphs) {
+            const std::vector<Ptr<Layer>>& prog = graph->prog();
+            for (const Ptr<Layer>& layer : prog) {
+                names.push_back(layer ? layer->name : "null");
+                types.push_back(layer ? layer->type : "null");
+            }
+        }
+    } else {
+        for (MapIdToLayerData::const_iterator it = layers.begin(); it != layers.end(); ++it) {
+            if (it->second.id) {  // skip Data layer (id==0)
+                names.push_back(it->second.name);
+                types.push_back(it->second.type);
+            }
+        }
+    }
+}
+
+#ifdef HAVE_ONNXRUNTIME
+// Locate the most recent ORT profile file written under the prefix and return its path.
+static std::string findOrtProfileFile(const std::string& prefix)
+{
+    namespace fs = std::filesystem;
+    if (prefix.empty()) return std::string();
+
+    fs::path p(prefix);
+    fs::path dir   = p.parent_path();
+    std::string base = p.filename().string();
+    if (dir.empty()) dir = fs::current_path();
+
+    std::string best;
+    fs::file_time_type best_ts{};
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return std::string();
+    for (const auto& ent : fs::directory_iterator(dir, ec)) {
+        const std::string name = ent.path().filename().string();
+        if (name.size() < base.size() || name.compare(0, base.size(), base) != 0) continue;
+        if (name.size() < 5 || name.compare(name.size() - 5, 5, ".json") != 0) continue;
+        auto ts = fs::last_write_time(ent.path(), ec);
+        if (best.empty() || ts > best_ts) { best = ent.path().string(); best_ts = ts; }
+    }
+    return best;
+}
+
+// Read the JSON without a real parser: scan for "cat":"Node" entries (with or without spaces),
+// extract op_name, name, and dur for kernel_time events. Track brace depth so we don't terminate
+// on inner objects (args contains nested thread_scheduling_stats).
+static void parseOrtProfileJson(const std::string& path,
+                                std::map<std::string, std::pair<std::string, double>>& out_ms,
+                                int& out_total_runs)
+{
+    std::ifstream in(path);
+    if (!in.is_open()) return;
+    std::stringstream ss; ss << in.rdbuf();
+    const std::string text = ss.str();
+
+    // Strip a key/value-like substring helper.
+    auto extract_quoted = [&](const std::string& entry, const std::string& key) -> std::string {
+        const std::string needle = "\"" + key + "\"";
+        size_t p = entry.find(needle);
+        if (p == std::string::npos) return std::string();
+        size_t colon = entry.find(':', p + needle.size());
+        if (colon == std::string::npos) return std::string();
+        size_t q1 = entry.find('"', colon + 1);
+        if (q1 == std::string::npos) return std::string();
+        size_t q2 = entry.find('"', q1 + 1);
+        if (q2 == std::string::npos) return std::string();
+        return entry.substr(q1 + 1, q2 - q1 - 1);
+    };
+    auto extract_dur = [&](const std::string& entry) -> double {
+        const std::string needle = "\"dur\"";
+        size_t p = entry.find(needle);
+        if (p == std::string::npos) return 0;
+        size_t colon = entry.find(':', p + needle.size());
+        if (colon == std::string::npos) return 0;
+        size_t e = entry.find_first_of(",}", colon + 1);
+        if (e == std::string::npos) return 0;
+        try { return std::stod(entry.substr(colon + 1, e - colon - 1)); }
+        catch (...) { return 0; }
+    };
+
+    // Split text into top-level entries by tracking brace depth from depth==0.
+    int depth = 0;
+    size_t entry_start = std::string::npos;
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (c == '{') {
+            if (depth == 0) entry_start = i;
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && entry_start != std::string::npos) {
+                const std::string entry = text.substr(entry_start, i - entry_start + 1);
+                entry_start = std::string::npos;
+
+                if (entry.find("\"cat\"") == std::string::npos) continue;
+                if (extract_quoted(entry, "cat") != "Node") continue;
+                const std::string name = extract_quoted(entry, "name");
+                static const std::string KT = "_kernel_time";
+                if (name.size() < KT.size() || name.compare(name.size() - KT.size(), KT.size(), KT) != 0)
+                    continue;
+                const std::string op  = extract_quoted(entry, "op_name");
+                const double dur_us   = extract_dur(entry);
+                if (op.empty() || dur_us <= 0) continue;
+                std::string canonical = name.substr(0, name.size() - KT.size());
+                auto& slot = out_ms[canonical];
+                slot.first = op;
+                slot.second += dur_us / 1000.0;
+            }
+        }
+    }
+    // Estimate per-run by dividing by the number of session.Run calls. ORT accumulates
+    // every event across every Run since EnableProfiling was set.
+    if (out_total_runs <= 0) out_total_runs = 1;
+}
+
+void Net::Impl::collectOrtProfileData() const
+{
+    if (ort_profile_collected) return;
+    ort_profile_collected = true;
+    if (!ort_session || ort_profile_path_prefix.empty()) return;
+
+    // EndProfiling closes the file ORT has been writing to and returns its path.
+    Ort::AllocatorWithDefaultOptions allocator;
+    Ort::AllocatedStringPtr profile_path = ort_session->EndProfilingAllocated(allocator);
+    std::string path = profile_path ? std::string(profile_path.get()) : findOrtProfileFile(ort_profile_path_prefix);
+    if (path.empty()) {
+        CV_LOG_WARNING(NULL, "DNN/ORT: profile JSON not found under prefix " << ort_profile_path_prefix);
+        return;
+    }
+
+    std::map<std::string, std::pair<std::string, double>> by_name;
+    int runs = ort_profile_runs > 0 ? ort_profile_runs : 1;
+    parseOrtProfileJson(path, by_name, runs);
+
+    ort_profile_data.clear();
+    ort_profile_data.reserve(by_name.size());
+    for (auto& kv : by_name) {
+        const String name = kv.first;
+        const String type = kv.second.first;
+        const double ms_per_run = kv.second.second / std::max(1, runs);
+        ort_profile_data.emplace_back(name, type, ms_per_run);
+    }
+}
+#endif
+
+std::vector<std::pair<String, double>> Net::Impl::profile() const
+{
+    std::vector<std::pair<String, double>> result;
+    if (profilingMode == DNN_PROFILE_NONE)
+        return result;
+
+#ifdef HAVE_ONNXRUNTIME
+    if (useOrtEngine && ort_session) {
+        collectOrtProfileData();
+        if (profilingMode == DNN_PROFILE_DETAILED) {
+            for (const auto& t : ort_profile_data) {
+                if (std::get<2>(t) <= 0) continue;
+                result.emplace_back(std::get<0>(t) + " (" + std::get<1>(t) + ")", std::get<2>(t));
+            }
+        } else if (profilingMode == DNN_PROFILE_SUMMARY) {
+            std::map<String, double> by_type;
+            for (const auto& t : ort_profile_data) by_type[std::get<1>(t)] += std::get<2>(t);
+            for (const auto& kv : by_type) result.emplace_back(kv.first, kv.second);
+        }
+        std::sort(result.begin(), result.end(),
+                  [](const std::pair<String, double>& a, const std::pair<String, double>& b) {
+                      return a.second > b.second;
+                  });
+        return result;
+    }
+#endif
+
+    // ENGINE_NEW / classic: read accumulated layersTimings and pair with names/types.
+    std::vector<double> timings(layersTimings.begin() + 1, layersTimings.end());
+    const double tickFreq = getTickFrequency();
+    std::vector<String> names, types;
+    collectLayerInfo(names, types);
+    const size_t n = std::min(timings.size(), names.size());
+
+    if (profilingMode == DNN_PROFILE_DETAILED) {
+        for (size_t i = 0; i < n; i++) {
+            if (timings[i] > 0) {
+                const double ms = timings[i] * 1000.0 / tickFreq;
+                result.emplace_back(names[i] + " (" + types[i] + ")", ms);
+            }
+        }
+    } else if (profilingMode == DNN_PROFILE_SUMMARY) {
+        std::map<String, double> by_type;
+        for (size_t i = 0; i < n; i++) {
+            if (timings[i] > 0) by_type[types[i]] += timings[i] * 1000.0 / tickFreq;
+        }
+        for (const auto& kv : by_type) result.emplace_back(kv.first, kv.second);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const std::pair<String, double>& a, const std::pair<String, double>& b) {
+                  return a.second > b.second;
+              });
+    return result;
+}
+
+void Net::Impl::printProfile() const
+{
+    if (profilingMode == DNN_PROFILE_NONE) return;
+
+    // Helpers to print the same tables in both code paths.
+    auto print_detailed = [](const std::vector<std::tuple<String, String, double>>& rows, double total_ms) {
+        CV_LOG_INFO(NULL, "\n=== DNN Layer Profiling (Detailed) ===");
+        CV_LOG_INFO(NULL, cv::format("%-5s %-50s %-22s %10s %8s",
+                                     "ID", "Layer Name", "Type", "Time (ms)", "   (%)"));
+        CV_LOG_INFO(NULL, "----------------------------------------------------------------------------------------------------");
+        size_t id = 0;
+        for (const auto& r : rows) {
+            const double ms = std::get<2>(r);
+            const double pct = total_ms > 0 ? 100.0 * ms / total_ms : 0.0;
+            CV_LOG_INFO(NULL, cv::format("%-5zu %-50s %-22s %10.3f %7.1f%%",
+                                         id, std::get<0>(r).c_str(), std::get<1>(r).c_str(), ms, pct));
+            id++;
+        }
+        CV_LOG_INFO(NULL, "----------------------------------------------------------------------------------------------------");
+        CV_LOG_INFO(NULL, cv::format("%-5s %-50s %-22s %10.3f %7s", "", "TOTAL", "", total_ms, "100.0%"));
+        CV_LOG_INFO(NULL, "");
+    };
+    auto print_summary = [](const std::vector<std::tuple<String, int, double>>& rows, double total_ms) {
+        CV_LOG_INFO(NULL, "\n=== DNN Layer Profiling (Summary by Type) ===");
+        CV_LOG_INFO(NULL, cv::format("%-25s %6s %10s %8s", "Layer Type", "Count", "Time (ms)", "   (%)"));
+        CV_LOG_INFO(NULL, "-----------------------------------------------------------");
+        for (const auto& r : rows) {
+            const double pct = total_ms > 0 ? 100.0 * std::get<2>(r) / total_ms : 0.0;
+            CV_LOG_INFO(NULL, cv::format("%-25s %6d %10.3f %7.1f%%",
+                                         std::get<0>(r).c_str(), std::get<1>(r), std::get<2>(r), pct));
+        }
+        CV_LOG_INFO(NULL, "-----------------------------------------------------------");
+        CV_LOG_INFO(NULL, cv::format("%-25s %6s %10.3f %7s", "TOTAL", "", total_ms, "100.0%"));
+        CV_LOG_INFO(NULL, "");
+    };
+
+#ifdef HAVE_ONNXRUNTIME
+    if (useOrtEngine && ort_session) {
+        collectOrtProfileData();
+        if (ort_profile_data.empty()) return;
+
+        if (profilingMode == DNN_PROFILE_DETAILED) {
+            std::vector<std::tuple<String, String, double>> rows = ort_profile_data;
+            std::sort(rows.begin(), rows.end(),
+                      [](const auto& a, const auto& b) { return std::get<2>(a) > std::get<2>(b); });
+            double total = 0;
+            for (const auto& r : rows) total += std::get<2>(r);
+            print_detailed(rows, total);
+        } else if (profilingMode == DNN_PROFILE_SUMMARY) {
+            std::map<String, std::pair<int, double>> by_type;  // type -> (count, total_ms)
+            for (const auto& r : ort_profile_data) {
+                if (std::get<2>(r) <= 0) continue;
+                auto& slot = by_type[std::get<1>(r)];
+                slot.first++;
+                slot.second += std::get<2>(r);
+            }
+            std::vector<std::tuple<String, int, double>> rows;
+            rows.reserve(by_type.size());
+            for (const auto& kv : by_type) rows.emplace_back(kv.first, kv.second.first, kv.second.second);
+            std::sort(rows.begin(), rows.end(),
+                      [](const auto& a, const auto& b) { return std::get<2>(a) > std::get<2>(b); });
+            double total = 0;
+            for (const auto& r : rows) total += std::get<2>(r);
+            print_summary(rows, total);
+        }
+        return;
+    }
+#endif
+
+    // ENGINE_NEW / classic path
+    std::vector<double> timings(layersTimings.begin() + 1, layersTimings.end());
+    const int64 total_ticks = (int64)std::accumulate(timings.begin(), timings.end(), 0.0);
+    if (total_ticks == 0) return;
+    const double tickFreq = getTickFrequency();
+    const double total_ms = (double)total_ticks * 1000.0 / tickFreq;
+
+    std::vector<String> names, types;
+    collectLayerInfo(names, types);
+    const size_t n = std::min(timings.size(), names.size());
+
+    if (profilingMode == DNN_PROFILE_DETAILED) {
+        std::vector<std::tuple<String, String, double>> rows;
+        rows.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            if (timings[i] > 0)
+                rows.emplace_back(names[i], types[i], timings[i] * 1000.0 / tickFreq);
+        }
+        std::sort(rows.begin(), rows.end(),
+                  [](const auto& a, const auto& b) { return std::get<2>(a) > std::get<2>(b); });
+        print_detailed(rows, total_ms);
+    } else if (profilingMode == DNN_PROFILE_SUMMARY) {
+        std::map<String, std::pair<int, double>> by_type;
+        for (size_t i = 0; i < n; i++) {
+            if (timings[i] > 0) {
+                auto& slot = by_type[types[i]];
+                slot.first++;
+                slot.second += timings[i] * 1000.0 / tickFreq;
+            }
+        }
+        std::vector<std::tuple<String, int, double>> rows;
+        rows.reserve(by_type.size());
+        for (const auto& kv : by_type) rows.emplace_back(kv.first, kv.second.first, kv.second.second);
+        std::sort(rows.begin(), rows.end(),
+                  [](const auto& a, const auto& b) { return std::get<2>(a) > std::get<2>(b); });
+        print_summary(rows, total_ms);
+    }
 }
 
 void Net::Impl::getMemoryConsumption(
