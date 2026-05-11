@@ -128,6 +128,15 @@ public:
             }
         }
 
+        // For BLOCK channel-axis concat (axis=1 with all-BLOCK inputs), the logical channel
+        // count is sum of inputs' channels — but `MatShape = inpShape0` inherits input 0's
+        // C field, which channels() reads directly. Recompute.
+        if (outShape.layout == DATA_LAYOUT_BLOCK && axis_ == 1) {
+            int total_C = 0;
+            for (size_t i = 0; i < ninputs; i++) total_C += inpShapes[i].C;
+            outShape.C = total_C;
+        }
+
         return outShape;
     }
 
@@ -172,8 +181,12 @@ public:
         for (size_t i = 0; i < ninputs; ++i)
             if (actualInputs[i] != DATA_LAYOUT_BLOCK) { allBlock = false; break; }
 
-        // BLOCK layout on the channel axis would expose inner-block padding as real channels; let TransformLayout repack instead.
-        const bool canKeepBlock = allBlock && axis >= 0 && axis != 1;
+        // axis=1 channel concat with all-BLOCK inputs can stay in BLOCK: cv::concat along
+        // the C1 dimension just appends c-blocks. Eliminates N input TransformLayouts AND
+        // the downstream NCHW→BLOCK transform that would otherwise feed the next conv.
+        // Critical: the output's MatShape.C field must be set to the sum of logical channels,
+        // not inherited from input 0 (channels() reads .C for BLOCK layout).
+        const bool canKeepBlock = allBlock && axis >= 0;
 
         if (canKeepBlock) {
             outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
