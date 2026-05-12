@@ -1,9 +1,9 @@
 # Vendored from microsoft/onnxruntime onnxruntime/core/mlas/. License: MIT.
 # See LICENSE and README.md in this directory for provenance.
 #
-# Stripped to MlasGemm SGEMM only. ONLY the source files needed for
-# MlasGemm (single-precision GEMM) and its per-arch optimizations are
-# compiled here. Non-SGEMM dispatch lines in lib/platform.cpp are
+# Vendored subset: SGEMM (sgemm.cpp + arch kernels) plus MlasFlashAttention
+# (flashattn.cpp) and the portable softmax kernels it needs from compute.cpp.
+# Non-SGEMM / non-FlashAttention dispatch lines in lib/platform.cpp are
 # `#if 0`'d out (search for "MLAS_GEMM_ONLY"). Re-vendoring upstream
 # requires re-applying that patch.
 #
@@ -11,16 +11,20 @@
 #   - lib/threading.cpp -> threading_opencv.cpp (cv::parallel_for_).
 #   - mlasi.h: MlasGetMaximumThreadCount() returns cv::getNumThreads().
 #   - lib/core/common/{narrow,common}.h shims for ORT internals MLAS uses.
-#   - lib/platform.cpp: non-SGEMM dispatch removed (`#if 0` blocks).
+#   - lib/platform.cpp: non-SGEMM dispatch removed (`#if 0` blocks), and
+#     ReduceMaximumF32Kernel / ComputeSumExpF32Kernel initialized to the
+#     portable compute.cpp fallbacks.
 
 set(MLAS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib)
 set(MLAS_INC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/inc)
 
-# Hardware-agnostic core: just the bare minimum for SGEMM dispatch + math.
+# Hardware-agnostic core: SGEMM dispatch + softmax/exp kernels + flash-attention.
 set(mlas_common_srcs
   ${MLAS_SRC_DIR}/platform.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/threading_opencv.cpp
   ${MLAS_SRC_DIR}/sgemm.cpp
+  ${MLAS_SRC_DIR}/compute.cpp
+  ${MLAS_SRC_DIR}/flashattn.cpp
 )
 
 # Architecture detection — same as ORT's onnxruntime_mlas.cmake.

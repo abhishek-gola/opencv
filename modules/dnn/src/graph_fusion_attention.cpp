@@ -309,6 +309,229 @@ struct ModelFusionAttention
         return transpose_idx;
     }
 
+    // Detect DINOv2-style attention where Q/K/V come from a single combined
+    // QKV projection followed by Reshape -> Transpose -> 3 Gathers.
+    // Specifically (DAv2 / DINOv2 / many recent ViTs):
+    //   input -> MatMul(W_qkv) -> [Add(bias)] -> Reshape(B,S,3,H,D)
+    //         -> Transpose(perm=[2,0,3,1,4])  (-> (3,B,H,S,D))
+    //         -> 3 x Gather(axis=0, idx in {0,1,2})  -> Q, K, V each (B,H,S,D)
+    //   Q -> Mul(scalar) -> QK^T MatMul
+    //   K -> Transpose(swap last-two-dims) -> QK^T MatMul
+    //   QK^T -> Softmax (no mask) -> .V MatMul
+    //          -> Transpose([0,2,1,3]) -> Reshape (B,S,H*D)
+    // Returns true on match; populates removed_ops and replacements.
+    bool tryFuseCombinedQKV(const vector<Ptr<Layer>>& prog, int qkv_matmul_idx,
+                            std::set<int>& removed_ops,
+                            vector<std::pair<int, Ptr<Layer>>>& replacements)
+    {
+        if (qkv_matmul_idx < 0 || qkv_matmul_idx >= (int)prog.size() || !prog[qkv_matmul_idx])
+            return false;
+        if (removed_ops.count(qkv_matmul_idx)) return false;
+        if (!isProjCandidate(prog[qkv_matmul_idx])) return false;
+
+        Mat W = getProjWeight(prog[qkv_matmul_idx]);
+        if (W.dims != 2 || W.size[1] % 3 != 0) return false;
+        const int input_hidden = W.size[0];
+        const int proj_hidden  = W.size[1] / 3;
+        const int total_hidden = W.size[1];
+
+        Arg cur = prog[qkv_matmul_idx]->outputs[0];
+
+        // Optional Add(bias). Either fused into a Gemm (blobs[1]) or a separate Add op.
+        int add_idx = -1;
+        Mat bias_mat;
+        bool has_bias = false;
+        if (prog[qkv_matmul_idx]->blobs.size() >= 2) {
+            bias_mat = prog[qkv_matmul_idx]->blobs[1];
+            has_bias = bias_mat.total() == (size_t)total_hidden && bias_mat.type() == CV_32F;
+            if (!has_bias) return false;
+        }
+        int next = singleConsumer(cur);
+        if (!has_bias && next >= 0 && next < (int)prog.size() && prog[next]) {
+            NaryEltwiseLayer* e = dynamic_cast<NaryEltwiseLayer*>(prog[next].get());
+            if (e && e->op == NaryEltwiseLayer::OPERATION::ADD &&
+                prog[next]->inputs.size() == 2)
+            {
+                Mat b_candidate;
+                for (Arg in : prog[next]->inputs) {
+                    if (netimpl->isConstArg(in)) {
+                        Mat t = netimpl->argTensor(in);
+                        if (t.type() == CV_32F && (int)t.total() == total_hidden)
+                            b_candidate = t;
+                    }
+                }
+                if (!b_candidate.empty()) {
+                    add_idx = next;
+                    bias_mat = b_candidate;
+                    has_bias = true;
+                    cur = prog[add_idx]->outputs[0];
+                    next = singleConsumer(cur);
+                }
+            }
+        }
+
+        // Reshape -> (B, S, 3, H, D).
+        if (!isReshape(prog, next)) return false;
+        const int reshape_idx = next;
+        const auto& rinputs = prog[reshape_idx]->inputs;
+        if (rinputs.size() < 2) return false;
+
+        std::set<int> extra_ops;
+        int num_heads = -1, head_dim = -1;
+        Arg shape_arg = rinputs[1];
+        if (netimpl->isConstArg(shape_arg)) {
+            Mat sh = netimpl->argTensor(shape_arg);
+            if (sh.total() != 5) return false;
+            const int64_t* sd = sh.ptr<int64_t>();
+            if ((int)sd[2] != 3) return false;
+            num_heads = (int)sd[3];
+            head_dim  = (int)sd[4];
+        } else {
+            auto it = producer_.find(shape_arg.idx);
+            if (it == producer_.end()) return false;
+            int concat_idx = it->second;
+            if (concat_idx < 0 || concat_idx >= (int)prog.size() || !prog[concat_idx])
+                return false;
+            if (!dynamic_cast<Concat2Layer*>(prog[concat_idx].get())) return false;
+            const auto& cinputs = prog[concat_idx]->inputs;
+            if (cinputs.size() != 5) return false;
+            if (extractConstInt(prog, cinputs[2]) != 3) return false;
+            num_heads = extractConstInt(prog, cinputs[3]);
+            head_dim  = extractConstInt(prog, cinputs[4]);
+            if (num_heads <= 0 || head_dim <= 0) return false;
+            collectShapeChain(prog, concat_idx, extra_ops);
+        }
+        if (num_heads * head_dim != proj_hidden) return false;
+
+        // Transpose with perm that brings the "3" dim to front. Canonical perm
+        // is [2,0,3,1,4]; only perm[0] == 2 is strictly required.
+        Arg reshape_out = prog[reshape_idx]->outputs[0];
+        int transpose_idx = singleConsumer(reshape_out);
+        if (!isTranspose(prog, transpose_idx)) return false;
+        TransposeLayer* tr = dynamic_cast<TransposeLayer*>(prog[transpose_idx].get());
+        if (!tr || tr->perm.size() != 5 || tr->perm[0] != 2) return false;
+
+        // Exactly 3 Gather consumers on axis 0, indices {0,1,2}.
+        Arg tr_out = prog[transpose_idx]->outputs[0];
+        auto cit = consumers_.find(tr_out.idx);
+        if (cit == consumers_.end() || cit->second.size() != 3) return false;
+
+        int gather_for_idx[3] = { -1, -1, -1 };  // [Q,K,V] = [0,1,2]
+        for (int c : cit->second) {
+            if (c < 0 || c >= (int)prog.size() || !prog[c]) return false;
+            Gather2Layer* g = dynamic_cast<Gather2Layer*>(prog[c].get());
+            if (!g || g->axis != 0 || prog[c]->inputs.size() < 2) return false;
+            Arg idx_arg = prog[c]->inputs[1];
+            if (!netimpl->isConstArg(idx_arg)) return false;
+            Mat t = netimpl->argTensor(idx_arg);
+            if (t.total() != 1) return false;
+            int v;
+            if      (t.type() == CV_64S) v = (int)t.at<int64_t>(0);
+            else if (t.type() == CV_32S) v = (int)t.at<int32_t>(0);
+            else return false;
+            if (v < 0 || v > 2 || gather_for_idx[v] != -1) return false;
+            gather_for_idx[v] = c;
+        }
+        const int q_gather = gather_for_idx[0];
+        const int k_gather = gather_for_idx[1];
+        const int v_gather = gather_for_idx[2];
+        if (q_gather < 0 || k_gather < 0 || v_gather < 0) return false;
+
+        Arg q_out = prog[q_gather]->outputs[0];
+        Arg k_out = prog[k_gather]->outputs[0];
+        Arg v_out = prog[v_gather]->outputs[0];
+
+        // Q side: scalar Mul -> QK^T MatMul.
+        int q_mul_idx = singleConsumer(q_out);
+        float q_scale = 1.f;
+        if (!isScalarMul(prog, q_mul_idx, &q_scale)) return false;
+        if (q_scale == 0.f) return false;
+        int qk_matmul_idx = singleConsumer(prog[q_mul_idx]->outputs[0]);
+        if (!isMatMul(prog, qk_matmul_idx)) return false;
+
+        // K side: Transpose (last-two-dims swap) -> same QK^T MatMul.
+        int k_trans_idx = singleConsumer(k_out);
+        if (!isTranspose(prog, k_trans_idx)) return false;
+        Arg k_trans_out = prog[k_trans_idx]->outputs[0];
+        bool k_connected = false;
+        for (Arg in : prog[qk_matmul_idx]->inputs)
+            if (in.idx == k_trans_out.idx) { k_connected = true; break; }
+        if (!k_connected) return false;
+
+        // Softmax (no mask path) -> .V MatMul, with V as the second input.
+        int softmax_idx = singleConsumer(prog[qk_matmul_idx]->outputs[0]);
+        if (!isSoftmax(prog, softmax_idx)) return false;
+        int av_matmul_idx = singleConsumer(prog[softmax_idx]->outputs[0]);
+        if (!isMatMul(prog, av_matmul_idx)) return false;
+        bool v_connected = false;
+        for (Arg in : prog[av_matmul_idx]->inputs)
+            if (in.idx == v_out.idx) { v_connected = true; break; }
+        if (!v_connected) return false;
+
+        // Output Transpose -> Reshape (B, S, H*D).
+        int out_trans_idx = singleConsumer(prog[av_matmul_idx]->outputs[0]);
+        if (!isTranspose(prog, out_trans_idx)) return false;
+        int out_reshape_idx = findMatchingConsumer(prog, prog[out_trans_idx]->outputs[0],
+            [](Layer* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
+            &extra_ops);
+        if (!isReshape(prog, out_reshape_idx)) return false;
+
+        const auto& or_inputs = prog[out_reshape_idx]->inputs;
+        if (or_inputs.size() >= 2 && !netimpl->isConstArg(or_inputs[1])) {
+            auto it = producer_.find(or_inputs[1].idx);
+            if (it != producer_.end())
+                collectShapeChain(prog, it->second, extra_ops);
+        }
+
+        // Build the fused Attention layer. W is already in [Q|K|V] order along
+        // the output dim (the combined-QKV linear's weight layout).
+        Mat W_qkv = W.clone();
+        Mat bias_qkv;
+        if (has_bias) bias_qkv = bias_mat.clone();
+
+        // Attention layer's `scale` parameter is the divisor applied before
+        // softmax. Q was multiplied by q_scale, so the effective divisor is
+        // 1/q_scale (e.g. q_scale=1/sqrt(d) -> scale=sqrt(d)).
+        const float param_scale = 1.0f / q_scale;
+
+        LayerParams attn_params;
+        attn_params.name = prog[qkv_matmul_idx]->name + "_fused_attention";
+        attn_params.type = "Attention";
+        attn_params.set("num_heads", num_heads);
+        int qkv_sizes[3] = { proj_hidden, proj_hidden, proj_hidden };
+        attn_params.set("qkv_hidden_sizes", DictValue::arrayInt(qkv_sizes, 3));
+        attn_params.set("scale", param_scale);
+        attn_params.set("output_ndims", 3);
+        attn_params.blobs.push_back(W_qkv);
+        if (has_bias) attn_params.blobs.push_back(bias_qkv);
+
+        Ptr<Layer> attn_layer = LayerFactory::createLayerInstance(attn_params.type, attn_params);
+        CV_Assert(attn_layer);
+        Arg shared_input = prog[qkv_matmul_idx]->inputs[0];
+        attn_layer->inputs  = { shared_input };
+        attn_layer->outputs = prog[out_reshape_idx]->outputs;
+        attn_layer->netimpl = netimpl;
+
+        std::set<int> to_remove = {
+            qkv_matmul_idx, reshape_idx, transpose_idx,
+            q_gather, k_gather, v_gather,
+            q_mul_idx, k_trans_idx,
+            qk_matmul_idx, softmax_idx,
+            av_matmul_idx, out_trans_idx, out_reshape_idx
+        };
+        if (add_idx >= 0) to_remove.insert(add_idx);
+        for (int op : extra_ops) to_remove.insert(op);
+
+        // Validate: every op we're removing must not also be feeding something
+        // outside the block (other than the inputs to the new layer).
+        (void)input_hidden;  // input_hidden currently unused; kept for symmetry with existing path.
+
+        for (int op : to_remove) removed_ops.insert(op);
+        const int insert_pos = *std::min_element(to_remove.begin(), to_remove.end());
+        replacements.push_back({insert_pos, attn_layer});
+        return true;
+    }
+
     bool fuseGraph(Ptr<Graph>& graph)
     {
         const vector<Ptr<Layer>>& prog = graph->prog();
@@ -324,16 +547,26 @@ struct ModelFusionAttention
                 consumers_[inp.idx].push_back((int)i);
         }
 
+        bool modified = false;
+        std::set<int> removed_ops;
+
+        // Pass 1: combined-QKV blocks (DINOv2 / DAv2 / many recent ViTs).
+        // A single qkv proj feeds the whole attention block, so it's enough
+        // to scan every MatMul/Gemm and try to grow the pattern outward.
+        for (size_t i = 0; i < nops; i++) {
+            if (!prog[i] || removed_ops.count((int)i)) continue;
+            if (tryFuseCombinedQKV(prog, (int)i, removed_ops, attention_replacements_))
+                modified = true;
+        }
+
+        // Pass 2: the original 3-separate-projection path (BERT / pre-DINOv2 ViTs).
         std::map<int, vector<int>> qkv_candidates;
         for (size_t i = 0; i < nops; i++) {
-            if (!prog[i]) continue;
+            if (!prog[i] || removed_ops.count((int)i)) continue;
             if (!isProjCandidate(prog[i])) continue;
             Arg inp = prog[i]->inputs[0];
             qkv_candidates[inp.idx].push_back((int)i);
         }
-
-        bool modified = false;
-        std::set<int> removed_ops;
 
         for (auto& [inp_idx, matmul_indices] : qkv_candidates) {
             if (matmul_indices.size() < 3) continue;
