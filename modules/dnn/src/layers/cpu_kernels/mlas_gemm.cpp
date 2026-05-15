@@ -84,14 +84,17 @@ bool mlasSgemmBatch(size_t batch,
     // MLAS's MlasGemmBatch splits its TargetThreadCount across `batch`
     // gemms (ThreadsPerGemm = TargetThreadCount / batch), so when each
     // gemm is already large enough to saturate every worker on its own,
-    // batching gives ThreadsPerGemm = 1..few — fewer M-rows per thread,
-    // but also each thread now juggles a *different* B matrix per batch
-    // slot, killing L1/L2 reuse of the packed B panel.
+    // batching gives ThreadsPerGemm = 1..few. With the M-partition branch
+    // (taken whenever N <= M, e.g. attention QK^T where M == N), this
+    // leaves all threads contending across batch slots that each carry a
+    // different B matrix (different head) — no L1/L2 reuse of the packed
+    // B panel across threads is possible.
     //
     // Process the batch sequentially in that regime: one gemm fans out to
-    // all threads, threads share the packed B panel, then move on. The
-    // attention QK^T / scores*V matmuls in ViT/CLIP backbones are the hot
-    // case here (M=N=seq, K=head_dim, batch=heads).
+    // all threads, threads pack and share a single B's panels, then move
+    // on to the next batch element. The attention QK^T / scores*V matmuls
+    // in ViT/CLIP backbones (M=N=seq, K=head_dim, batch=heads) are the
+    // hot case this targets.
     const size_t per_gemm = Ms * Ns * Ks;
     const int nt = std::max(1, cv::getNumThreads());
     const size_t saturate = MLAS_OPENCV_SGEMM_THREAD_COMPLEXITY *
