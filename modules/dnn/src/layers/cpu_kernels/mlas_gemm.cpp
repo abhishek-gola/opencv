@@ -10,7 +10,12 @@
 #ifdef HAVE_MLAS
 
 #include "mlas.h"
+#include <opencv2/core/utility.hpp>
 #include <vector>
+
+// MLAS_SGEMM_THREAD_COMPLEXITY is private to lib/mlasi.h, but its value is
+// fixed by the vendored SGEMM dispatch logic. Keep this in sync.
+#define MLAS_OPENCV_SGEMM_THREAD_COMPLEXITY (size_t(64) * size_t(1024))
 
 namespace cv { namespace dnn {
 
@@ -70,6 +75,46 @@ bool mlasSgemmBatch(size_t batch,
     if (!mlasAvailable()) return false;
     if (batch == 0 || M <= 0 || N <= 0 || K <= 0) return false;
 
+    const CBLAS_TRANSPOSE tA = trans_a ? CblasTrans : CblasNoTrans;
+    const CBLAS_TRANSPOSE tB = trans_b ? CblasTrans : CblasNoTrans;
+    const size_t Ms = static_cast<size_t>(M);
+    const size_t Ns = static_cast<size_t>(N);
+    const size_t Ks = static_cast<size_t>(K);
+
+    // MLAS's MlasGemmBatch splits its TargetThreadCount across `batch`
+    // gemms (ThreadsPerGemm = TargetThreadCount / batch), so when each
+    // gemm is already large enough to saturate every worker on its own,
+    // batching gives ThreadsPerGemm = 1..few — fewer M-rows per thread,
+    // but also each thread now juggles a *different* B matrix per batch
+    // slot, killing L1/L2 reuse of the packed B panel.
+    //
+    // Process the batch sequentially in that regime: one gemm fans out to
+    // all threads, threads share the packed B panel, then move on. The
+    // attention QK^T / scores*V matmuls in ViT/CLIP backbones are the hot
+    // case here (M=N=seq, K=head_dim, batch=heads).
+    const size_t per_gemm = Ms * Ns * Ks;
+    const int nt = std::max(1, cv::getNumThreads());
+    const size_t saturate = MLAS_OPENCV_SGEMM_THREAD_COMPLEXITY *
+                            static_cast<size_t>(nt);
+    if (batch > 1 && per_gemm >= saturate) {
+        MLAS_SGEMM_DATA_PARAMS one;
+        one.lda = static_cast<size_t>(lda);
+        one.ldb = static_cast<size_t>(ldb);
+        one.ldc = static_cast<size_t>(ldc);
+        one.alpha = alpha;
+        one.beta = beta;
+        one.BIsPacked = false;
+        for (size_t i = 0; i < batch; i++) {
+            one.A = A_base + A_offsets[i];
+            one.B = B_base + B_offsets[i];
+            one.C = C_base + C_offsets[i];
+            MlasGemmBatch(tA, tB, Ms, Ns, Ks, &one, 1,
+                          /*ThreadPool=*/nullptr,
+                          /*BackendKernelSelectorConfig=*/nullptr);
+        }
+        return true;
+    }
+
     std::vector<MLAS_SGEMM_DATA_PARAMS> data(batch);
     for (size_t i = 0; i < batch; i++) {
         data[i].A = A_base + A_offsets[i];
@@ -83,11 +128,7 @@ bool mlasSgemmBatch(size_t batch,
         data[i].BIsPacked = false;
     }
 
-    MlasGemmBatch(trans_a ? CblasTrans : CblasNoTrans,
-                  trans_b ? CblasTrans : CblasNoTrans,
-                  static_cast<size_t>(M),
-                  static_cast<size_t>(N),
-                  static_cast<size_t>(K),
+    MlasGemmBatch(tA, tB, Ms, Ns, Ks,
                   data.data(),
                   batch,
                   /*ThreadPool=*/nullptr,
