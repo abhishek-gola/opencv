@@ -558,34 +558,27 @@ struct ModelFusionAttention
             auto it = producer_.find(a.idx);
             return it == producer_.end() ? -1 : it->second;
         };
-        fprintf(stderr, "[traceClip ENTER] is_q=%d is_k=%d arg=%d\n", is_q_branch?1:0, is_k_branch?1:0, arg.idx); fflush(stderr);
-        auto tdbg = [&](const char* tag, int idx) {
-            fprintf(stderr, "[traceClip %s] miss=%s idx=%d type=%s\n",
-                    is_q_branch ? "Q" : (is_k_branch ? "K" : "V"), tag, idx,
-                    (idx >= 0 && idx < (int)prog.size() && prog[idx]) ? prog[idx]->type.c_str() : "?");
-            fflush(stderr);
-        };
 
         // K side: peel the (B*H,S,D) -> (B*H,D,S) transpose-3D first.
         if (is_k_branch) {
             int idx = stepProducer(cur);
-            if (idx < 0 || !prog[idx]) { tdbg("k-tr3d-noprod", idx); return -1; }
+            if (idx < 0 || !prog[idx]) return -1;
             TransposeLayer* tr = dynamic_cast<TransposeLayer*>(prog[idx].get());
-            if (!tr || tr->perm.size() != 3) { tdbg("k-tr3d-bad", idx); return -1; }
-            if (tr->perm[0] != 0 || tr->perm[1] != 2 || tr->perm[2] != 1) { tdbg("k-tr3d-perm", idx); return -1; }
+            if (!tr || tr->perm.size() != 3) return -1;
+            if (tr->perm[0] != 0 || tr->perm[1] != 2 || tr->perm[2] != 1) return -1;
             ops_consumed.insert(idx);
             cur = prog[idx]->inputs[0];
         }
 
         // (B, H, S, D) -> (B*H, S, D) flatten-reshape.
         int r3d_idx = stepProducer(cur);
-        if (!isReshape(prog, r3d_idx)) { tdbg("r3d-not-reshape", r3d_idx); return -1; }
+        if (!isReshape(prog, r3d_idx)) return -1;
         // We don't verify the target shape statically — it can be a Concat of
         // dynamic Shape outputs (head dim & seq len both come from runtime
         // shapes in CLIP exports). The downstream attention matmul shape
         // check is what tells us the branch produced a valid (B*H,S,D).
         ops_consumed.insert(r3d_idx);
-        if (prog[r3d_idx]->inputs.size() < 2) { tdbg("r3d-inputs<2", r3d_idx); return -1; }
+        if (prog[r3d_idx]->inputs.size() < 2) return -1;
         // Optionally fold the Concat'd shape chain that feeds this Reshape's
         // shape input; harmless if the shape is a const Mat (no producer).
         Arg shape_arg_r3d = prog[r3d_idx]->inputs[1];
@@ -598,11 +591,11 @@ struct ModelFusionAttention
 
         // Transpose 4D with perm [0,2,1,3]: (B,S,H,D) -> (B,H,S,D).
         int t4d_idx = stepProducer(cur);
-        if (!isTranspose(prog, t4d_idx)) { tdbg("t4d-not-transpose", t4d_idx); return -1; }
+        if (!isTranspose(prog, t4d_idx)) return -1;
         TransposeLayer* tr4 = dynamic_cast<TransposeLayer*>(prog[t4d_idx].get());
-        if (!tr4 || tr4->perm.size() != 4) { tdbg("t4d-perm-bad", t4d_idx); return -1; }
+        if (!tr4 || tr4->perm.size() != 4) return -1;
         if (tr4->perm[0] != 0 || tr4->perm[1] != 2 ||
-            tr4->perm[2] != 1 || tr4->perm[3] != 3) { tdbg("t4d-perm-wrong", t4d_idx); return -1; }
+            tr4->perm[2] != 1 || tr4->perm[3] != 3) return -1;
         ops_consumed.insert(t4d_idx);
         cur = prog[t4d_idx]->inputs[0];
 
@@ -610,29 +603,29 @@ struct ModelFusionAttention
         // target shape (third dim of a 4D shape Mat / third input of a 4-way
         // Concat).
         int r4d_idx = stepProducer(cur);
-        if (!isReshape(prog, r4d_idx)) { tdbg("r4d-not-reshape", r4d_idx); return -1; }
-        if (prog[r4d_idx]->inputs.size() < 2) { tdbg("r4d-inputs", r4d_idx); return -1; }
+        if (!isReshape(prog, r4d_idx)) return -1;
+        if (prog[r4d_idx]->inputs.size() < 2) return -1;
         Arg shape_arg_r4d = prog[r4d_idx]->inputs[1];
         int num_heads = -1;
         if (netimpl->isConstArg(shape_arg_r4d)) {
             Mat shape_mat = netimpl->argTensor(shape_arg_r4d);
-            if (shape_mat.total() != 4) { tdbg("r4d-shape-not-4", r4d_idx); return -1; }
+            if (shape_mat.total() != 4) return -1;
             if (shape_mat.type() == CV_64S)
                 num_heads = static_cast<int>(shape_mat.ptr<int64_t>()[2]);
             else if (shape_mat.type() == CV_32S)
                 num_heads = static_cast<int>(shape_mat.ptr<int32_t>()[2]);
-            else { tdbg("r4d-shape-type", r4d_idx); return -1; }
+            else return -1;
         } else {
             int concat_idx = stepProducer(shape_arg_r4d);
-            if (concat_idx < 0 || !prog[concat_idx]) { tdbg("r4d-concat-noprod", concat_idx); return -1; }
-            if (!dynamic_cast<Concat2Layer*>(prog[concat_idx].get())) { tdbg("r4d-not-concat", concat_idx); return -1; }
+            if (concat_idx < 0 || !prog[concat_idx]) return -1;
+            if (!dynamic_cast<Concat2Layer*>(prog[concat_idx].get())) return -1;
             const auto& cinputs = prog[concat_idx]->inputs;
-            if (cinputs.size() != 4) { tdbg("r4d-concat-not-4-in", concat_idx); return -1; }
+            if (cinputs.size() != 4) return -1;
             num_heads = extractConstInt(prog, cinputs[2]);
-            if (num_heads <= 0) { tdbg("r4d-num-heads-bad", concat_idx); return -1; }
+            if (num_heads <= 0) return -1;
             collectShapeChain(prog, concat_idx, ops_consumed);
         }
-        if (num_heads <= 0) { tdbg("r4d-num-heads-zero", r4d_idx); return -1; }
+        if (num_heads <= 0) return -1;
         out_num_heads = num_heads;
         ops_consumed.insert(r4d_idx);
         cur = prog[r4d_idx]->inputs[0];
@@ -641,11 +634,11 @@ struct ModelFusionAttention
         out_q_scale = 1.0f;
         if (is_q_branch) {
             int mul_idx = stepProducer(cur);
-            if (mul_idx < 0 || !prog[mul_idx]) { tdbg("mul-noprod", mul_idx); return -1; }
+            if (mul_idx < 0 || !prog[mul_idx]) return -1;
             NaryEltwiseLayer* mul =
                 dynamic_cast<NaryEltwiseLayer*>(prog[mul_idx].get());
-            if (!mul || mul->op != NaryEltwiseLayer::OPERATION::PROD) { tdbg("not-prod-mul", mul_idx); return -1; }
-            if (prog[mul_idx]->inputs.size() != 2) { tdbg("mul-inputs", mul_idx); return -1; }
+            if (!mul || mul->op != NaryEltwiseLayer::OPERATION::PROD) return -1;
+            if (prog[mul_idx]->inputs.size() != 2) return -1;
             Arg runtime_arg;
             bool got_scale = false, got_runtime = false;
             for (Arg in : prog[mul_idx]->inputs) {
@@ -673,15 +666,15 @@ struct ModelFusionAttention
         //       (the ONNX parser collapses MatMul+const-Add into a single
         //        MatMul with two blobs.)
         int next_idx = stepProducer(cur);
-        if (next_idx < 0 || !prog[next_idx]) { tdbg("proj-noprod", next_idx); return -1; }
+        if (next_idx < 0 || !prog[next_idx]) return -1;
 
         out_bias = Mat();
         int mm_idx = -1;
         if (dynamic_cast<NaryEltwiseLayer*>(prog[next_idx].get())) {
             NaryEltwiseLayer* add =
                 dynamic_cast<NaryEltwiseLayer*>(prog[next_idx].get());
-            if (!add || add->op != NaryEltwiseLayer::OPERATION::ADD) { tdbg("not-add", next_idx); return -1; }
-            if (prog[next_idx]->inputs.size() != 2) { tdbg("add-inputs", next_idx); return -1; }
+            if (!add || add->op != NaryEltwiseLayer::OPERATION::ADD) return -1;
+            if (prog[next_idx]->inputs.size() != 2) return -1;
             Arg bias_arg;
             Arg matmul_out_arg;
             bool got_bias = false, got_runtime2 = false;
@@ -694,7 +687,7 @@ struct ModelFusionAttention
                     got_runtime2 = true;
                 }
             }
-            if (!got_bias || !got_runtime2) { tdbg("add-mix", next_idx); return -1; }
+            if (!got_bias || !got_runtime2) return -1;
             out_bias = netimpl->argTensor(bias_arg).clone();
             ops_consumed.insert(next_idx);
             mm_idx = stepProducer(matmul_out_arg);
@@ -702,10 +695,10 @@ struct ModelFusionAttention
             mm_idx = next_idx;
         }
 
-        if (mm_idx < 0 || !prog[mm_idx]) { tdbg("mm-noprod", mm_idx); return -1; }
-        if (!dynamic_cast<MatMulLayer*>(prog[mm_idx].get())) { tdbg("mm-not-matmul", mm_idx); return -1; }
-        if (prog[mm_idx]->blobs.empty()) { tdbg("mm-no-blob", mm_idx); return -1; }
-        if (prog[mm_idx]->inputs.size() != 1) { tdbg("mm-inputs!=1", mm_idx); return -1; }
+        if (mm_idx < 0 || !prog[mm_idx]) return -1;
+        if (!dynamic_cast<MatMulLayer*>(prog[mm_idx].get())) return -1;
+        if (prog[mm_idx]->blobs.empty()) return -1;
+        if (prog[mm_idx]->inputs.size() != 1) return -1;
         out_W = prog[mm_idx]->blobs[0].clone();
         // Folded MatMul carries bias as a second blob (real_ndims_C >= 1).
         if (out_bias.empty() && prog[mm_idx]->blobs.size() >= 2)
@@ -726,29 +719,23 @@ struct ModelFusionAttention
                               std::set<int>& removed_ops,
                               vector<std::pair<int, Ptr<Layer>>>& replacements)
     {
-        auto fail = [&](const char* tag) -> bool {
-            static int reported = 0; if (reported < 80) { reported++;
-                fprintf(stderr, "[fuseClip] sm=%d miss: %s (op=%s)\n", softmax_idx, tag,
-                        prog[softmax_idx]->name.c_str()); }
-            return false;
-        };
         if (softmax_idx < 0 || softmax_idx >= (int)prog.size() || !prog[softmax_idx])
             return false;
         if (removed_ops.count(softmax_idx)) return false;
         SoftmaxLayer* sm = dynamic_cast<SoftmaxLayer*>(prog[softmax_idx].get());
-        if (!sm || sm->logSoftMax) return fail("not-softmax-or-logsm");
-        if (prog[softmax_idx]->inputs.size() != 1) return fail("sm-inputs!=1");
+        if (!sm || sm->logSoftMax) return false;
+        if (prog[softmax_idx]->inputs.size() != 1) return false;
 
         // QK^T MatMul feeds the Softmax.
         Arg sm_in = prog[softmax_idx]->inputs[0];
         auto it = producer_.find(sm_in.idx);
-        if (it == producer_.end()) return fail("no-producer");
+        if (it == producer_.end()) return false;
         int qk_matmul_idx = it->second;
-        if (qk_matmul_idx < 0 || !prog[qk_matmul_idx]) return fail("bad-qkmm");
-        if (!dynamic_cast<MatMulLayer*>(prog[qk_matmul_idx].get())) return fail("qkmm-not-matmul");
+        if (qk_matmul_idx < 0 || !prog[qk_matmul_idx]) return false;
+        if (!dynamic_cast<MatMulLayer*>(prog[qk_matmul_idx].get())) return false;
         // Attention QK^T has two non-const inputs.
-        if (!prog[qk_matmul_idx]->blobs.empty()) return fail("qkmm-has-blob");
-        if (prog[qk_matmul_idx]->inputs.size() != 2) return fail("qkmm-inputs!=2");
+        if (!prog[qk_matmul_idx]->blobs.empty()) return false;
+        if (prog[qk_matmul_idx]->inputs.size() != 2) return false;
         Arg q_arg = prog[qk_matmul_idx]->inputs[0];
         Arg k_arg = prog[qk_matmul_idx]->inputs[1];
 
@@ -775,13 +762,13 @@ struct ModelFusionAttention
         float dummy = 1.f;
         int q_mm_idx = traceClipBranch(prog, q_arg, /*is_q=*/true, /*is_k=*/false,
                                        Wq, bq, nh_q, q_scale, consumed);
-        if (q_mm_idx < 0) return fail("trace-q");
+        if (q_mm_idx < 0) return false;
         int k_mm_idx = traceClipBranch(prog, k_arg, /*is_q=*/false, /*is_k=*/true,
                                        Wk, bk, nh_k, dummy, consumed);
-        if (k_mm_idx < 0) return fail("trace-k");
+        if (k_mm_idx < 0) return false;
         int v_mm_idx = traceClipBranch(prog, v_arg, /*is_q=*/false, /*is_k=*/false,
                                        Wv, bv, nh_v, dummy, consumed);
-        if (v_mm_idx < 0) return fail("trace-v");
+        if (v_mm_idx < 0) return false;
 
         if (q_mm_idx == k_mm_idx || k_mm_idx == v_mm_idx || q_mm_idx == v_mm_idx)
             return false;
@@ -1229,16 +1216,13 @@ struct ModelFusionAttention
         // Pass 3: CLIP / OWLv2 layout — 3 separate q/k/v MatMul+Add+Reshape
         // chains that don't match either of the earlier patterns. Anchor on
         // each Softmax and grow outward.
-        int sm_seen = 0, sm_match = 0;
         for (size_t i = 0; i < nops; i++) {
             if (!prog[i] || removed_ops.count((int)i)) continue;
             if (prog[i]->type != "Softmax") continue;
-            sm_seen++;
-            bool m = tryFuseClipAttention(prog, (int)i, removed_ops,
-                                          attention_replacements_);
-            if (m) { sm_match++; modified = true; }
+            if (tryFuseClipAttention(prog, (int)i, removed_ops,
+                                     attention_replacements_))
+                modified = true;
         }
-        fprintf(stderr, "[fuseClipAttention] softmax_seen=%d matched=%d\n", sm_seen, sm_match);
 
         if (modified) {
             vector<Ptr<Layer>> newprog;
