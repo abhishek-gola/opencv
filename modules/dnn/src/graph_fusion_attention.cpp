@@ -865,6 +865,142 @@ struct ModelFusionAttention
         return true;
     }
 
+    // SR-attention (Segformer / efficient self-attention) fallback fuser.
+    // Doesn't trace the QKV projections at all — just collapses
+    //
+    //   QK^T MatMul -> [Div/Mul scale] -> Softmax -> _·V MatMul
+    //               -> Transpose([0,2,1,3]) -> Reshape (B, S_q, H*D_v)
+    //
+    // into a single SDPA layer that runs MlasFlashAttention on the
+    // already-projected Q / K^T / V tensors. Lighter-weight than Passes
+    // 1–3 because we don't care where Q/K/V came from — useful when Q
+    // comes from one hidden state and K/V come from another (Segformer's
+    // sr/Conv-reduced state), which none of the projection-tracing
+    // patterns can express.
+    bool tryFuseSDPA(const vector<Ptr<Layer>>& prog, int softmax_idx,
+                     std::set<int>& removed_ops,
+                     vector<std::pair<int, Ptr<Layer>>>& replacements)
+    {
+        if (softmax_idx < 0 || softmax_idx >= (int)prog.size() || !prog[softmax_idx])
+            return false;
+        if (removed_ops.count(softmax_idx)) return false;
+        SoftmaxLayer* sm = dynamic_cast<SoftmaxLayer*>(prog[softmax_idx].get());
+        if (!sm || sm->logSoftMax) return false;
+        if (prog[softmax_idx]->inputs.size() != 1) return false;
+
+        // Softmax input must come from a MatMul, optionally through a scalar
+        // Div(MatMul, c) / Mul(MatMul, c) — the explicit attention rescale.
+        Arg sm_in = prog[softmax_idx]->inputs[0];
+        auto step = [&](Arg a) -> int {
+            auto it = producer_.find(a.idx);
+            return it == producer_.end() ? -1 : it->second;
+        };
+
+        int qk_matmul_idx = step(sm_in);
+        if (qk_matmul_idx < 0 || !prog[qk_matmul_idx]) return false;
+
+        float qk_scale = 1.f;
+        int scale_op_idx = -1;
+        if (NaryEltwiseLayer* elt = dynamic_cast<NaryEltwiseLayer*>(prog[qk_matmul_idx].get())) {
+            if (elt->op != NaryEltwiseLayer::OPERATION::DIV &&
+                elt->op != NaryEltwiseLayer::OPERATION::PROD)
+                return false;
+            if (prog[qk_matmul_idx]->inputs.size() != 2) return false;
+            Arg cur, scale_arg;
+            bool seen_runtime = false, seen_const = false;
+            for (Arg in : prog[qk_matmul_idx]->inputs) {
+                if (netimpl->isConstArg(in)) { scale_arg = in; seen_const = true; }
+                else { cur = in; seen_runtime = true; }
+            }
+            if (!seen_runtime || !seen_const) return false;
+            Mat t = netimpl->argTensor(scale_arg);
+            if (t.total() != 1) return false;
+            float c = 0.f;
+            if      (t.type() == CV_32F) c = t.at<float>(0);
+            else if (t.type() == CV_64F) c = (float)t.at<double>(0);
+            else return false;
+            if (c == 0.f) return false;
+            qk_scale = (elt->op == NaryEltwiseLayer::OPERATION::DIV) ? c : (1.f / c);
+            scale_op_idx = qk_matmul_idx;
+            qk_matmul_idx = step(cur);
+            if (qk_matmul_idx < 0 || !prog[qk_matmul_idx]) return false;
+        }
+
+        if (!dynamic_cast<MatMulLayer*>(prog[qk_matmul_idx].get())) return false;
+        if (!prog[qk_matmul_idx]->blobs.empty()) return false;
+        if (prog[qk_matmul_idx]->inputs.size() != 2) return false;
+        Arg q_arg  = prog[qk_matmul_idx]->inputs[0];
+        Arg kT_arg = prog[qk_matmul_idx]->inputs[1];
+
+        Arg sm_out = prog[softmax_idx]->outputs[0];
+        int av_matmul_idx = singleConsumer(sm_out);
+        if (av_matmul_idx < 0 || !prog[av_matmul_idx]) return false;
+        if (!dynamic_cast<MatMulLayer*>(prog[av_matmul_idx].get())) return false;
+        if (!prog[av_matmul_idx]->blobs.empty()) return false;
+        if (prog[av_matmul_idx]->inputs.size() != 2) return false;
+        Arg v_arg;
+        bool seen_v = false;
+        for (Arg in : prog[av_matmul_idx]->inputs) {
+            if (in.idx == sm_out.idx) continue;
+            v_arg = in; seen_v = true;
+        }
+        if (!seen_v) return false;
+
+        Arg av_out = prog[av_matmul_idx]->outputs[0];
+        int out_transpose_idx = singleConsumer(av_out);
+        if (!isTranspose(prog, out_transpose_idx)) return false;
+        TransposeLayer* out_tr =
+            dynamic_cast<TransposeLayer*>(prog[out_transpose_idx].get());
+        if (!out_tr || out_tr->perm.size() != 4) return false;
+        if (out_tr->perm[0] != 0 || out_tr->perm[1] != 2 ||
+            out_tr->perm[2] != 1 || out_tr->perm[3] != 3) return false;
+        Arg out_tr_out = prog[out_transpose_idx]->outputs[0];
+        // Transpose's output is typically consumed by the final Reshape plus
+        // a couple of Shape ops that supply the Reshape's shape arg. Allow
+        // those Shape ops alongside the Reshape consumer (they get cleaned
+        // up with the shape chain anyway).
+        std::set<int> extra_shape_ops;
+        int out_reshape_idx = findMatchingConsumer(prog, out_tr_out,
+            [](Layer* L){ return dynamic_cast<Reshape2Layer*>(L) != nullptr; },
+            &extra_shape_ops);
+        if (!isReshape(prog, out_reshape_idx)) return false;
+
+        // Build the SDPA layer. We don't bother resolving num_heads here —
+        // SDPA reads it from Q's shape at forward time.
+        LayerParams sdpa_params;
+        sdpa_params.name = prog[softmax_idx]->name + "_sdpa";
+        sdpa_params.type = "SDPA";
+        sdpa_params.set("scale", qk_scale);
+
+        Ptr<Layer> sdpa = LayerFactory::createLayerInstance(sdpa_params.type, sdpa_params);
+        if (!sdpa) return false;
+        sdpa->inputs  = { q_arg, kT_arg, v_arg };
+        sdpa->outputs = prog[out_reshape_idx]->outputs;
+        sdpa->netimpl = netimpl;
+
+        std::set<int> to_remove = {
+            qk_matmul_idx, softmax_idx, av_matmul_idx,
+            out_transpose_idx, out_reshape_idx
+        };
+        if (scale_op_idx >= 0) to_remove.insert(scale_op_idx);
+        for (int op : extra_shape_ops) to_remove.insert(op);
+
+        // Sweep the dynamic-shape feed of the output Reshape (the Concat of
+        // Shape/Gather/Unsqueeze chain that produces its target shape) so
+        // they're not left dangling once the Reshape is gone.
+        const auto& or_inputs = prog[out_reshape_idx]->inputs;
+        if (or_inputs.size() >= 2 && !netimpl->isConstArg(or_inputs[1])) {
+            int sh_producer = step(or_inputs[1]);
+            if (sh_producer >= 0)
+                collectShapeChain(prog, sh_producer, to_remove);
+        }
+
+        for (int op : to_remove) removed_ops.insert(op);
+        int insert_pos = *std::min_element(to_remove.begin(), to_remove.end());
+        replacements.push_back({insert_pos, sdpa});
+        return true;
+    }
+
     bool fuseGraph(Ptr<Graph>& graph)
     {
         const vector<Ptr<Layer>>& prog = graph->prog();
@@ -1221,6 +1357,18 @@ struct ModelFusionAttention
             if (prog[i]->type != "Softmax") continue;
             if (tryFuseClipAttention(prog, (int)i, removed_ops,
                                      attention_replacements_))
+                modified = true;
+        }
+
+        // Pass 4: any remaining Softmax that has the standard
+        // QK^T -> [Div/Mul scale] -> Softmax -> _·V -> Transpose -> Reshape
+        // shape, regardless of where Q/K/V came from. Catches Segformer's
+        // SR-attention (Q sourced from a different hidden state than K/V)
+        // and other non-shared-input variants.
+        for (size_t i = 0; i < nops; i++) {
+            if (!prog[i] || removed_ops.count((int)i)) continue;
+            if (prog[i]->type != "Softmax") continue;
+            if (tryFuseSDPA(prog, (int)i, removed_ops, attention_replacements_))
                 modified = true;
         }
 

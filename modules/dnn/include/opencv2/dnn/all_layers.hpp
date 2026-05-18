@@ -1869,6 +1869,19 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<AttentionLayer> create(const LayerParams &params);
     };
 
+    // Scaled-dot-product attention on pre-projected, pre-reshaped Q / K^T / V.
+    // Inputs:
+    //   0: Q   [B, H, S_q,  D]
+    //   1: K^T [B, H, D,    S_kv]   (i.e. K after a transpose-last-two; equivalent
+    //                                 to the K-matrix input the QK^T MatMul takes)
+    //   2: V   [B, H, S_kv, D_v]
+    // Output: [B, S_q, H * D_v]   (matches the post-(Transpose, Reshape) layout
+    //                              the surrounding graph used to produce).
+    class CV_EXPORTS SDPALayer : public Layer {
+     public:
+        static Ptr<SDPALayer> create(const LayerParams &params);
+    };
+
     class CV_EXPORTS RotaryEmbeddingLayer : public Layer {
      public:
         static Ptr<RotaryEmbeddingLayer> create(const LayerParams &params);
