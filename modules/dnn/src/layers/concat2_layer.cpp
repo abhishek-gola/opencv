@@ -186,7 +186,7 @@ public:
             if (actualInputs[i] != DATA_LAYOUT_BLOCK) { allBlock = false; break; }
 
         // BLOCK layout on the channel axis would expose inner-block padding as real channels; let TransformLayout repack instead.
-        const bool canKeepBlock = allBlock && axis >= 0 && axis != 1; // something to be looked
+        const bool canKeepBlock = allBlock && axis >= 0;
 
         if (canKeepBlock) {
             outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
