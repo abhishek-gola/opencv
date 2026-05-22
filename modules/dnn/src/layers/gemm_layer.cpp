@@ -17,6 +17,7 @@ using namespace cv::dnn::cuda4dnn;
 
 #include <opencv2/dnn/shape_utils.hpp>
 #include "cpu_kernels/fast_gemm.hpp"
+#include "cpu_kernels/mlas_gemm.hpp"
 
 namespace cv { namespace dnn {
 
@@ -279,6 +280,32 @@ public:
                     }
                 }
             }
+#ifdef HAVE_MLAS
+            std::vector<Mat> outputs;
+            outputs_arr.getMatVector(outputs);
+            const auto shape_A = shape(inputs[0]);
+            const auto shape_Y = shape(outputs[0]);
+            const int na = shape_A[shape_A.size() - 1];
+            const int ma = shape_A[shape_A.size() - 2];
+            const int N  = shape_Y[shape_Y.size() - 1];
+            const int M  = shape_Y[shape_Y.size() - 2];
+            const int K  = trans_a ? ma : na;
+            const Mat& Bmat = blobs[0];
+            const int ldb = Bmat.size[Bmat.dims - 1];
+            const size_t packed_bytes = mlasSgemmPackBSize(trans_a, trans_b, N, K);
+            if (packed_bytes > 0) {
+                packed_B_mlas.create(1, static_cast<int>(packed_bytes), CV_8U);
+                if (mlasSgemmPackB(trans_a, trans_b, N, K,
+                                   Bmat.ptr<const float>(), ldb,
+                                   packed_B_mlas.data)) {
+                    packed_B_mlas_M = M;
+                    packed_B_mlas_N = N;
+                    packed_B_mlas_K = K;
+                } else {
+                    packed_B_mlas.release();
+                }
+            }
+#endif
         }
 
         if (constC(mode) && flatten_a) {
@@ -328,6 +355,9 @@ public:
         const int rows = flatten_a ? M : (int)(Y.total() / (size_t)N);
 
         // broadcast C and copy C to output
+        // Output is then used as the accumulator in mlasSgemmPacked (beta=1).
+        // Large outputs (e.g. fused (8400, 1536) = 51 MB) make this dominant if single-threaded;
+        // parallelize across rows.
         if (constC(mode) || inputs.size() >= 3) {
             float *ptr_y = Y.ptr<float>();
             if (flatten_a) {
@@ -336,7 +366,18 @@ public:
                 }
                 int step = M * N;
                 CV_CheckEQ(broadcast_C.size(), static_cast<size_t>(step), "DNN/Gemm: C is not broadcast properly");
-                std::memcpy(ptr_y, broadcast_C.data(), step * sizeof(float));
+                const float* src = broadcast_C.data();
+                constexpr size_t PAR_THRESHOLD = 1u << 14;
+                if ((size_t)step < PAR_THRESHOLD) {
+                    std::memcpy(ptr_y, src, (size_t)step * sizeof(float));
+                } else {
+                    int nthreads = std::max(1, getNumThreads());
+                    parallel_for_(Range(0, nthreads), [=](const Range& r) {
+                        size_t st = (size_t)r.start * (size_t)step / (size_t)nthreads;
+                        size_t en = (size_t)r.end   * (size_t)step / (size_t)nthreads;
+                        std::memcpy(ptr_y + st, src + st, (en - st) * sizeof(float));
+                    }, nthreads);
+                }
             } else {
                 // ND output: tile the (1D / scalar) bias across all `rows`
                 // rows, scaled by beta. The rewriter restricts bias to scalar
@@ -345,22 +386,72 @@ public:
                 const float* c = C.ptr<const float>();
                 if (C.total() == 1) {
                     float val = beta * (*c);
-                    std::fill_n(ptr_y, (size_t)rows * (size_t)N, val);
+                    size_t total = (size_t)rows * (size_t)N;
+                    constexpr size_t PAR_THRESHOLD = 1u << 14;
+                    if (total < PAR_THRESHOLD) {
+                        std::fill_n(ptr_y, total, val);
+                    } else {
+                        int nthreads = std::max(1, getNumThreads());
+                        parallel_for_(Range(0, nthreads), [=](const Range& r) {
+                            size_t st = (size_t)r.start * total / (size_t)nthreads;
+                            size_t en = (size_t)r.end   * total / (size_t)nthreads;
+                            std::fill_n(ptr_y + st, en - st, val);
+                        }, nthreads);
+                    }
                 } else {
                     CV_CheckEQ((int)C.total(), N, "DNN/Gemm: bias must be scalar or length-N in flatten_a=false mode");
+                    // First row: beta * c[j]. Then broadcast to remaining rows in parallel.
                     for (int j = 0; j < N; j++) ptr_y[j] = beta * c[j];
-                    for (int i = 1; i < rows; i++) {
-                        std::memcpy(ptr_y + (size_t)i * N, ptr_y, (size_t)N * sizeof(float));
+                    if (rows > 1) {
+                        size_t row_bytes = (size_t)N * sizeof(float);
+                        constexpr int PAR_THRESHOLD_ROWS = 32;
+                        if (rows <= PAR_THRESHOLD_ROWS) {
+                            for (int i = 1; i < rows; i++) {
+                                std::memcpy(ptr_y + (size_t)i * N, ptr_y, row_bytes);
+                            }
+                        } else {
+                            int nthreads = std::max(1, getNumThreads());
+                            double nstripes = std::min((double)(rows - 1), (double)nthreads);
+                            parallel_for_(Range(1, rows), [=](const Range& r) {
+                                for (int i = r.start; i < r.end; i++) {
+                                    std::memcpy(ptr_y + (size_t)i * N, ptr_y, row_bytes);
+                                }
+                            }, nstripes);
+                        }
                     }
                 }
             }
         } else { // initialization
             float *ptr_y = Y.ptr<float>();
             size_t total = Y.total();
-            std::memset(ptr_y, 0, total * sizeof(float));
+            constexpr size_t PAR_THRESHOLD = 1u << 14;
+            if (total < PAR_THRESHOLD) {
+                std::memset(ptr_y, 0, total * sizeof(float));
+            } else {
+                int nthreads = std::max(1, getNumThreads());
+                parallel_for_(Range(0, nthreads), [=](const Range& r) {
+                    size_t st = (size_t)r.start * total / (size_t)nthreads;
+                    size_t en = (size_t)r.end   * total / (size_t)nthreads;
+                    std::memset(ptr_y + st, 0, (en - st) * sizeof(float));
+                }, nthreads);
+            }
         }
 
         if (constB(mode)) {
+#ifdef HAVE_MLAS
+            if (!packed_B_mlas.empty() &&
+                packed_B_mlas_N == N && packed_B_mlas_K == K)
+            {
+                if (mlasSgemmPacked(trans_a, trans_b, rows, N, K,
+                                    alpha,
+                                    A.ptr<const float>(), na,
+                                    packed_B_mlas.data,
+                                    1.f,
+                                    Y.ptr<float>(), N)) {
+                    return;
+                }
+            }
+#endif
             CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
             if (!thin_packed_B.empty()) {
                 fastGemmThin(rows, N, K, alpha, A.ptr<const float>(), na, 1,
@@ -531,6 +622,10 @@ private:
     bool have_bias;
     std::vector<float> packed_B;
     std::vector<float> thin_packed_B;
+    cv::Mat packed_B_mlas;
+    int packed_B_mlas_M;
+    int packed_B_mlas_N;
+    int packed_B_mlas_K;
     std::vector<float> broadcast_C;
     int real_ndims_C;
     FastGemmOpt opt;

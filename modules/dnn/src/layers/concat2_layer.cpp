@@ -128,6 +128,19 @@ public:
             }
         }
 
+        // For BLOCK channel-axis concat (axis=1): output's logical channels = sum of inputs'
+        // channels. C1 = ceil(C_total / C0) — the naive `outShape[1] += inp[1]` sums each
+        // input's c-block count, which overcounts when any input is misaligned (e.g. YOLOX
+        // head: 80+4+1 → c-block sum = 12, correct is ceil(85/8) = 11). Also: channels()
+        // reads .C directly for BLOCK layout, so .C must be set explicitly.
+        if (outShape.layout == DATA_LAYOUT_BLOCK && axis_ == 1) {
+            int total_C = 0;
+            for (size_t i = 0; i < ninputs; i++) total_C += inpShapes[i].C;
+            int C0 = outShape[outShape.dims - 1];
+            outShape[1] = (total_C + C0 - 1) / C0;
+            outShape.C = total_C;
+        }
+
         return outShape;
     }
 
@@ -173,7 +186,7 @@ public:
             if (actualInputs[i] != DATA_LAYOUT_BLOCK) { allBlock = false; break; }
 
         // BLOCK layout on the channel axis would expose inner-block padding as real channels; let TransformLayout repack instead.
-        const bool canKeepBlock = allBlock && axis >= 0 && axis != 1;
+        const bool canKeepBlock = allBlock && axis >= 0;
 
         if (canKeepBlock) {
             outputs.assign(requiredOutputs, DATA_LAYOUT_BLOCK);
@@ -237,7 +250,52 @@ public:
 
     void runOp(const std::vector<Mat>& inps, Mat& out, int axis_)
     {
+        // Fast byte-level BLOCK concat works only when every input's logical channel count
+        // is a multiple of C0 (so c-blocks line up). For misaligned cases (e.g. YOLOX head
+        // 80+4+1 → 85), the direct byte concat would expose padding lanes as real channels.
+        // Detour through NCHW: deinterleave each input, NCHW concat, interleave back.
+        if (axis_ == 1 && out.size.layout == DATA_LAYOUT_BLOCK) {
+            const int C0 = out.size[out.dims - 1];
+            bool allAligned = true;
+            for (const auto& inp : inps) {
+                if (inp.size.layout != DATA_LAYOUT_BLOCK || (inp.size.channels() % C0) != 0) {
+                    allAligned = false;
+                    break;
+                }
+            }
+            if (!allAligned) {
+                runOpBlockAxis1Misaligned(inps, out);
+                return;
+            }
+        }
         concat(inps, out, axis_);
+    }
+
+    // Fallback for axis=1 BLOCK concat when inputs aren't C0-aligned: convert each input
+    // to NCHW, concat in NCHW, convert the combined result back to BLOCK.
+    void runOpBlockAxis1Misaligned(const std::vector<Mat>& inps, Mat& out)
+    {
+        auto* netimpl_ = getNetImpl(this);
+        DataLayout origLayout = netimpl_->originalLayout;
+        const int C0 = out.size[out.dims - 1];
+
+        std::vector<Mat> nchwInps(inps.size());
+        for (size_t i = 0; i < inps.size(); i++) {
+            transformLayout(inps[i], nchwInps[i], origLayout, origLayout, C0);
+        }
+
+        // NCHW output shape: drop the trailing C0 dim, use logical C from out.size.C.
+        const int dims = out.dims;
+        std::vector<int> nchwDims(dims - 1);
+        nchwDims[0] = out.size[0];
+        nchwDims[1] = out.size.C;
+        for (int d = 2; d < dims - 1; d++) nchwDims[d] = out.size[d];
+        MatShape nchwShape(nchwDims, origLayout, out.size.C);
+        Mat nchwOut;
+        nchwOut.fit(nchwShape, out.type());
+
+        concat(nchwInps, nchwOut, /*axis=*/1);
+        transformLayout(nchwOut, out, DATA_LAYOUT_BLOCK, origLayout, C0);
     }
 };
 

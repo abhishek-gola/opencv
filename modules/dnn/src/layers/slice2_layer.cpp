@@ -226,10 +226,14 @@ private:
     class ParallelSlice : public cv::ParallelLoopBody
     {
     public:
+        // parallel_axis: dim to split across threads. Leading dims (0..parallel_axis-1) are
+        // collapsed into a constant offset since they have size 1 in the output.
         ParallelSlice(const Mat& inp, Mat& out,
                       const std::vector<Range>& ranges,
-                      const std::vector<int>& steps)
-            : inp_(inp), out_(out), ranges_(ranges), steps_(steps)
+                      const std::vector<int>& steps,
+                      int parallel_axis)
+            : inp_(inp), out_(out), ranges_(ranges), steps_(steps),
+              parallel_axis_(parallel_axis)
         {
             dims_ = inp.dims;
             es_ = inp.elemSize();
@@ -240,25 +244,44 @@ private:
                 inp_strides_[i] = inp.step.p[i];
                 out_strides_[i] = out.step.p[i];
             }
+
+            // Account for slice-starts on leading collapsed dims.
+            preamble_src_ = 0;
+            for (int d = 0; d < parallel_axis_; d++) {
+                preamble_src_ += (size_t)ranges_[d].start * inp_strides_[d];
+            }
         }
 
         void operator()(const Range& range) const CV_OVERRIDE
         {
-            int b = ranges_[0].start;
-            int s = steps_[0];
+            const int axis = parallel_axis_;
+            const int b = ranges_[axis].start;
+            const int s = steps_[axis];
 
-            const uchar* src_base = inp_.ptr();
+            const uchar* src_base = inp_.ptr() + preamble_src_;
             uchar* dst_base = out_.ptr();
+
+            // Bulk path: contiguous slice on parallel axis → each thread does one big memcpy
+            // over its share of the axis. Avoids per-iteration memcpy overhead and lets DRAM
+            // bandwidth be split across threads.
+            if (s == 1 && axis < dims_ - 1 && is_fully_contiguous(axis)) {
+                const size_t unit_bytes = inp_strides_[axis];
+                const size_t count      = (size_t)(range.end - range.start);
+                const size_t src_off    = (size_t)(b + range.start) * unit_bytes;
+                const size_t dst_off    = (size_t)range.start * out_strides_[axis];
+                std::memcpy(dst_base + dst_off, src_base + src_off, count * unit_bytes);
+                return;
+            }
 
             for (int i = range.start; i < range.end; ++i)
             {
                 int k = b + i * s;
-                size_t src_offset = k * inp_strides_[0];
-                size_t dst_offset = i * out_strides_[0];
-                if (dims_ == 1)
+                size_t src_offset = (size_t)k * inp_strides_[axis];
+                size_t dst_offset = (size_t)i * out_strides_[axis];
+                if (axis == dims_ - 1)
                     std::memcpy(dst_base + dst_offset, src_base + src_offset, es_);
                 else
-                    recursive_copy(1, src_base + src_offset, dst_base + dst_offset);
+                    recursive_copy(axis + 1, src_base + src_offset, dst_base + dst_offset);
             }
         }
 
@@ -364,14 +387,28 @@ private:
         size_t es_;
         std::vector<size_t> inp_strides_;
         std::vector<size_t> out_strides_;
+        int parallel_axis_;
+        size_t preamble_src_;
     };
 
     template <typename T>
     void run_parallel(const Mat& inp, Mat& out, const std::vector<Range>& ranges, const std::vector<int>& steps)
     {
-        ParallelSlice<T> body(inp, out, ranges, steps);
-        int dim0_size = out.size[0];
-        parallel_for_(Range(0, dim0_size), body);
+        int dims = inp.dims;
+        // Parallelize on the first output dim with size > 1 — skipping leading size-1 dims
+        // (e.g. batch=1) which would otherwise force the whole slice onto one thread.
+        int parallel_axis = 0;
+        while (parallel_axis < dims - 1 && out.size[parallel_axis] == 1) {
+            parallel_axis++;
+        }
+        int parallel_size = out.size[parallel_axis];
+        ParallelSlice<T> body(inp, out, ranges, steps, parallel_axis);
+        // Pin chunking to one stripe per thread. The per-element body is tiny (often a single
+        // 1 KB memcpy) so TBB's default dynamic chunking creates many small tasks and the
+        // per-task sync cost dominates.
+        int nthreads = std::max(1, getNumThreads());
+        double nstripes = std::min((double)parallel_size, (double)nthreads);
+        parallel_for_(Range(0, parallel_size), body, nstripes);
     }
 
     void forward(InputArrayOfArrays inputs_arr,

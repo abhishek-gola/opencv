@@ -311,11 +311,15 @@ void transformLayout(const Mat& inp, Mat& out,
     constexpr size_t min_elems_per_chunk = 1 << 14;
     int nblocks = int((total + min_elems_per_chunk/2) / min_elems_per_chunk);
     int nthreads = std::max(1, getNumThreads());
-    nblocks = clamp(nblocks, 1, std::max(N*C1, 1) * 4);
+    // Allow more nblocks per (n,c1) so wide-spatial transforms (e.g. 160x160) saturate threads.
+    // Previously capped at N*C1*4 = 32 for trlayout.11 → only 32 parallel tasks for 24 threads.
+    nblocks = clamp(nblocks, 1, std::max(N*C1, 1) * 16);
     nblocks = (nblocks + N*C1 - 1)/(N*C1);
     nblocks = std::min(nblocks, std::max(1, nthreads));
 
-    parallel_for_(Range(0, N*C1*nblocks), [&](const Range& range)
+    int total_chunks = N * C1 * nblocks;
+    double nstripes = std::min((double)total_chunks, (double)nthreads);
+    parallel_for_(Range(0, total_chunks), [&](const Range& range)
     {
         int dchunk = 1u;
         bool interleave = inplayout == DATA_LAYOUT_NCHW;
@@ -341,7 +345,7 @@ void transformLayout(const Mat& inp, Mat& out,
 
             kernel(inptr + inpofs, outptr + outofs, C, planesize, nc, nzc, dlen);
         }
-    });
+    }, nstripes);
 }
 
 class TransformLayoutLayerImpl : public TransformLayoutLayer
