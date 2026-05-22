@@ -508,7 +508,7 @@ def _translate(text: str, docname: str | None = None) -> str:
             block_ind, tabs, j = m.group(1), [], m.start()
             while True:
                 m2 = re.match(
-                    r"[ \t]*@add_toggle_(\w+)[ \t]*\n(.*?)\n\s*@end_toggle\s*\n?",
+                    r"[ \t]*@add_toggle_(\w+)[ \t]*\n(.*?)\n[ \t]*@end_toggle[ \t]*\n?",
                     src[j:], flags=re.DOTALL)
                 if not m2:
                     break
@@ -525,6 +525,37 @@ def _translate(text: str, docname: str | None = None) -> str:
         return "".join(out)
     text = _toggle_collapse(text)
 
+    # 6b. When a toggle block lives inside a list item (block_ind="    "),
+    #     _emit_toggles places the tab-set fences at col 0, breaking the list
+    #     context.  Continuation text that was at 4-space (list-item indent)
+    #     becomes an indented code block.  Fix: after each col-0 tab-set close
+    #     line (plain "``````"), strip exactly 4 leading spaces from subsequent
+    #     continuation lines until a non-indented non-blank line is reached.
+    def _strip_tabset_continuations(src: str) -> str:
+        lines = src.split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line == "``````":
+                out.append(line)
+                i += 1
+                while i < len(lines):
+                    ln = lines[i]
+                    if ln.startswith("    "):
+                        out.append(ln[4:])
+                        i += 1
+                    elif not ln.strip():
+                        out.append(ln)
+                        i += 1
+                    else:
+                        break
+            else:
+                out.append(line)
+                i += 1
+        return "\n".join(out)
+    text = _strip_tabset_continuations(text)
+
     # 7. @ref name [optional "Display Text"]
     # Names may be qualified C++ identifiers like `cv::saturate_cast`, so
     # the character class allows `:` in addition to word chars and `-`.
@@ -537,8 +568,11 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r'@ref\s+(?P<name>[\w:-]+)(?:\s+"(?P<disp>[^"]+)")?',
                   _ref_repl, text)
 
-    # 8. @cite KEY -> [KEY]
-    text = re.sub(r"@cite\s+([\w-]+)", r"[\1]", text)
+    # 8. @cite KEY -> [[KEY]](citelist link on docs.opencv.org)
+    text = re.sub(
+        r"@cite\s+([\w-]+)",
+        lambda m: f"[[{m.group(1)}]](https://docs.opencv.org/5.x/d0/de3/citelist.html#CITEREF_{m.group(1)})",
+        text)
 
     # 8b. @youtube{ID}  -> responsive embed (raw HTML, passed through by MyST).
     text = re.sub(
