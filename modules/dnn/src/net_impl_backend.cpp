@@ -89,7 +89,7 @@ void Net::Impl::finalizeOrt()
     }
 
     // If the user set DNN_PROFILE_*, turn on ORT's session profiler. The JSON
-    // file is parsed lazily by collectOrtProfileData() inside profile()/printProfile().
+    // file is parsed lazily by collectOrtProfileData() inside getPerfProfile()/printPerfProfile().
     ort_profile_path_prefix.clear();
     ort_profile_collected = false;
     ort_profile_runs = 0;

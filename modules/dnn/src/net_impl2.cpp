@@ -548,6 +548,7 @@ void Net::Impl::prepareForInference()
     if (!prepared) {
         fuseQDQ();
         constFold();
+        fuseBN();
         constArgs();
         fuseAttention();
         fuseMatMulConstBToGemm();

@@ -943,6 +943,38 @@ TEST_P(Test_ONNX_layers, BatchNormalization)
     testONNXModels("batch_norm");
 }
 
+TEST_P(Test_ONNX_layers, Colorization)
+{
+    applyTestTag(
+        target == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB,
+        CV_TEST_TAG_DEBUG_VERYLONG
+    );
+    checkBackend();
+
+    const String model = findDataFile("dnn/colorization_deploy_v2.onnx", false);
+    Net net = readNetFromONNX(model);
+    ASSERT_FALSE(net.empty());
+    net.setPreferableBackend(backend);
+    net.setPreferableTarget(target);
+
+    if (target == DNN_TARGET_CPU_FP16)
+        net.enableWinograd(false);
+
+    Mat inp = blobFromNPY(findDataFile("dnn/colorization_inp.npy"));
+    Mat ref = blobFromNPY(findDataFile("dnn/colorization_out.npy"));
+
+    net.setInput(inp);
+    Mat out = net.forward();
+
+    double l1 = 4e-4, lInf = 3e-3;
+    if (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_CPU_FP16 || target == DNN_TARGET_CUDA_FP16)
+    {
+        l1 = 0.25;
+        lInf = 5.4;
+    }
+    normAssert(out, ref, "", l1, lInf);
+}
+
 TEST_P(Test_ONNX_layers, BatchNormalization3D)
 {
     if (backend == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019)
@@ -3485,6 +3517,70 @@ TEST_P(Test_ONNX_layers, ClipDivSharedConstant) {
     testONNXModels("clip_div_shared_constant");
 }
 
+static Mat makeConsecutiveTransposeInput()
+{
+    int inputShape[] = {1, 3, 4, 4};
+    Mat input(4, inputShape, CV_32F);
+    float* data = input.ptr<float>();
+    for (size_t i = 0; i < input.total(); ++i)
+        data[i] = static_cast<float>(i);
+    return input;
+}
+
+static void testConsecutiveTransposeModel(const String& basename,
+                                          int backendId, int targetId,
+                                          int expectedTransposeLayers,
+                                          const Mat& input, const Mat& ref)
+{
+    Net net = readNetFromONNX(_tf("models/" + basename + ".onnx"));
+    ASSERT_FALSE(net.empty());
+    int numTransposeLayers = net.getLayersCount("Permute") + net.getLayersCount("Transpose");
+    if (expectedTransposeLayers >= 0)
+        EXPECT_EQ(numTransposeLayers, expectedTransposeLayers);
+    else
+        // Non-identity transpose pairs must not be eliminated completely.
+        // They may still be fused into a single equivalent Transpose later.
+        EXPECT_GT(numTransposeLayers, 0);
+
+    if (net.getMainGraph())
+        net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    else
+    {
+        net.setPreferableBackend(backendId);
+        net.setPreferableTarget(targetId);
+    }
+
+    net.setInput(input);
+    Mat output = net.forward();
+
+    EXPECT_EQ(shape(output), shape(ref));
+    EXPECT_LT(cv::norm(output, ref, NORM_INF), 1e-5);
+}
+
+TEST_P(Test_ONNX_layers, ConsecutiveTransposeIdentity)
+{
+    Mat input = makeConsecutiveTransposeInput();
+
+    testConsecutiveTransposeModel("transpose_identity", backend, target, 0, input, input);
+}
+
+TEST_P(Test_ONNX_layers, ConsecutiveTransposeDefaultPerm)
+{
+    Mat input = makeConsecutiveTransposeInput();
+
+    testConsecutiveTransposeModel("transpose_default_perm", backend, target, 0, input, input);
+}
+
+TEST_P(Test_ONNX_layers, ConsecutiveTransposeNonIdentity)
+{
+    Mat input = makeConsecutiveTransposeInput();
+    Mat ref1, ref;
+    cv::transposeND(input, std::vector<int>{0, 2, 3, 1}, ref1);
+    cv::transposeND(ref1, std::vector<int>{0, 1, 3, 2}, ref);
+
+    testConsecutiveTransposeModel("transpose_non_identity", backend, target, -1, input, ref);
+}
+
 TEST_P(Test_ONNX_layers, TopK) {
     if (backend == DNN_BACKEND_INFERENCE_ENGINE_NGRAPH ||
         backend == DNN_BACKEND_INFERENCE_ENGINE_NN_BUILDER_2019 ||
@@ -3565,5 +3661,29 @@ TEST_P(Test_ONNX_layers, RandomNormalLike_complex)
 }
 
 INSTANTIATE_TEST_CASE_P(/**/, Test_ONNX_nets, dnnBackendsAndTargets());
+
+TEST_P(Test_ONNX_layers, getUnconnectedOutLayers)
+{
+    auto engine_forced = static_cast<cv::dnn::EngineType>(
+        cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
+    if (engine_forced == cv::dnn::ENGINE_ORT)
+        applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
+
+    Net net = readNetFromONNX(_tf("models/yolov8x.onnx", false));
+    ASSERT_FALSE(net.empty());
+    net.setPreferableBackend(backend);
+    net.setPreferableTarget(target);
+
+    std::vector<int>    outIds   = net.getUnconnectedOutLayers();
+    std::vector<String> outNames = net.getUnconnectedOutLayersNames();
+
+    EXPECT_EQ(outIds.size(), outNames.size());
+    EXPECT_EQ(1, outIds.size());
+
+    EXPECT_EQ("output0", outNames[0]);
+    EXPECT_GT(outIds[0], 0);
+    Ptr<Layer> layer = net.getLayer(outIds[0]);
+    ASSERT_TRUE(layer);
+}
 
 }} // namespace

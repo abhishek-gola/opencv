@@ -351,6 +351,10 @@ public:
         int K = trans_a ? ma : na;
         const int rows = flatten_a ? M : (int)(Y.total() / (size_t)N);
 
+        // In flatten_a=false mode the output keeps A's leading dims, so the
+        // GEMM row count spans those dims as well: rows = total(Y)/N.
+        const int rows = flatten_a ? M : (int)(Y.total() / (size_t)N);
+
         // broadcast C and copy C to output
         // Output is then used as the accumulator in mlasSgemmPacked (beta=1).
         // Large outputs (e.g. fused (8400, 1536) = 51 MB) make this dominant if single-threaded;

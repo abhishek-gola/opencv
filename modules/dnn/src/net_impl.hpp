@@ -48,6 +48,33 @@ typedef std::unordered_map<std::string, int64_t> NamesHash;
 struct OrtNamesCache;
 #endif
 
+/** @brief Single entry in a @ref PerfProfile.
+ *
+ * In DNN_PROFILE_DETAILED mode, @p label is "layer_name (type)" and @p count is 1.
+ * In DNN_PROFILE_SUMMARY mode, @p label is the layer type and @p count is the
+ * number of layers of that type that contributed to @p timeMs.
+ */
+struct PerfProfileEntry
+{
+    PerfProfileEntry() : timeMs(0.0), count(0) {}
+    String label;
+    double timeMs;
+    int count;
+};
+
+/** @brief Self-describing snapshot of profiling data from one inference.
+ *
+ * Carries the @ref ProfilingMode it was captured in so it can be saved, kept across
+ * runs (e.g. best-of-N by total time), and printed later via @ref Net::printPerfProfile
+ * without needing access to the originating @ref Net.
+ */
+struct PerfProfile
+{
+    PerfProfile() : mode(DNN_PROFILE_NONE) {}
+    ProfilingMode mode;
+    std::vector<PerfProfileEntry> entries;
+};
+
 // NB: Implementation is divided between of multiple .cpp files
 struct Net::Impl : public detail::NetImplBase
 {
@@ -254,9 +281,6 @@ struct Net::Impl : public detail::NetImplBase
     void finalizeOrt();
     void refreshOrtMainGraphOutputs();
     void applyStagedOrtInputs();
-    // Drains the JSON file ORT writes when session profiling is enabled and
-    // populates ort_profile_data with (layer_name, op_type, ms_per_run) tuples.
-    // Idempotent: subsequent calls return the already-collected data.
     void collectOrtProfileData() const;
     std::vector<std::pair<std::string, Mat>> ort_staged_inputs;
     std::shared_ptr<Ort::Env> ort_env;
@@ -266,7 +290,7 @@ struct Net::Impl : public detail::NetImplBase
     bool ortNeedsReinit = false;  // session needs (re)creation on next finalizeNet
     std::string ort_profile_path_prefix;          // prefix passed to EnableProfiling
     mutable bool ort_profile_collected = false;   // EndProfiling was already called once
-    mutable int  ort_profile_runs = 0;            // number of session.Run calls since profiling started (warmup + timed)
+    mutable int  ort_profile_runs = 0;            // number of session.Run calls since profiling started
     mutable std::vector<std::tuple<String, String, double>> ort_profile_data;  // (name, type, ms_per_run)
 #endif
 
@@ -339,8 +363,9 @@ struct Net::Impl : public detail::NetImplBase
             std::vector<size_t>& blobs) /*const*/;
     int64 getPerfProfile(std::vector<double>& timings) const;
     void collectLayerInfo(std::vector<String>& names, std::vector<String>& types) const;
-    std::vector<std::pair<String, double>> profile() const;
-    void printProfile() const;
+    PerfProfile getPerfProfile() const;
+    void getPerfProfile(std::vector<std::string>& names, std::vector<std::string>& timems, std::vector<std::string>& counts) const;
+    void printPerfProfile() const;
 
     // TODO drop
     LayerPin getLatestLayerPin(const std::vector<LayerPin>& pins) const;
@@ -488,6 +513,8 @@ struct Net::Impl : public detail::NetImplBase
     // insert transformLayout operations where necessary;
     // use block layout for convolution, pooling and some other operations where it matters
     void useBlockLayout();
+    // fuse BN into following Conv2 weights
+    void fuseBN();
 
 };  // Net::Impl
 
