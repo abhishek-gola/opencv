@@ -32,7 +32,7 @@ OPENCV_ROOT = HERE.parent.resolve()
 import os as _os
 DOC_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,imgproc").split(",")
+    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,imgproc,3d").split(",")
     if m.strip()
 ]
 
