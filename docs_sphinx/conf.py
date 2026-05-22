@@ -32,7 +32,7 @@ OPENCV_ROOT = HERE.parent.resolve()
 import os as _os
 DOC_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,imgproc,3d,app").split(",")
+    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,imgproc,3d,app,ios").split(",")
     if m.strip()
 ]
 
@@ -359,13 +359,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         lambda m: m.group(1) + re.sub(r"^    ", "", m.group(2), flags=re.MULTILINE),
         text, flags=re.MULTILINE)
 
-    # 1a-iii. 4-space indented list items under a plain paragraph line.
-    #   Same Doxygen idiom as above but the lead-in is a plain sentence (often
-    #   ending with ":") rather than a heading.  CommonMark sees no blank line
-    #   between the sentence and the indented "-" lines and attaches them as
-    #   lazy continuation text, rendering the dashes as literal inline characters.
-    #   Strip the 4-space prefix (and from any 8-space continuation lines) so
-    #   they become proper bullet-list items.
+    # 1a-iii. 4-space list items under a plain paragraph line → strip to fix lazy continuation.
     text = re.sub(
         r"(^(?![ \t#@`]|-#|[-*+]\s|\d+[.)]\s)[^\n]+\n)((?:    [-*+][ \t][^\n]*\n(?:[ \t]{5,}[^\n]*\n)*)+)",
         lambda m: m.group(1) + re.sub(r"^    ", "", m.group(2), flags=re.MULTILINE),
@@ -378,7 +372,7 @@ def _translate(text: str, docname: str | None = None) -> str:
     #     Allow optional leading indent and bare @note (body on next line).
     #     Dedent the body so indented lines don't become code blocks inside
     #     the directive.
-    _ADMON_KIND = {"note": "note", "see": "seealso"}
+    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning"}
     def _admon_repl(m: re.Match) -> str:
         indent = m.group("indent")
         kind = _ADMON_KIND[m.group("dir")]
@@ -389,7 +383,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         body = "\n".join(l[min_ind:] for l in lines).strip()
         return f"\n{indent}:::{{{kind}}}\n{indent}{body}\n{indent}:::\n"
     text = re.sub(
-        r"^(?P<indent>[ \t]*)@(?P<dir>note|see)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
+        r"^(?P<indent>[ \t]*)@(?P<dir>note|see|warning)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
         _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
 
     # 2. Doxygen LaTeX math markers.
@@ -422,9 +416,7 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r"\\f\$(.+?)\\f\$", lambda m: f"${m.group(1)}$",
                   text, flags=re.DOTALL)
 
-    # 2b. Native markdown fenced blocks with lexers unknown to Pygments.
-    #     ```plaintext ... ``` → ```text ... ``` (plaintext is not a Pygments lexer)
-    #     ```bash / ```sh    → ```shell (bash lexer chokes on escaped quotes \')
+    # 2b. Normalise unknown Pygments lexer names: plaintext/bash/sh → text.
     text = re.sub(r"^([ \t]*)```plaintext\b", r"\1```text", text, flags=re.MULTILINE)
     text = re.sub(r"^([ \t]*)```(?:bash|sh)\b", r"\1```text", text, flags=re.MULTILINE)
 
@@ -437,6 +429,8 @@ def _translate(text: str, docname: str | None = None) -> str:
             lang = "text"
         if lang in ("bash", "sh"):
             lang = "text"
+        if lang == "m":
+            lang = "objc"
         raw = m.group("body").split("\n")
         non_empty = [l for l in raw if l.strip()]
         min_ind = min((len(l) - len(l.lstrip()) for l in non_empty), default=0)
@@ -482,7 +476,7 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r"^(?P<indent>[ \t]*)@snippet\s+(?P<path>\S+)\s+(?P<label>[^\n]+?)\s*$",
                   _snippet_repl, text, flags=re.MULTILINE)
 
-    # 5b. @snippetlineno path [Label]  — same as @snippet but with line numbers.
+    # 5b. @snippetlineno — same as @snippet with :linenos:.
     def _snippetlineno_repl(m: re.Match) -> str:
         indent = m.group("indent")
         code, lang = _read_snippet(m.group("path"), m.group("label"))
@@ -525,12 +519,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         return "".join(out)
     text = _toggle_collapse(text)
 
-    # 6b. When a toggle block lives inside a list item (block_ind="    "),
-    #     _emit_toggles places the tab-set fences at col 0, breaking the list
-    #     context.  Continuation text that was at 4-space (list-item indent)
-    #     becomes an indented code block.  Fix: after each col-0 tab-set close
-    #     line (plain "``````"), strip exactly 4 leading spaces from subsequent
-    #     continuation lines until a non-indented non-blank line is reached.
+    # 6b. Strip list-item continuation indent stranded after a col-0 tab-set close.
     def _strip_tabset_continuations(src: str) -> str:
         lines = src.split("\n")
         out: list[str] = []
@@ -557,8 +546,6 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = _strip_tabset_continuations(text)
 
     # 7. @ref name [optional "Display Text"]
-    # Names may be qualified C++ identifiers like `cv::saturate_cast`, so
-    # the character class allows `:` in addition to word chars and `-`.
     def _ref_repl(m: re.Match) -> str:
         name = m.group("name"); disp = m.group("disp")
         target = _ANCHOR_TO_DOC.get(name)
@@ -568,7 +555,7 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r'@ref\s+(?P<name>[\w:-]+)(?:\s+"(?P<disp>[^"]+)")?',
                   _ref_repl, text)
 
-    # 8. @cite KEY -> [[KEY]](citelist link on docs.opencv.org)
+    # 8. @cite KEY → [[KEY]](link to docs.opencv.org citelist)
     text = re.sub(
         r"@cite\s+([\w-]+)",
         lambda m: f"[[{m.group(1)}]](https://docs.opencv.org/5.x/d0/de3/citelist.html#CITEREF_{m.group(1)})",
@@ -627,10 +614,7 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r"^@cond\s+\S+\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"^@endcond\s*$", "", text, flags=re.MULTILINE)
 
-    # 11c. Bare URL autolinks.
-    #      Doxygen auto-links plain http(s):// URLs; CommonMark requires <url>.
-    #      Skip URLs already in [text](url) link targets (preceded by "]("),
-    #      <url> autolinks (preceded by "<"), or "url" attribute values (preceded by '"').
+    # 11c. Wrap bare http(s) URLs in <> for CommonMark autolink.
     def _autolink_repl(m: re.Match) -> str:
         url = m.group(0)
         trail = ""
@@ -679,10 +663,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         r'(?P<pre>!\[[^\]]*\]\()(?P<rel>[A-Za-z0-9_.-]+\.[A-Za-z]{2,4})\)',
         _bare_img_repl, text)
 
-    # 12c. Convert standalone ![Caption](path) -> MyST {figure} directive.
-    #      Doxygen renders the alt text as a visible caption below the image;
-    #      plain MyST ![alt](path) only sets the invisible HTML alt attribute.
-    #      Only match images on their own line (not inline within text).
+    # 12c. Standalone ![Caption](path) → {figure} so alt text is a visible caption.
     text = re.sub(
         r"^([ \t]*)!\[(?P<alt>[^\]]+)\]\((?P<path>[^)\n]+)\)[ \t]*$",
         lambda m: (
@@ -692,15 +673,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         ),
         text, flags=re.MULTILINE)
 
-    # 12d. Doxygen ^ (merge-with-above) table cells.
-    #      In Doxygen, a cell containing only "^" means rowspan — merge with the
-    #      cell above.  CommonMark has no rowspan; fold the row's value into the
-    #      previous row's matching cell using <br>, then drop the ^ row.
-    # 12d. Doxygen ^ (merge-with-above) table cells.
-    #      CommonMark has no rowspan; merge the ^ row into the row above.
-    #      The label cell repeats (looks like rowspan); the value cells are
-    #      joined by a <hr class="cv-rowdiv"> that custom.css styles to match
-    #      the table's row border colour exactly.
+    # 12d. Doxygen ^ rowspan cell → merge into row above via <hr class="cv-rowdiv">.
     def _merge_caret_rows(src: str) -> str:
         lines = src.split("\n")
         out: list[str] = []
