@@ -44,7 +44,7 @@ DOC_MODULES = [
 # ---------------------------------------------------------------------------
 CONTRIB_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "ml,bgsegm,alphamat,face,bioinspired,cannops,ccalib,cnn_3dobj,cvv,dnn_objdetect,dnn_superres,gapi,xobjdetect,xstereo,xfeatures2d,xphoto,ximgproc").split(",")
+    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "ml,bgsegm,alphamat,face,bioinspired,cannops,ccalib,cnn_3dobj,cvv,dnn_objdetect,dnn_superres,gapi,xobjdetect,xstereo,xfeatures2d,xphoto,ximgproc,text").split(",")
     if m.strip()
 ]
 CONTRIB_ROOT = pathlib.Path(
@@ -978,6 +978,20 @@ def _translate(text: str, docname: str | None = None) -> str:
             return f":::{{div}} opencv-meta-table\n\n{m.group(1)}\n:::\n"
         return pat.sub(repl, src, count=1)
     text = _wrap_front_matter(text)
+
+    # 13a. Malformed Markdown link repair: `[text](URL]` where the
+    #      closing paren was typo'd as a bracket.  Seen in
+    #      text/install_tesseract.markdown line 4:
+    #      `[this tutorials](http://.../gitbash_build]` — MyST renders
+    #      the whole thing as literal text because Markdown can't close
+    #      the link.  Rewrite to a proper `[text](URL)`.  Targeted at
+    #      http(s) URLs only — keeps the regex tight enough to avoid
+    #      misfiring on other `[...]` contexts (footnotes, ref-style
+    #      links, etc.).
+    text = re.sub(
+        r"\[(?P<text>[^\]\n]+)\]\((?P<url>https?://[^\s\]\)]+)\]",
+        lambda m: f"[{m.group('text')}]({m.group('url')})",
+        text)
 
     # 13b. Auto-linkify bare URLs (Doxygen default; alternative is the
     #      linkify-it-py package). Skip code blocks/spans, existing
