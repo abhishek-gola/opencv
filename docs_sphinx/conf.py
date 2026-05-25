@@ -335,8 +335,7 @@ def _emit_toggles(tabs: list[tuple[str, str]], indent: str = "") -> str:
 
 
 def _translate(text: str, docname: str | None = None) -> str:
-    # 0. \htmlonly ... \endhtmlonly → raw HTML block; rewrite relative iframe
-    #    src (../../foo.html) to absolute docs.opencv.org URL so demos load.
+    # 0. \htmlonly → raw HTML; rewrite relative iframe src to absolute URL.
     def _htmlonly_repl(m: re.Match) -> str:
         body = re.sub(r'src="\.\.\/\.\.\/([\w/.-]+)"',
                       lambda mm: f'src="{DOXYGEN_BASE_URL}{mm.group(1)}"',
@@ -437,8 +436,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         r"^(?P<indent>[ \t]*)@(?P<dir>note|see|warning|sa)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
         _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
 
-    # 1c. @param name desc / @return desc → MyST definition list.
-    #     Captures indented continuation lines (multi-line param descriptions).
+    # 1c. @param / @return → MyST definition list.
     def _param_block_repl(m: re.Match) -> str:
         items: list[list] = []
         for line in m.group(0).split("\n"):
