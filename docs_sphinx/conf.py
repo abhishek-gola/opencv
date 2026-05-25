@@ -269,8 +269,13 @@ for _m in CONTRIB_MODULES:
     # the existing tutorials_contrib/<m> symlink CMake stages.
     _tut = CONTRIB_ROOT / _m / "tutorials"
     if _tut.is_dir():
-        for _img in _tut.rglob("images/*"):
-            if _img.is_file():
+        # Walk every image under <m>/tutorials/, not just `images/*`
+        # subdirs — some contrib modules (e.g. face) park assets in
+        # non-standard sibling dirs like `img/`, `gender_classification/`,
+        # or `facerec_video/` that Doxygen IMAGE_PATH already flattens
+        # by basename.
+        for _img in _tut.rglob("*"):
+            if _img.is_file() and _img.suffix.lower() in _IMAGE_EXTS:
                 _rel = _img.relative_to(_tut).as_posix()
                 _IMAGE_INDEX.setdefault(_img.name,
                                         f"tutorials_contrib/{_m}/{_rel}")
@@ -298,6 +303,60 @@ def _materialize_contrib_image(url: str) -> None:
     if src.is_file() and not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         _shutil.copy2(src, dest)
+
+
+def _stage_unique_contrib_image(src_abs: pathlib.Path, module: str) -> str | None:
+    """Copy a contrib image into srcdir under a module-prefixed basename
+    and return its srcdir-relative URL.
+
+    Why uniqueness matters: Sphinx's `_images/` collection keys on the
+    file's basename. Two contrib and main-tree files with the same
+    basename (e.g. face's `2.jpg` vs calib3d's `2.jpg`) compete for the
+    same `_images/2.jpg` destination. Sphinx's incremental
+    `copy_asset_file` only overwrites when src.mtime != dest.mtime, so
+    a `_images/2.jpg` left over from a prior build that referenced the
+    other source survives — and the current page silently shows the
+    wrong image. Staging under `<module>__<parent>__<basename>` makes
+    the basename Sphinx sees unique across modules and across builds,
+    so no slot is ever shared and no stale file can hijack the URL.
+
+    Idempotent: only copies when the staged file is missing."""
+    if not src_abs.is_file():
+        return None
+    # `<module>__<parent_dir>__<basename>` keeps the rendered file
+    # name readable (e.g. `face__images__2.jpg`) while guaranteeing
+    # uniqueness both across modules (different `module` prefix) and
+    # within a module (different `parent` segment).  Use `__` as the
+    # separator — extremely unlikely to appear in real filenames.
+    parent = src_abs.parent.name
+    unique_basename = f"{module}__{parent}__{src_abs.name}"
+    staged_rel = f"_contrib_images/{module}/{unique_basename}"
+    staged_abs = SPHINX_INPUT_ROOT / staged_rel
+    if not staged_abs.exists():
+        staged_abs.parent.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(src_abs, staged_abs)
+    return staged_rel
+
+
+def _contrib_source_from_url(hit: str) -> tuple[str, pathlib.Path] | None:
+    """Given a URL stored in `_IMAGE_INDEX` for a contrib image, derive
+    `(module, source_abs_path)` so the caller can re-stage it uniquely.
+    Returns None for main-tree URLs (no re-staging needed)."""
+    if hit.startswith("tutorials_contrib/"):
+        parts = pathlib.Path(hit).parts
+        if len(parts) >= 3:
+            # tutorials_contrib/<m>/<rel-relative-to-<m>/tutorials>
+            module = parts[1]
+            src = CONTRIB_ROOT / module / "tutorials" / pathlib.Path(*parts[2:])
+            return module, src
+    elif hit.startswith("_contrib_images/"):
+        parts = pathlib.Path(hit).parts
+        if len(parts) >= 2:
+            # _contrib_images/<m>/<rest-relative-to-CONTRIB_ROOT/<m>>
+            module = parts[1]
+            src = CONTRIB_ROOT / pathlib.Path(*parts[1:])
+            return module, src
+    return None
 
 _TOGGLE_LABELS = {"cpp": "C++", "java": "Java", "python": "Python"}
 
@@ -345,6 +404,7 @@ _LANG_ALIASES = {
     "unparsed": "text",
     "guess": "text",
     "gradle": "groovy",
+    "csv": "text",
     # `run` is a custom convention some contrib tutorials use to mean
     # "this is a shell command you run" (e.g. dnn_superres/upscale_image_*).
     # Pygments has no `run` lexer — map to bash so it highlights as shell.
@@ -766,16 +826,29 @@ def _translate(text: str, docname: str | None = None) -> str:
         if docname:
             parts = pathlib.Path(docname).parent.parts
             local = None
+            is_contrib_doc = len(parts) >= 2 and parts[0] == "tutorials_contrib"
             if parts and parts[0] == "tutorials":
                 local = DOC_ROOT / pathlib.Path(docname).parent / "images" / rel
-            elif len(parts) >= 2 and parts[0] == "tutorials_contrib":
+            elif is_contrib_doc:
                 # Contrib doc → resolve under <m>/tutorials/<rest>/images/.
                 rest = pathlib.Path(*parts[2:]) if len(parts) > 2 else pathlib.Path()
                 local = CONTRIB_ROOT / parts[1] / "tutorials" / rest / "images" / rel
             if local is not None and local.is_file():
+                if is_contrib_doc:
+                    # Stage under a unique module-prefixed basename to keep
+                    # Sphinx's `_images/<basename>` slot collision-proof
+                    # against main-tree images of the same name.
+                    staged = _stage_unique_contrib_image(local, parts[1])
+                    if staged:
+                        return f'{m.group("pre")}/{staged})'
                 return f'{m.group("pre")}images/{rel})'
         hit = _IMAGE_INDEX.get(pathlib.Path(rel).name)
         if hit:
+            src_info = _contrib_source_from_url(hit)
+            if src_info:
+                staged = _stage_unique_contrib_image(*src_info[::-1])
+                if staged:
+                    return f'{m.group("pre")}/{staged})'
             _materialize_contrib_image(hit)
             return f'{m.group("pre")}/{hit})'
         return f'{m.group("pre")}/tutorials/others/images/{rel})'
@@ -801,10 +874,26 @@ def _translate(text: str, docname: str | None = None) -> str:
         for cand in (f"{module}/doc/{rel}",
                      f"{module}/{rel}",
                      rel):
-            if (CONTRIB_ROOT / cand).is_file():
-                url = f"_contrib_images/{cand}"
-                _materialize_contrib_image(url)
-                return f'{m.group("pre")}/{url})'
+            src = CONTRIB_ROOT / cand
+            if src.is_file():
+                # Stage under a unique module-prefixed basename — see
+                # _stage_unique_contrib_image() for why.
+                staged = _stage_unique_contrib_image(src, module)
+                if staged:
+                    return f'{m.group("pre")}/{staged})'
+        # Final fallback: Doxygen IMAGE_PATH flattening by basename. Catches
+        # bare filenames (`![](ab.jpg)`) and refs whose path prefix is wrong
+        # for the contrib layout but whose basename Doxygen would find anyway
+        # (`![](tutorials/gender_classification/arnie_*.jpg)` in face).
+        hit = _IMAGE_INDEX.get(pathlib.Path(rel).name)
+        if hit:
+            src_info = _contrib_source_from_url(hit)
+            if src_info:
+                staged = _stage_unique_contrib_image(*src_info[::-1])
+                if staged:
+                    return f'{m.group("pre")}/{staged})'
+            _materialize_contrib_image(hit)
+            return f'{m.group("pre")}/{hit})'
         return m.group(0)
     text = re.sub(
         r'(?P<pre>!\[[^\]]*\]\()(?P<rel>[^)]+)\)',
