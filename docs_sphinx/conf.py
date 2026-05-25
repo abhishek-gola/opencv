@@ -44,7 +44,7 @@ DOC_MODULES = [
 # ---------------------------------------------------------------------------
 CONTRIB_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "ml,bgsegm,alphamat,face,bioinspired,cannops,ccalib,cnn_3dobj,cvv,dnn_objdetect,dnn_superres,gapi,xobjdetect,xstereo").split(",")
+    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "ml,bgsegm,alphamat,face,bioinspired,cannops,ccalib,cnn_3dobj,cvv,dnn_objdetect,dnn_superres,gapi,xobjdetect,xstereo,xfeatures2d").split(",")
     if m.strip()
 ]
 CONTRIB_ROOT = pathlib.Path(
@@ -555,6 +555,65 @@ def _translate(text: str, docname: str | None = None) -> str:
             out.append(line)
         return '\n'.join(out)
     text = _demote_extra_h1s(text)
+
+    # 1d. Multi-line setext H2 splitter.  When `----` immediately follows
+    #     a multi-line text block without an intervening blank line,
+    #     CommonMark greedily folds the entire block into the heading
+    #     title.  Some contrib sources omit that blank (e.g. xfeatures2d
+    #     py_brief.markdown: the body of the "STAR(CenSurE)" section
+    #     flows straight into the next "BRIEF in OpenCV\n---" without a
+    #     separator, producing one giant 8-line <h2>).
+    #
+    #     A naive `re.sub` for this has bad false positives: it would
+    #     split inside fenced code blocks (where `----` is just bash
+    #     output) and inside `\f[...\f]` math (turning the `\f]` close
+    #     marker into a heading).  Use a line-based scanner that
+    #     (a) tracks ``` / ~~~ fence state so fenced runs are skipped
+    #     wholesale, and (b) requires every line of the candidate body
+    #     to start with an alphabetic character — this excludes math
+    #     markers (`\`), `@code`/`@endcode` directives (`@`), indented
+    #     code blocks (` `), and `$$` math fences.
+    def _split_multiline_setext_h2(src: str) -> str:
+        lines = src.split("\n")
+        n = len(lines)
+        fence_open = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+        setext = re.compile(r"^-{3,}[ \t]*$")
+        text_ok = re.compile(r"^[A-Za-z][^\n]*$")
+        out: list[str] = []
+        in_fence = False
+        fence_char: str | None = None
+        i = 0
+        while i < n:
+            line = lines[i]
+            m = fence_open.match(line)
+            if m:
+                ch = m.group(1)[0]
+                if not in_fence:
+                    in_fence, fence_char = True, ch
+                elif ch == fence_char:
+                    in_fence, fence_char = False, None
+                out.append(line); i += 1; continue
+            if in_fence:
+                out.append(line); i += 1; continue
+            if text_ok.match(line):
+                # Walk the contiguous run of alpha-only text lines.
+                j = i
+                while j < n and text_ok.match(lines[j]):
+                    j += 1
+                # Need at least 3 lines (>=2 body + 1 title) AND the
+                # next line must be the setext underline.
+                if (j - i) >= 3 and j < n and setext.match(lines[j]):
+                    out.extend(lines[i:j - 1])
+                    out.append("")
+                    out.append(f"## {lines[j - 1].strip()}")
+                    i = j + 1   # skip the underline
+                    continue
+                out.extend(lines[i:j])
+                i = j
+                continue
+            out.append(line); i += 1
+        return "\n".join(out)
+    text = _split_multiline_setext_h2(text)
 
     # 2. Doxygen LaTeX math markers
     text = re.sub(r"\\f\[(.+?)\\f\]",
