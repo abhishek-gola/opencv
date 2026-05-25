@@ -41,6 +41,12 @@ DOC_JS_MODULES = [
     if m.strip()
 ]
 
+DOC_PY_MODULES = [
+    m.strip()
+    for m in (_os.environ.get("OPENCV_DOC_PY_MODULES") or "py_gui").split(",")
+    if m.strip()
+]
+
 # -- Project ----------------------------------------------------------------
 project = "OpenCV"
 author = "OpenCV Team"
@@ -67,7 +73,9 @@ include_patterns = ["tutorials/tutorials.markdown"] + [
     f"tutorials/{m}/**" for m in DOC_MODULES
 ] + (["js_tutorials/js_tutorials.markdown"] + [
     f"js_tutorials/{m}/**" for m in DOC_JS_MODULES
-] if DOC_JS_MODULES else [])
+] if DOC_JS_MODULES else []) + (["py_tutorials/py_tutorials.markdown"] + [
+    f"py_tutorials/{m}/**" for m in DOC_PY_MODULES
+] if DOC_PY_MODULES else [])
 exclude_patterns = ["**/Thumbs.db", "**/.DS_Store", "tutorials/app/_old/**"]
 
 myst_enable_extensions = [
@@ -92,6 +100,8 @@ if not _TAG_FILE.is_file():
 
 # anchor -> doxygen URL filename (from opencv.tag if available).
 _TAG_FILENAMES: dict[str, str] = {}
+# anchor -> human-readable page title (from opencv.tag).
+_TAG_PAGE_TITLES: dict[str, str] = {}
 # cv API name -> full doxygen URL (for cv.Name auto-linking).
 _CV_API: dict[str, str] = {}
 if _TAG_FILE.is_file():
@@ -100,8 +110,11 @@ if _TAG_FILE.is_file():
         for _c in _ET.parse(str(_TAG_FILE)).getroot().iter("compound"):
             if _c.get("kind") == "page":
                 _n, _f = _c.findtext("name"), _c.findtext("filename")
+                _t = _c.findtext("title", "")
                 if _n and _f:
                     _TAG_FILENAMES[_n] = _f if _f.endswith(".html") else _f + ".html"
+                    if _t:
+                        _TAG_PAGE_TITLES[_n] = _t
             if _c.get("kind") == "class":
                 _cn = (_c.findtext("name") or "").split("::")[-1]
                 _cf = _c.findtext("filename", "")
@@ -242,6 +255,13 @@ for _m in DOC_JS_MODULES:
     _scan_internal(DOC_ROOT / "js_tutorials" / _m)
 for _toc in (DOC_ROOT / "js_tutorials").glob("*/js_table_of_contents_*.markdown"):
     if _toc.parent.name not in DOC_JS_MODULES:
+        _scan_external(_toc)
+
+_scan_internal(DOC_ROOT / "py_tutorials" / "py_tutorials.markdown")
+for _m in DOC_PY_MODULES:
+    _scan_internal(DOC_ROOT / "py_tutorials" / _m)
+for _toc in (DOC_ROOT / "py_tutorials").glob("*/py_table_of_contents_*.markdown"):
+    if _toc.parent.name not in DOC_PY_MODULES:
         _scan_external(_toc)
 
 # Doxygen flattens IMAGE_PATH across every `images/` folder under the tutorial
@@ -528,7 +548,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         body = "\n".join(indent + l for l in lines)
         return f"\n{indent}```{{code-block}} {lang}\n{body}\n{indent}```\n"
     text = re.sub(
-        r"^(?P<indent>[ \t]*)@code(?:\{(?P<lang>[^}]*)\})?\s*\n(?P<body>.*?)\n[ \t]*@endcode",
+        r"^(?P<indent>[ \t]*)@code(?:\{(?P<lang>[^}]*)\})?\s*\n(?P<body>.*?)\n?[ \t]*@endcode",
         _code_repl, text, flags=re.DOTALL | re.MULTILINE)
 
     # 4. @include path  /  @includelineno path
@@ -631,7 +651,39 @@ def _translate(text: str, docname: str | None = None) -> str:
         return "\n".join(out)
     text = _strip_tabset_continuations(text)
 
-    # 7. @ref name [optional "Display Text"]
+    # 7. toctree before @ref so list-item @ref tutorial_* entries aren't converted first
+    def _subpage_list_to_toctree(src: str) -> str:
+        pat = re.compile(
+            r"((?:^[ \t]*-\s+@(?:subpage\s+[\w-]+|ref\s+tutorial_[\w-]+)[^\n]*\n(?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)+)",
+            re.MULTILINE)
+        def repl(m: re.Match) -> str:
+            block = m.group(1)
+            entries = re.findall(r"@(?:subpage|ref)\s+([\w-]+)", block)
+            dm = re.search(
+                r"@(?:subpage|ref)\s+[\w-]+[^\n]*\n((?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)", block)
+            desc_raw = dm.group(1) if dm and dm.group(1) else ""
+            desc = " ".join(l.strip() for l in desc_raw.splitlines() if l.strip()) or None
+            lines = []
+            for e in entries:
+                if e in _ANCHOR_TO_DOC:
+                    lines.append("/" + _ANCHOR_TO_DOC[e])
+                elif e in _ANCHOR_TO_EXTERNAL:
+                    title, url = _ANCHOR_TO_EXTERNAL[e]
+                    lines.append(f"{title} <{url}>")
+                elif e in _TAG_FILENAMES:
+                    title = _TAG_PAGE_TITLES.get(e, e)
+                    lines.append(f"{title} <{DOXYGEN_BASE_URL + _TAG_FILENAMES[e]}>")
+            if not lines:
+                return ""
+            body = "\n".join(lines)
+            result = f"\n```{{toctree}}\n:maxdepth: 1\n\n{body}\n```\n"
+            if desc:
+                result += f"\n{desc}\n"
+            return result
+        return pat.sub(repl, src)
+    text = _subpage_list_to_toctree(text)
+
+    # 7b. @ref name [optional "Display Text"]
     def _ref_repl(m: re.Match) -> str:
         name = m.group("name"); disp = m.group("disp")
         target = _ANCHOR_TO_DOC.get(name)
@@ -671,38 +723,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         ),
         text, flags=re.MULTILINE)
 
-    # 9. @subpage NAME  (collected blocks -> real toctree).
-    #    Enabled modules' anchors become internal toctree entries.
-    #    Disabled modules' anchors become external links into the Doxygen
-    #    build, so the left sidebar still shows the full module list.
-    def _subpage_list_to_toctree(src: str) -> str:
-        pat = re.compile(
-            r"((?:^[ \t]*-\s+@subpage\s+[\w-]+[^\n]*\n(?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)+)",
-            re.MULTILINE)
-        def repl(m: re.Match) -> str:
-            block = m.group(1)
-            entries = re.findall(r"@subpage\s+([\w-]+)", block)
-            dm = re.search(
-                r"@subpage\s+[\w-]+[^\n]*\n(?:(?:[ \t]*\n)?([ \t]+[^\n]+)\n)?", block)
-            desc = dm.group(1).strip() if dm and dm.group(1) else None
-            lines = []
-            for e in entries:
-                if e in _ANCHOR_TO_DOC:
-                    lines.append("/" + _ANCHOR_TO_DOC[e])
-                elif e in _ANCHOR_TO_EXTERNAL:
-                    title, url = _ANCHOR_TO_EXTERNAL[e]
-                    lines.append(f"{title} <{url}>")
-            if not lines:
-                return ""
-            body = "\n".join(lines)
-            result = f"\n```{{toctree}}\n:maxdepth: 1\n\n{body}\n```\n"
-            if desc:
-                result += f"\n{desc}\n"
-            return result
-        return pat.sub(repl, src)
-    text = _subpage_list_to_toctree(text)
-
-    # 10. @next_tutorial / @prev_tutorial  -> drop
+    # 9. @next_tutorial / @prev_tutorial  -> drop
     text = re.sub(r"^@(?:next|prev)_tutorial\{[^}]*\}\s*$", "",
                   text, flags=re.MULTILINE)
 
@@ -834,13 +855,19 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 
 def _source_read(app, docname, source):
-    if not (docname.startswith("tutorials/") or docname.startswith("js_tutorials/")):
+    if not (docname.startswith("tutorials/") or docname.startswith("js_tutorials/")
+            or docname.startswith("py_tutorials/")):
         return
     source[0] = _translate(source[0], docname)
     if docname == "tutorials/tutorials" and DOC_JS_MODULES:
         source[0] += (
             "\n\n```{toctree}\n:maxdepth: 1\n:caption: JavaScript Tutorials\n\n"
             "/js_tutorials/js_tutorials\n```\n"
+        )
+    if docname == "tutorials/tutorials" and DOC_PY_MODULES:
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: Python Tutorials\n\n"
+            "/py_tutorials/py_tutorials\n```\n"
         )
 
 
