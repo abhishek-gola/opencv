@@ -47,6 +47,49 @@ DOC_PY_MODULES = [
     if m.strip()
 ]
 
+# ---------------------------------------------------------------------------
+# SCOPE — contrib modules under opencv_contrib/modules/.
+# Override via env var:  OPENCV_CONTRIB_MODULES=sfm cmake --build <build> --target sphinx
+# ---------------------------------------------------------------------------
+CONTRIB_ROOT = pathlib.Path(
+    _os.environ.get("OPENCV_CONTRIB_ROOT",
+                    str(HERE.parent.parent / "opencv_contrib" / "modules"))
+).resolve()
+CONTRIB_MODULES = [
+    m.strip()
+    for m in (_os.environ.get("OPENCV_CONTRIB_MODULES") or "sfm").split(",")
+    if m.strip()
+]
+
+SPHINX_INPUT_ROOT = pathlib.Path(
+    _os.environ.get("OPENCV_SPHINX_INPUT_ROOT") or str(DOC_ROOT)
+).resolve()
+
+# Expose enabled contrib modules via symlinks + html_extra_path.
+# Output URLs: /contrib_modules/<m>/... — no duplication in srcdir.
+html_extra_path: list[str] = []
+def _in_source_tree(p: pathlib.Path) -> bool:
+    for _root in (DOC_ROOT, CONTRIB_ROOT):
+        try:
+            p.relative_to(_root)
+            return True
+        except ValueError:
+            pass
+    return False
+
+if not _in_source_tree(SPHINX_INPUT_ROOT):
+    _extras = SPHINX_INPUT_ROOT.parent / "contrib_extras"
+    _prefix = _extras / "contrib_modules"
+    _prefix.mkdir(parents=True, exist_ok=True)
+    for _m in CONTRIB_MODULES:
+        _src, _link = CONTRIB_ROOT / _m, _prefix / _m
+        if _src.is_dir() and not _link.exists():
+            try:
+                _os.symlink(_src, _link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pass
+    html_extra_path = [str(_extras)]
+
 # -- Project ----------------------------------------------------------------
 project = "OpenCV"
 author = "OpenCV Team"
@@ -75,7 +118,9 @@ include_patterns = ["tutorials/tutorials.markdown"] + [
     f"js_tutorials/{m}/**" for m in DOC_JS_MODULES
 ] if DOC_JS_MODULES else []) + (["py_tutorials/py_tutorials.markdown"] + [
     f"py_tutorials/{m}/**" for m in DOC_PY_MODULES
-] if DOC_PY_MODULES else [])
+] if DOC_PY_MODULES else []) + (["tutorials_contrib/contrib_root.markdown"] + [
+    f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES
+] if CONTRIB_MODULES else [])
 exclude_patterns = ["**/Thumbs.db", "**/.DS_Store", "tutorials/app/_old/**"]
 
 myst_enable_extensions = [
@@ -264,6 +309,19 @@ for _toc in (DOC_ROOT / "py_tutorials").glob("*/py_table_of_contents_*.markdown"
     if _toc.parent.name not in DOC_PY_MODULES:
         _scan_external(_toc)
 
+for _m in CONTRIB_MODULES:
+    _tut_dir = CONTRIB_ROOT / _m / "tutorials"
+    if not _tut_dir.is_dir():
+        continue
+    for _md in list(_tut_dir.rglob("*.markdown")) + list(_tut_dir.rglob("*.md")):
+        try:
+            _head = _md.read_text(encoding="utf-8", errors="replace")[:4000]
+        except OSError:
+            continue
+        _rel = "tutorials_contrib/" + _m + "/" + _md.relative_to(_tut_dir).with_suffix("").as_posix()
+        for _mm in re.finditer(r"\{#([\w-]+)\}", _head):
+            _ANCHOR_TO_DOC[_mm.group(1)] = _rel
+
 # Doxygen flattens IMAGE_PATH across every `images/` folder under the tutorial
 # tree, so a tutorial can reference `images/foo.png` even when `foo.png` lives
 # in a sibling module's `images/` directory. Mirror that behavior by building
@@ -279,6 +337,23 @@ for _img in (DOC_ROOT / "js_tutorials" / "js_assets").glob("*"):
 for _img in (DOC_ROOT / "images").glob("*"):
     if _img.is_file():
         _IMAGE_INDEX.setdefault(_img.name, _img.relative_to(DOC_ROOT).as_posix())
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp"}
+for _m in CONTRIB_MODULES:
+    _tut_dir = CONTRIB_ROOT / _m / "tutorials"
+    if _tut_dir.is_dir():
+        for _img in _tut_dir.rglob("*"):
+            if _img.is_file() and _img.suffix.lower() in _IMAGE_EXTS:
+                _rel_str = "tutorials_contrib/" + _m + "/" + _img.relative_to(_tut_dir).as_posix()
+                _IMAGE_INDEX.setdefault(_img.name, _rel_str)
+    # Contrib images outside <m>/tutorials/. URL is contrib_modules/<m>/<rest>.
+    # Files served via html_extra_path — no copies in srcdir.
+    for _sub in ("doc", "samples"):
+        _src = CONTRIB_ROOT / _m / _sub
+        if _src.is_dir():
+            for _img in _src.rglob("*"):
+                if _img.is_file() and _img.suffix.lower() in _IMAGE_EXTS:
+                    _rel = _img.relative_to(CONTRIB_ROOT).as_posix()
+                    _IMAGE_INDEX.setdefault(_img.name, f"contrib_modules/{_rel}")
 
 _TOGGLE_LABELS = {"cpp": "C++", "java": "Java", "python": "Python"}
 
@@ -290,6 +365,7 @@ _SNIPPET_BASES = [
     OPENCV_ROOT,
     OPENCV_ROOT / "samples",
     OPENCV_ROOT / "apps",
+    CONTRIB_ROOT,
 ]
 
 
@@ -439,6 +515,9 @@ def _translate(text: str, docname: str | None = None) -> str:
         r"(^(?![ \t#@`]|-#|[-*+]\s|\d+[.)]\s)[^\n]+\n)((?:    [-*+][ \t][^\n]*\n(?:[ \t]{5,}[^\n]*\n)*)+)",
         lambda m: m.group(1) + re.sub(r"^    ", "", m.group(2), flags=re.MULTILINE),
         text, flags=re.MULTILINE)
+
+    # 1b0. \b word → **word** (Doxygen bold macro — single next word only).
+    text = re.sub(r"\\b\s+(\S+)", r"**\1**", text)
 
     # 1b. @note ... / @see ...  -> MyST admonitions.
     #     Runs BEFORE math conversion so that \f[...\f] inside a note body is
@@ -658,6 +737,8 @@ def _translate(text: str, docname: str | None = None) -> str:
 
     # 7. toctree before @ref so list-item @ref tutorial_* entries aren't converted first
     def _subpage_list_to_toctree(src: str) -> str:
+        if not src.endswith("\n"):
+            src += "\n"
         pat = re.compile(
             r"((?:^[ \t]*-\s+@(?:subpage\s+[\w-]+|ref\s+tutorial_[\w-]+)[^\n]*\n(?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)+)",
             re.MULTILINE)
@@ -667,7 +748,13 @@ def _translate(text: str, docname: str | None = None) -> str:
             dm = re.search(
                 r"@(?:subpage|ref)\s+[\w-]+[^\n]*\n((?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)", block)
             desc_raw = dm.group(1) if dm and dm.group(1) else ""
-            desc = " ".join(l.strip() for l in desc_raw.splitlines() if l.strip()) or None
+            _groups: list[list[str]] = [[]]
+            for _l in desc_raw.splitlines():
+                if _l.strip():
+                    _groups[-1].append(_l.strip())
+                elif _groups[-1]:
+                    _groups.append([])
+            desc = "\n\n".join(" ".join(g) for g in _groups if g) or None
             lines = []
             for e in entries:
                 if e in _ANCHOR_TO_DOC:
@@ -765,8 +852,23 @@ def _translate(text: str, docname: str | None = None) -> str:
 
     text = re.sub(r"</?center>", "", text, flags=re.IGNORECASE)
 
+    # 11d. Escape C++ template <Type> in paragraph text; skip fenced code blocks.
+    _cpp_tpl_re = re.compile(r'\b(\w+)<([A-Za-z_][\w:, *&]*?)>')
+    _lines_out: list[str] = []
+    _in_fence = False
+    for _ln in text.splitlines(keepends=True):
+        if re.match(r'^\s*```', _ln):
+            _in_fence = not _in_fence
+        if not _in_fence:
+            _ln = _cpp_tpl_re.sub(lambda m: f'{m.group(1)}&lt;{m.group(2)}&gt;', _ln)
+        _lines_out.append(_ln)
+    text = "".join(_lines_out)
+
     # 11c. Wrap bare http(s) URLs in <> for CommonMark autolink.
+    # Group 1 = full [text](url) link → pass through; else wrap bare URL.
     def _autolink_repl(m: re.Match) -> str:
+        if m.group(1):
+            return m.group(1)
         url = m.group(0)
         trail = ""
         while url and url[-1] in ".,;:!?)":
@@ -774,8 +876,16 @@ def _translate(text: str, docname: str | None = None) -> str:
             url = url[:-1]
         return f"<{url}>{trail}" if url else m.group(0)
     text = re.sub(
-        r'(?<!\]\()(?<![<"])https?://\S+',
+        r'(\[[^\]]*\]\([^)]*\))|(?<!\]\()(?<![<"])https?://\S+',
         _autolink_repl, text)
+
+    # Depth-relative prefix for contrib_modules/ URLs (html_extra_path output).
+    _depth = docname.count("/") if docname else 0
+    _contrib_url_prefix = ("../" * _depth) + "contrib_modules/"
+
+    def _emit_contrib_img(rel_url: str, alt: str) -> str:
+        src = _contrib_url_prefix + rel_url
+        return f'<img src="{src}" alt="{alt}"/>'
 
     # 12. Image paths "images/foo.png" — resolve like Doxygen's flat IMAGE_PATH:
     #     prefer the doc's own "images/" sibling, then fall back to a global
@@ -783,20 +893,35 @@ def _translate(text: str, docname: str | None = None) -> str:
     #     fallback, point at the consolidated `tutorials/others/images/` dir
     #     (where modules like `photo` store their assets).
     def _img_repl(m: re.Match) -> str:
-        rel = m.group("rel")
+        alt, rel = m.group("alt"), m.group("rel")
         if docname:
             local = DOC_ROOT / pathlib.Path(docname).parent / "images" / rel
             if local.is_file():
                 return m.group(0)
         hit = _IMAGE_INDEX.get(pathlib.Path(rel).name)
         if hit:
-            return f'{m.group("pre")}/{hit})'
+            if hit.startswith("contrib_modules/"):
+                return _emit_contrib_img(hit[len("contrib_modules/"):], alt)
+            return f'![{alt}](/{hit})'
         if docname and docname.startswith("js_tutorials/"):
             return m.group(0)
-        return f'{m.group("pre")}/tutorials/others/images/{rel})'
+        return f'![{alt}](/tutorials/others/images/{rel})'
     text = re.sub(
-        r'(?P<pre>!\[[^\]]*\]\()images/(?P<rel>[^)]+)\)',
+        r'!\[(?P<alt>[^\]]*)\]\(images/(?P<rel>[^)]+)\)',
         _img_repl, text)
+
+    # 12a2. "pics/foo.png" — contrib modules use pics/ instead of images/.
+    def _pics_img_repl(m: re.Match) -> str:
+        alt = m.group("alt")
+        hit = _IMAGE_INDEX.get(pathlib.Path(m.group("rel")).name)
+        if hit:
+            if hit.startswith("contrib_modules/"):
+                return _emit_contrib_img(hit[len("contrib_modules/"):], alt)
+            return f'![{alt}](/{hit})'
+        return m.group(0)
+    text = re.sub(
+        r'!\[(?P<alt>[^\]]*)\]\(pics/(?P<rel>[^)]+)\)',
+        _pics_img_repl, text)
 
     # 12b. Bare image filenames with no directory prefix (e.g. "psf.png") that
     #      Doxygen resolves via IMAGE_PATH but Sphinx cannot find as-is.
@@ -878,7 +1003,7 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 def _source_read(app, docname, source):
     if not (docname.startswith("tutorials/") or docname.startswith("js_tutorials/")
-            or docname.startswith("py_tutorials/")):
+            or docname.startswith("py_tutorials/") or docname.startswith("tutorials_contrib/")):
         return
     source[0] = _translate(source[0], docname)
     if docname == "tutorials/tutorials" and DOC_JS_MODULES:
@@ -890,6 +1015,11 @@ def _source_read(app, docname, source):
         source[0] += (
             "\n\n```{toctree}\n:maxdepth: 1\n:caption: Python Tutorials\n\n"
             "/py_tutorials/py_tutorials\n```\n"
+        )
+    if docname == "tutorials/tutorials" and CONTRIB_MODULES:
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: Contrib Tutorials\n\n"
+            "/tutorials_contrib/contrib_root\n```\n"
         )
 
 
