@@ -61,6 +61,25 @@ CONTRIB_MODULES = [
     if m.strip()
 ]
 
+# ---------------------------------------------------------------------------
+# SCOPE — API reference. Module folder names under opencv/modules/. Each
+# entry's umbrella header (modules/<m>/include/opencv2/<m>.hpp) must declare
+# `@defgroup <m> …` at the top — that's the breathe target. Override:
+#     OPENCV_API_MODULES=core,imgproc cmake --build <build> --target sphinx
+# Empty = legacy behavior (no API pages in Sphinx; navbar's external_links
+# still routes users to the Doxygen-rendered group__*.html).
+# ---------------------------------------------------------------------------
+API_MODULES = [
+    m.strip()
+    for m in (_os.environ.get("OPENCV_API_MODULES") or "core").split(",")
+    if m.strip()
+]
+
+# Sphinx srcdir as seen by conf.py.  CMake stages a merged tree at
+# ${CMAKE_BINARY_DIR}/docs_sphinx_input/ and forwards this env var.
+# Default = DOC_ROOT so ad-hoc sphinx-build runs keep working. The `or`
+# idiom (rather than dict.get's default) treats an empty-string env var
+# the same as unset — CMake forwards "" when contrib is disabled.
 SPHINX_INPUT_ROOT = pathlib.Path(
     _os.environ.get("OPENCV_SPHINX_INPUT_ROOT") or str(DOC_ROOT)
 ).resolve()
@@ -105,6 +124,26 @@ for _ext in ("sphinx_design", "sphinx_copybutton"):
         pass
 HAVE_SPHINX_DESIGN = "sphinx_design" in extensions
 
+# -- Breathe (Doxygen XML -> Sphinx C++ domain) -----------------------------
+# Gated on API_MODULES being non-empty AND breathe being importable. A
+# stripped env (no breathe) or empty API_MODULES degrades to tutorial-only,
+# matching today's pre-API behavior. XML dir is forwarded by
+# docs_sphinx/CMakeLists.txt via OPENCV_DOXYGEN_XML_DIR; fallback path
+# matches the canonical build_doc layout for ad-hoc sphinx-build runs.
+_API_XML_DIR = pathlib.Path(
+    _os.environ.get("OPENCV_DOXYGEN_XML_DIR")
+    or str(HERE.parent.parent / "build_doc" / "doc" / "doxygen" / "xml")
+).resolve()
+if API_MODULES:
+    try:
+        import breathe  # noqa: F401
+        extensions.append("breathe")
+        breathe_projects = {"opencv": str(_API_XML_DIR)}
+        breathe_default_project = "opencv"
+        breathe_default_members = ("members",)
+    except ImportError:
+        API_MODULES = []
+
 source_suffix = {".md": "markdown", ".markdown": "markdown"}
 
 # Root tutorial index (lists all modules via @subpage). Stays the master
@@ -121,6 +160,11 @@ include_patterns = ["tutorials/tutorials.markdown"] + [
 ] if DOC_PY_MODULES else []) + (["tutorials_contrib/contrib_root.markdown"] + [
     f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES
 ] if CONTRIB_MODULES else [])
+
+# Add API stubs if API_MODULES is defined by the cherry-picked commit
+if API_MODULES:
+    include_patterns.append("api/**")
+
 exclude_patterns = ["**/Thumbs.db", "**/.DS_Store", "tutorials/app/_old/**"]
 
 myst_enable_extensions = [
@@ -251,14 +295,15 @@ _HEAD_RE = re.compile(
     r"^#+\s+(?P<title2>[^\n]+?)\s*\{#(?P<anchor2>[\w-]+)\}\s*$",
     re.MULTILINE)
 
-def _scan_internal(path: pathlib.Path) -> None:
-    """Add every {#anchor} in `path` (file or dir) to _ANCHOR_TO_DOC."""
-    if path.is_file() and path.suffix in (".markdown", ".md"):
-        files = [path]
-    elif path.is_dir():
-        files = list(path.rglob("*.markdown")) + list(path.rglob("*.md"))
-    else:
-        files = []
+def _scan_internal(path: pathlib.Path, base: pathlib.Path | None = None) -> None:
+    """Add every {#anchor} and standalone `@anchor NAME` in `path` (file or
+    dir) to _ANCHOR_TO_DOC. Docname is computed relative to `base` (default
+    SPHINX_INPUT_ROOT) so the same scanner serves both main and contrib."""
+    base = base or SPHINX_INPUT_ROOT
+    _md_exts = (".markdown", ".md")
+    files = [path] if (path.is_file() and path.suffix in _md_exts) \
+        else (list(path.rglob("*.markdown")) + list(path.rglob("*.md"))
+              if path.is_dir() else [])
     for md in files:
         try:
             head = md.read_text(encoding="utf-8", errors="replace")[:4000]
@@ -288,7 +333,241 @@ def _scan_external(toc_file: pathlib.Path) -> None:
 # Internal scan: master + every enabled module subtree.
 _scan_internal(DOC_ROOT / "tutorials" / "tutorials.markdown")
 for _m in DOC_MODULES:
-    _scan_internal(DOC_ROOT / "tutorials" / _m)
+    _scan_internal(SPHINX_INPUT_ROOT / "tutorials" / _m)
+_contrib_root_md = SPHINX_INPUT_ROOT / "tutorials_contrib" / "contrib_root.markdown"
+if _contrib_root_md.is_file():
+    _scan_internal(_contrib_root_md)
+for _m in CONTRIB_MODULES:
+    _scan_internal(SPHINX_INPUT_ROOT / "tutorials_contrib" / _m)
+# Generate the API stub tree from Doxygen XML, then scan it. Stub layout
+# mirrors Doxygen's group hierarchy: parent groups (those with <innergroup>
+# children in their XML) become navigation index pages with `@subpage`
+# toctrees; leaf groups get a single `{doxygengroup} <name>` directive.
+# This matches what docs.opencv.org/.../group__core.html does — Doxygen
+# also separates navigation from content; only one breathe directive
+# (`{doxygengroup} core :inner:`) flattens the whole hierarchy onto one
+# page, which is why we don't use it.
+def _itertext(el) -> str:
+    """Flatten an XML element's inner text. None-safe."""
+    return "".join(el.itertext()).strip() if el is not None else ""
+
+
+# memberdef@kind → display section title. Mirrors Doxygen's group-page order.
+_MEMBERDEF_SECTIONS = (
+    ("typedef",  "Typedefs"),
+    ("enum",     "Enumerations"),
+    ("function", "Functions"),
+    ("variable", "Variables"),
+    ("define",   "Macros"),
+)
+
+
+def _read_class_brief(refid: str, xml_dir: pathlib.Path,
+                      _cache: dict = {}) -> str:
+    """Read brief description from a class/struct's compound XML. Cached."""
+    if refid in _cache:
+        return _cache[refid]
+    import xml.etree.ElementTree as _ET
+    xml_path = xml_dir / f"{refid}.xml"
+    brief = ""
+    if xml_path.is_file():
+        try:
+            ccd = _ET.parse(xml_path).getroot().find("compounddef")
+            if ccd is not None:
+                brief = _itertext(ccd.find("briefdescription"))
+        except _ET.ParseError:
+            pass
+    _cache[refid] = brief
+    return brief
+
+
+def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
+                         _seen: set | None = None) -> dict | None:
+    """Walk a group XML's <innergroup> children recursively.
+    Returns {name, title, detailed, innerclasses, sections, children} or None.
+    `_seen` guards against the rare case of cycles in the group graph."""
+    import xml.etree.ElementTree as _ET
+    _seen = _seen if _seen is not None else set()
+    if refid in _seen:
+        return None
+    _seen.add(refid)
+    xml_path = xml_dir / f"{refid}.xml"
+    if not xml_path.is_file():
+        return None
+    try:
+        root = _ET.parse(xml_path).getroot()
+    except _ET.ParseError:
+        return None
+    cd = root.find("compounddef")
+    if cd is None:
+        return None
+    name = (cd.findtext("compoundname") or "").strip()
+    title = (cd.findtext("title") or name).strip()
+    # Detailed description (used on parent index pages; breathe handles it
+    # on leaf pages, so we extract it for context-display only).
+    detailed_el = cd.find("detaileddescription")
+    detailed = ""
+    if detailed_el is not None:
+        paras = [_itertext(p) for p in detailed_el.findall("para")]
+        detailed = "\n\n".join(p for p in paras if p)
+    # Inner classes (public only). One read per class's XML for its brief.
+    innerclasses = []
+    for ic in cd.findall("innerclass"):
+        if ic.get("prot") != "public":
+            continue
+        ic_refid = ic.get("refid", "")
+        innerclasses.append({
+            "refid": ic_refid,
+            "name": (ic.text or "").strip(),
+            "kind": "struct" if ic_refid.startswith("struct") else "class",
+            "brief": _read_class_brief(ic_refid, xml_dir),
+        })
+    # Section members (typedefs, enums, functions, variables, macros).
+    sections: dict[str, list[dict]] = {}
+    for sd in cd.findall("sectiondef"):
+        for md in sd.findall("memberdef"):
+            kind = md.get("kind", "")
+            section_title = dict(_MEMBERDEF_SECTIONS).get(kind)
+            if not section_title:
+                continue
+            sections.setdefault(section_title, []).append({
+                "id":    md.get("id", ""),
+                "name":  (md.findtext("name") or "").strip(),
+                "type":  _itertext(md.find("type")),
+                "args":  (md.findtext("argsstring") or "").strip(),
+                "brief": _itertext(md.find("briefdescription")),
+            })
+    # Recurse into subgroups.
+    children = []
+    for ig in cd.findall("innergroup"):
+        child = _build_api_hierarchy(ig.get("refid"), xml_dir, _seen)
+        if child is not None:
+            children.append(child)
+    return {"name": name, "title": title, "detailed": detailed,
+            "innerclasses": innerclasses, "sections": sections,
+            "children": children}
+
+
+def _md_escape_cell(text: str) -> str:
+    """Make `text` safe for a single Markdown table cell."""
+    # Newlines collapse to spaces, pipes escape, angle brackets stay.
+    return (text or "").replace("\n", " ").replace("\r", " ") \
+                       .replace("|", "\\|").strip()
+
+
+def _write_api_stub(node: dict, out_dir: pathlib.Path) -> None:
+    """Write one .md per node. Recurses into children.
+
+    Parent groups (have <innergroup> children) → navigation index pages with
+    @subpage toctrees. Leaf groups → Doxygen-style summary tables (Classes /
+    Typedefs / Enumerations / Functions / Variables / Macros) listing every
+    member with a link to its in-page anchor, followed by the breathe
+    {doxygengroup} directive which renders the long-form details. The two
+    halves together mirror what docs.opencv.org/.../group__core__basic.html
+    shows: tables at top, details below."""
+    name = node["name"]
+    title = node["title"]
+    out = out_dir / f"{name}.md"
+
+    if node["children"]:
+        # Navigation index page — list children as @subpage entries; the
+        # existing _subpage_list_to_toctree rule converts them to a real
+        # toctree at translate time.
+        lines = [f"# {title} {{#api_{name}}}", ""]
+        if node["detailed"]:
+            lines += [node["detailed"], ""]
+        lines += ["## Topics", ""]
+        for child in node["children"]:
+            lines.append(f"- @subpage api_{child['name']}")
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for child in node["children"]:
+            _write_api_stub(child, out_dir)
+        return
+
+    # ---- Leaf page ----------------------------------------------------------
+    lines = [f"# {title} {{#api_{name}}}", ""]
+
+    # Classes summary table — `cv::Mat`-style fully-qualified names linking
+    # to the per-class anchor breathe will emit on this same page.
+    if node["innerclasses"]:
+        lines += ["## Classes", "",
+                  "| Name | Description |", "|---|---|"]
+        for c in node["innerclasses"]:
+            link = f"[`{c['kind']} {c['name']}`](#{c['refid']})"
+            lines.append(f"| {link} | {_md_escape_cell(c['brief'])} |")
+        lines.append("")
+
+    # Section tables in Doxygen's order.
+    for _, section_title in _MEMBERDEF_SECTIONS:
+        items = node["sections"].get(section_title, [])
+        if not items:
+            continue
+        lines.append(f"## {section_title}")
+        lines.append("")
+        if section_title == "Functions":
+            lines += ["| Return | Name | Description |", "|---|---|---|"]
+            for m in items:
+                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                sig_link = f"[`{m['name']}{_md_escape_cell(m['args'])}`](#{m['id']})"
+                lines.append(
+                    f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
+        elif section_title in ("Typedefs", "Variables"):
+            lines += ["| Type | Name | Description |", "|---|---|---|"]
+            for m in items:
+                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                name_link = f"[`{m['name']}`](#{m['id']})"
+                lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
+        else:  # Enumerations, Macros
+            lines += ["| Name | Description |", "|---|---|"]
+            for m in items:
+                name_link = f"[`{m['name']}`](#{m['id']})"
+                lines.append(f"| {name_link} | {_md_escape_cell(m['brief'])} |")
+        lines.append("")
+
+    # Long-form details from breathe. The summary tables above link into
+    # the anchors breathe emits here (id="classcv_1_1Mat" etc).
+    lines += ["## Detailed Description", "",
+              f"```{{doxygengroup}} {name}",
+              ":project: opencv",
+              "```"]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _generate_api_stubs(modules, xml_dir, out_dir):
+    """Generate the full api/ stub tree. Idempotent — wipes and regenerates
+    on every sphinx-build so stale stubs from removed modules disappear."""
+    if not modules:
+        return
+    if not xml_dir.is_dir():
+        return  # No XML yet (sphinx-xml not run); degrade silently.
+    import shutil
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    root_lines = [
+        "API Reference {#api_root}",
+        "=============",
+        "",
+        "Sphinx-rendered API reference for OpenCV main modules. Each entry",
+        "below is a module's umbrella `@defgroup`; sub-pages mirror the",
+        "Doxygen subgroup hierarchy.",
+        "",
+    ]
+    for m in modules:
+        tree = _build_api_hierarchy(
+            "group__" + m.replace("_", "__"), xml_dir)
+        if tree is None:
+            continue
+        root_lines.append(f"- @subpage api_{tree['name']}")
+        _write_api_stub(tree, out_dir)
+    (out_dir / "api_root.markdown").write_text(
+        "\n".join(root_lines) + "\n", encoding="utf-8")
+
+
+if API_MODULES:
+    _generate_api_stubs(API_MODULES, _API_XML_DIR, SPHINX_INPUT_ROOT / "api")
+    # Recursive scan picks up api_root.markdown + every group stub.
+    _scan_internal(SPHINX_INPUT_ROOT / "api")
 
 # External scan: every OTHER module's top-level table_of_content_*.markdown.
 for _toc in (DOC_ROOT / "tutorials").glob("*/table_of_content_*.markdown"):
@@ -1003,7 +1282,8 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 def _source_read(app, docname, source):
     if not (docname.startswith("tutorials/") or docname.startswith("js_tutorials/")
-            or docname.startswith("py_tutorials/") or docname.startswith("tutorials_contrib/")):
+            or docname.startswith("py_tutorials/") or docname.startswith("tutorials_contrib/")
+            or docname.startswith("api/")):
         return
     source[0] = _translate(source[0], docname)
     if docname == "tutorials/tutorials" and DOC_JS_MODULES:
@@ -1020,6 +1300,12 @@ def _source_read(app, docname, source):
         source[0] += (
             "\n\n```{toctree}\n:maxdepth: 1\n:caption: Contrib Tutorials\n\n"
             "/tutorials_contrib/contrib_root\n```\n"
+        )
+    if docname == "tutorials/tutorials" and API_MODULES \
+            and (SPHINX_INPUT_ROOT / "api" / "library_root.rst").exists():
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: API Reference\n\n"
+            "/api/library_root\n```\n"
         )
 
 
