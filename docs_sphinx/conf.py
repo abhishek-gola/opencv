@@ -148,6 +148,16 @@ if API_MODULES:
         breathe_projects = {"opencv": str(_PATCHED_XML_DIR)}
         breathe_default_project = "opencv"
         breathe_default_members = ("members",)
+        # Breathe 4.36 doesn't handle optional title in Doxygen 1.12 docSect2TypeSub
+        from breathe.renderer import sphinxrenderer as _bsr
+        _orig_visit = _bsr.SphinxRenderer.methods["docsect1"]
+        def _visit_docsectN(self, node):
+            if not getattr(node, "title", None):
+                return self.render_iterable(node.content_)
+            return _orig_visit(self, node)
+        _bsr.SphinxRenderer.methods["docsect1"] = _visit_docsectN
+        _bsr.SphinxRenderer.methods["docsect2"] = _visit_docsectN
+        _bsr.SphinxRenderer.methods["docsect3"] = _visit_docsectN
     except ImportError:
         API_MODULES = []
 
@@ -337,7 +347,7 @@ def _scan_internal(path: pathlib.Path, base: pathlib.Path | None = None) -> None
             head = md.read_text(encoding="utf-8", errors="replace")[:4000]
         except OSError:
             continue
-        rel = md.relative_to(DOC_ROOT).with_suffix("").as_posix()
+        rel = md.relative_to(base).with_suffix("").as_posix()
         for m in re.finditer(r"\{#([\w-]+)\}", head):
             _ANCHOR_TO_DOC[m.group(1)] = rel
 
@@ -359,7 +369,7 @@ def _scan_external(toc_file: pathlib.Path) -> None:
     _ANCHOR_TO_EXTERNAL[anchor] = (title, url)
 
 # Internal scan: master + every enabled module subtree.
-_scan_internal(DOC_ROOT / "tutorials" / "tutorials.markdown")
+_scan_internal(DOC_ROOT / "tutorials" / "tutorials.markdown", base=DOC_ROOT)
 for _m in DOC_MODULES:
     _scan_internal(SPHINX_INPUT_ROOT / "tutorials" / _m)
 _contrib_root_md = SPHINX_INPUT_ROOT / "tutorials_contrib" / "contrib_root.markdown"
@@ -597,7 +607,7 @@ def _class_page_name(refid: str) -> str:
 
 
 def _write_api_stub(node: dict, out_dir: pathlib.Path,
-                    classes_seen: dict) -> None:
+                    classes_seen: dict, ns_map: dict | None = None) -> None:
     """Write one .md per group node. Recurses into children.
 
     Parent groups (have <innergroup> children) → navigation index pages with
@@ -618,16 +628,27 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines = [f"# {title} {{#api_{name}}}", ""]
         if node["detailed"]:
             lines += [node["detailed"], ""]
+        if ns_map and ns_map.get(name):
+            lines += ["## Namespaces", ""]
+            for _ns_name, anchor in ns_map[name]:
+                lines.append(f"- @subpage {anchor}")
+            lines.append("")
         lines += ["## Topics", ""]
         for child in node["children"]:
             lines.append(f"- @subpage api_{child['name']}")
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         for child in node["children"]:
-            _write_api_stub(child, out_dir, classes_seen)
+            _write_api_stub(child, out_dir, classes_seen, ns_map)
         return
 
     # ---- Leaf page ----------------------------------------------------------
     lines = [f"# {title} {{#api_{name}}}", ""]
+
+    if ns_map and ns_map.get(name):
+        lines += ["## Namespaces", ""]
+        for _ns_name, anchor in ns_map[name]:
+            lines.append(f"- @subpage {anchor}")
+        lines.append("")
 
     # Classes summary table — link to the per-class page that
     # `_generate_api_stubs` emits (one .md per refid, deduped across groups).
@@ -1177,6 +1198,91 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
             tree.write(out_file, encoding="utf-8", xml_declaration=True)
 
 
+def _collect_all_nodes(node: dict) -> list[str]:
+    return [node["name"]] + [n for c in node["children"] for n in _collect_all_nodes(c)]
+
+
+def _build_ns_group_map(all_refids: list[str],
+                        xml_dir: pathlib.Path) -> dict[str, set]:
+    """Return namespace_name → set of group compound-names.
+    Reads <innernamespace> directly from group XML (Doxygen 1.12+)."""
+    import xml.etree.ElementTree as _ET
+    ns_to_groups: dict[str, set] = {}
+    for refid in all_refids:
+        xml_path = xml_dir / f"{refid}.xml"
+        if not xml_path.is_file():
+            continue
+        try:
+            cd = _ET.parse(xml_path).getroot().find("compounddef")
+        except _ET.ParseError:
+            continue
+        cname = (cd.findtext("compoundname") or "").strip()
+        for inn in cd.findall("innernamespace"):
+            ns_xml = xml_dir / f"{inn.get('refid', '')}.xml"
+            if not ns_xml.is_file():
+                continue
+            try:
+                ns_cd = _ET.parse(ns_xml).getroot().find("compounddef")
+            except _ET.ParseError:
+                continue
+            if ns_cd is None:
+                continue
+            ns_name = (ns_cd.findtext("compoundname") or "").strip()
+            if any(p in ns_name.split("::") for p in ("detail", "internal", "impl")):
+                continue
+            ns_to_groups.setdefault(ns_name, set()).add(cname)
+    return ns_to_groups
+
+
+def _write_namespace_stub(ns: dict, out_dir: pathlib.Path) -> tuple[str, str]:
+    """Write api/namespace_<slug>.md for one namespace. Returns (anchor, fname)."""
+    slug = ns["name"].replace("::", "__")
+    anchor = f"api_ns_{slug}"
+    fname = f"namespace_{slug}.md"
+    lines = [f"# {ns['name']} namespace {{#{anchor}}}", ""]
+    if ns["brief"]:
+        lines += [ns["brief"], ""]
+    lines += [
+        "## Detailed Description",
+        "",
+        f"```{{doxygennamespace}} {ns['name']}",
+        ":project: opencv",
+        "```",
+    ]
+    (out_dir / fname).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return anchor, fname
+
+
+def _namespaces_for_group(group_name: str, xml_dir: pathlib.Path,
+                          ns_group_map: dict[str, set]) -> list[dict]:
+    """Return namespace dicts for a group from ns_group_map."""
+    import xml.etree.ElementTree as _ET, glob as _glob
+    wanted = {ns for ns, grps in ns_group_map.items() if group_name in grps}
+    candidates: list[dict] = []
+    for ns_name in sorted(wanted):
+        ns_file = xml_dir / ("namespace" + "_1_1".join(ns_name.split("::")) + ".xml")
+        if not ns_file.is_file():
+            for f in _glob.glob(str(xml_dir / "namespacecv*.xml")):
+                try:
+                    cd = _ET.parse(f).getroot().find("compounddef")
+                    if cd is not None and (cd.findtext("compoundname") or "").strip() == ns_name:
+                        ns_file = pathlib.Path(f)
+                        break
+                except _ET.ParseError:
+                    continue
+        if not ns_file.is_file():
+            continue
+        try:
+            cd = _ET.parse(ns_file).getroot().find("compounddef")
+        except _ET.ParseError:
+            continue
+        if cd is None:
+            continue
+        brief = _itertext(cd.find("briefdescription"))
+        candidates.append({"name": ns_name, "refid": cd.get("id", ""), "brief": brief})
+    return candidates
+
+
 def _generate_api_stubs(modules, xml_dir, out_dir):
     """Generate the full api/ stub tree. Idempotent — wipes and regenerates
     on every sphinx-build so stale stubs from removed modules disappear.
@@ -1211,7 +1317,15 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         if tree is None:
             continue
         root_lines.append(f"- @subpage api_{tree['name']}")
-        _write_api_stub(tree, out_dir, classes_seen)
+        all_nodes = _collect_all_nodes(tree)
+        all_refids = ["group__" + n.replace("_", "__") for n in all_nodes]
+        ns_group_map = _build_ns_group_map(all_refids, _API_XML_DIR)
+        ns_map: dict[str, list] = {}
+        for group_name in all_nodes:
+            for ns in _namespaces_for_group(group_name, _API_XML_DIR, ns_group_map):
+                anchor, _ = _write_namespace_stub(ns, out_dir)
+                ns_map.setdefault(group_name, []).append((ns["name"], anchor))
+        _write_api_stub(tree, out_dir, classes_seen, ns_map)
     # Per-class pages (one per unique refid across all groups). We also
     # seed `_ANCHOR_TO_DOC` directly with refid -> docname so `@ref`
     # cross-references in tutorial markdown (and in any group page) keep
@@ -1240,16 +1354,16 @@ for _toc in (DOC_ROOT / "tutorials").glob("*/table_of_content_*.markdown"):
     if _toc.parent.name not in DOC_MODULES:
         _scan_external(_toc)
 
-_scan_internal(DOC_ROOT / "js_tutorials" / "js_tutorials.markdown")
+_scan_internal(DOC_ROOT / "js_tutorials" / "js_tutorials.markdown", base=DOC_ROOT)
 for _m in DOC_JS_MODULES:
-    _scan_internal(DOC_ROOT / "js_tutorials" / _m)
+    _scan_internal(DOC_ROOT / "js_tutorials" / _m, base=DOC_ROOT)
 for _toc in (DOC_ROOT / "js_tutorials").glob("*/js_table_of_contents_*.markdown"):
     if _toc.parent.name not in DOC_JS_MODULES:
         _scan_external(_toc)
 
-_scan_internal(DOC_ROOT / "py_tutorials" / "py_tutorials.markdown")
+_scan_internal(DOC_ROOT / "py_tutorials" / "py_tutorials.markdown", base=DOC_ROOT)
 for _m in DOC_PY_MODULES:
-    _scan_internal(DOC_ROOT / "py_tutorials" / _m)
+    _scan_internal(DOC_ROOT / "py_tutorials" / _m, base=DOC_ROOT)
 for _toc in (DOC_ROOT / "py_tutorials").glob("*/py_table_of_contents_*.markdown"):
     if _toc.parent.name not in DOC_PY_MODULES:
         _scan_external(_toc)
