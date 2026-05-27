@@ -25,15 +25,8 @@ set(_SPHINX_CONFDIR    "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_SPHINX_OUTDIR     "${CMAKE_CURRENT_BINARY_DIR}/html")
 set(_SPHINX_INPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/docs_sphinx_input")
 
-# ---------------------------------------------------------------------------
-# Stage a merged input tree at ${CMAKE_BINARY_DIR}/docs_sphinx_input/.
-# Sphinx requires a single srcdir, but the wrapper needs to see both
-# opencv/doc/tutorials/ and (optionally) opencv_contrib/modules/<m>/tutorials/.
-# We symlink each main module subtree under tutorials/ and each enabled contrib
-# module subtree under tutorials_contrib/, then auto-generate the contrib root
-# page — the same pattern opencv/doc/CMakeLists.txt already uses for Doxygen.
-# Nothing under opencv/doc/ or opencv_contrib/modules/ is modified.
-# ---------------------------------------------------------------------------
+# Stage a single Sphinx srcdir at ${CMAKE_BINARY_DIR}/docs_sphinx_input/.
+# Symlinks tutorials and enabled contrib modules without modifying original trees.
 set(_SPHINX_INPUT_TUTORIALS "${_SPHINX_INPUT_ROOT}/tutorials")
 set(_SPHINX_INPUT_CONTRIB   "${_SPHINX_INPUT_ROOT}/tutorials_contrib")
 file(REMOVE_RECURSE "${_SPHINX_INPUT_ROOT}")
@@ -56,14 +49,8 @@ foreach(_d ${_main_tutorial_children})
   endif()
 endforeach()
 
-# Contrib tree: only when OPENCV_EXTRA_MODULES_PATH is set, matching the legacy
-# Doxygen contrib build's activation gate exactly. Stage every contrib module
-# that has a tutorials/ dir — the canonical "which modules to compile" list
-# lives in conf.py's CONTRIB_MODULES, exactly parallel to DOC_MODULES for main.
-# Staged-but-unselected modules have their @subpage entries silently dropped
-# by the toctree machinery (conf.py only populates _ANCHOR_TO_DOC for enabled
-# modules), so listing them all in contrib_root.markdown is safe and means
-# adding a new contrib module is a one-line conf.py edit (no reconfigure).
+# Stage contrib modules with a tutorials/ dir if OPENCV_EXTRA_MODULES_PATH is set.
+# Selection list lives in conf.py's CONTRIB_MODULES.
 if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
   file(MAKE_DIRECTORY "${_SPHINX_INPUT_CONTRIB}")
   set(_contrib_root_md "${_SPHINX_INPUT_CONTRIB}/contrib_root.markdown")
@@ -77,10 +64,7 @@ if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
     if(IS_DIRECTORY "${_tut_dir}")
       file(CREATE_LINK "${_tut_dir}" "${_SPHINX_INPUT_CONTRIB}/${_m}"
            SYMBOLIC COPY_ON_ERROR)
-      # Match every top-level *.markdown in <m>/tutorials/, the same shape the
-      # legacy Doxygen build uses (opencv/doc/CMakeLists.txt) — many contrib
-      # modules use names like alphamat_tutorial.markdown or fuzzy.markdown
-      # instead of the table_of_content_<m>.markdown convention.
+      # Match every top-level *.markdown in <m>/tutorials/ directly.
       file(GLOB _tocs RELATIVE "${_tut_dir}" "${_tut_dir}/*.markdown")
       foreach(_t ${_tocs})
         file(STRINGS "${_tut_dir}/${_t}" _id LIMIT_COUNT 1 REGEX ".*\\{#[^}]+\\}")
@@ -93,16 +77,8 @@ if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
   endforeach()
 endif()
 
-# ---------------------------------------------------------------------------
-# API reference: Doxygen XML generation (Phase A of API onboarding).
-# Strategy: write a build-tree Doxyfile-xml that @INCLUDEs the legacy
-# <build>/doc/Doxyfile (produced by opencv/doc/CMakeLists.txt's
-# configure_file(Doxyfile.in -> Doxyfile) at line 227) and overrides ONLY
-# the format flags. Doxyfile.in is never modified — its GENERATE_XML=NO at
-# line 288 stays NO. add_subdirectory(doc) runs at opencv/CMakeLists.txt
-# line 1042, before add_subdirectory(docs_sphinx) at line 1043, so the
-# legacy Doxyfile already exists by the time this branch is evaluated.
-# ---------------------------------------------------------------------------
+# API reference: Generate Doxygen XML by overriding legacy Doxyfile format flags.
+# The legacy Doxyfile exists because doc configures before docs_sphinx.
 set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
 set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
 if(EXISTS "${_LEGACY_DOXYFILE}")
@@ -114,21 +90,11 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "GENERATE_XML = YES\n"
     "XML_OUTPUT = xml\n"
     "XML_PROGRAMLISTING = NO\n"
-    # Flat XML output — breathe reads index.xml then expects sibling files.
-    # Legacy Doxyfile has CREATE_SUBDIRS=YES for content-addressed HTML URLs
-    # (d0/de1/group__core.html); we override here so breathe finds files
-    # without traversing the subdir tree.
+    # Force flat XML output for Breathe compatibility (disables CREATE_SUBDIRS).
     "CREATE_SUBDIRS = NO\n"
-    # Exclude Objective-C headers. breathe 4.36 crashes with `KeyError: 'protocol'`
-    # on any Doxygen XML compound with kind="protocol". The only such header in
-    # opencv main is modules/videoio/include/opencv2/videoio/cap_ios.h. The
-    # legacy Doxygen HTML build still covers it via the navbar's external_links.
+    # Exclude Objective-C headers to prevent Breathe crashes down the line.
     "EXCLUDE_PATTERNS += cap_ios.h\n"
-    # Disable all graph/diagram generation. Doxygen emits <graph>/<dot> elements
-    # in XML for collaboration / inheritance / include graphs; breathe forwards
-    # them as `graphviz` docutils nodes, which require the sphinx.ext.graphviz
-    # extension to render. We don't load it, so these crash the HTML writer.
-    # Legacy Doxygen HTML still has the graphs.
+    # Disable graph generation as we don't load sphinx.ext.graphviz.
     "CLASS_GRAPH = NO\n"
     "COLLABORATION_GRAPH = NO\n"
     "GROUP_GRAPHS = NO\n"
@@ -138,9 +104,7 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)
-    # sphinx-xml: regenerates Doxygen XML. `sphinx` depends on it (see
-    # add_dependencies below) so a fresh `--target sphinx` always sees
-    # current XML. Run manually: cmake --build <build> --target sphinx-xml
+    # sphinx-xml target regenerates Doxygen XML; runs automatically with `sphinx`.
     add_custom_target(sphinx-xml
       COMMAND ${CMAKE_COMMAND} -E make_directory ${_DOXYGEN_XML_DIR}
       COMMAND ${DOXYGEN_EXE} ${_SPHINX_DOXYFILE}
@@ -152,20 +116,14 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     message(STATUS "docs_sphinx: doxygen not found; `sphinx-xml` disabled")
   endif()
 
-  # API stubs are generated by conf.py at sphinx-build time, not here. We need
-  # the Doxygen XML to walk the @defgroup hierarchy via <innergroup> elements;
-  # that hierarchy isn't available at CMake configure time (sphinx-xml runs
-  # later). Doing it in Python at sphinx-build time also keeps the CMake side
-  # minimal — Doxyfile-xml + the sphinx-xml target are all the build system
-  # needs to know about. See conf.py's `_generate_api_stubs()`.
+  # API stubs generation relies on parsing Doxygen XML. 
+  # This is deferred to sphinx-build logic within conf.py.
 else()
   message(STATUS "docs_sphinx: legacy Doxyfile not present at ${_LEGACY_DOXYFILE}; "
                  "`sphinx-xml` disabled (re-run cmake after doc/ subdir configures)")
 endif()
 
-# Forward staging info to conf.py via env. OPENCV_CONTRIB_MODULES is NOT
-# forwarded — conf.py's default list wins unless the caller sets it in their
-# shell env (OPENCV_CONTRIB_MODULES=ml cmake --build ...) to override per-build.
+# Pass staging options via env. Override CONTRIB_MODULES at your shell manually.
 set(_SPHINX_ENV
   "OPENCV_SPHINX_INPUT_ROOT=${_SPHINX_INPUT_ROOT}"
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
