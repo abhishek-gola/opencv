@@ -539,6 +539,7 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        "brief":       _itertext(ev.find("briefdescription")),
                     })
             sections.setdefault(section_title, []).append({
                 "id":          md.get("id", ""),
@@ -934,6 +935,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        "brief":       _itertext(ev.find("briefdescription")),
                     })
             items.append({
                 "id":          md.get("id", ""),
@@ -1171,11 +1173,6 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
     invalidates this cache."""
     import xml.etree.ElementTree as _ET
     import os as _osmod, shutil as _shutil
-    src_index = xml_dir / "index.xml"
-    dst_index = out_dir / "index.xml"
-    if (src_index.is_file() and dst_index.is_file()
-            and dst_index.stat().st_mtime >= src_index.stat().st_mtime):
-        return
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Mirror every file from xml_dir into out_dir as a symlink. Cleaning
@@ -1301,20 +1298,38 @@ def _build_ns_group_map(all_refids: list[str],
             if ns_cd is None:
                 continue
             ns_name = (ns_cd.findtext("compoundname") or "").strip()
-            if any(p in ns_name.split("::") for p in ("detail", "internal", "impl")):
+            if not (ns_cd.findall("sectiondef") or
+                    ns_cd.findall("innerclass") or
+                    ns_cd.findall("innernamespace")):
                 continue
             ns_to_groups.setdefault(ns_name, set()).add(cname)
     return ns_to_groups
 
 
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
-                          xml_dir: pathlib.Path) -> tuple[str, str]:
+                          xml_dir: pathlib.Path,
+                          ns_group_map: dict | None = None,
+                          group_info: dict | None = None) -> tuple[str, str]:
     """Write api/namespace_<slug>.md for one namespace. Returns (anchor, fname)."""
     import xml.etree.ElementTree as _ET
     slug = ns["name"].replace("::", "__")
     anchor = f"api_ns_{slug}"
     fname = f"namespace_{slug}.md"
     lines = [f"# {ns['name']} namespace {{#{anchor}}}", ""]
+    if ns_group_map and group_info:
+        crumbs: list[str] = []
+        for grp in sorted(ns_group_map.get(ns["name"], set())):
+            chain: list[str] = []
+            cur: str | None = grp
+            while cur and cur in group_info:
+                chain.append(cur)
+                cur = group_info[cur]["parent"]
+            chain.reverse()
+            parts = [f"[{group_info[g]['title']}]({g}.md)" for g in chain]
+            if parts:
+                crumbs.append(" » ".join(parts))
+        if crumbs:
+            lines += [" | ".join(crumbs), ""]
     if ns["brief"]:
         lines += [ns["brief"], ""]
 
@@ -1347,6 +1362,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                                 enum_values.append({
                                     "name":        (ev.findtext("name") or "").strip(),
                                     "initializer": (ev.findtext("initializer") or "").strip(),
+                                    "brief":       _itertext(ev.find("briefdescription")),
                                 })
                         ns_sections.setdefault(section_title, []).append({
                             "id":          md.get("id", ""),
@@ -1365,8 +1381,42 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         except _ET.ParseError:
             pass
 
-    # Namespace XML lacks <innerclass> in Doxygen 1.12; glob by refid prefix.
+    # Sub-namespaces: read <innernamespace> directly from the namespace XML.
     ns_prefix = ns["name"] + "::"
+    innernamespaces = []
+    if ns_xml_path and ns_xml_path.is_file():
+        try:
+            cd_ns2 = _ET.parse(ns_xml_path).getroot().find("compounddef")
+            if cd_ns2 is not None:
+                for inn in cd_ns2.findall("innernamespace"):
+                    iname = (inn.text or "").strip()
+                    irefid = inn.get("refid", "")
+                    if iname:
+                        innernamespaces.append((iname, irefid))
+        except _ET.ParseError:
+            pass
+    def _ns_has_content(refid: str) -> bool:
+        f = xml_dir / f"{refid}.xml"
+        if not f.is_file():
+            return True  # can't check → keep
+        try:
+            cd3 = _ET.parse(f).getroot().find("compounddef")
+            return cd3 is not None and bool(
+                cd3.findall("sectiondef") or
+                cd3.findall("innerclass") or
+                cd3.findall("innernamespace"))
+        except _ET.ParseError:
+            return True
+    nonempty_ns = [(n, r) for n, r in innernamespaces if _ns_has_content(r)]
+    if nonempty_ns:
+        lines += ["## Namespaces", "", "| Namespace |", "|---|"]
+        for iname, irefid in sorted(nonempty_ns, key=lambda x: x[0].lower()):
+            short = iname[len(ns_prefix):] if iname.startswith(ns_prefix) else iname
+            islug = iname.replace("::", "__")
+            lines.append(f"| [namespace {short}](namespace_{islug}.md) |")
+        lines.append("")
+
+    # Namespace XML lacks <innerclass> in Doxygen 1.12; glob by refid prefix.
     refid_prefix = ns["name"].replace("::", "_1_1") + "_1_1"
     innerclasses = []
     for kind in ("struct", "class"):
@@ -1386,7 +1436,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines += ["## Classes", "", "| Name |", "|---|"]
         for ic_refid, ic_name, ic_kind, ic_brief in innerclasses:
             page = _class_page_name(ic_refid)
-            short_name = ic_name[len(ns_prefix):]  # strip namespace prefix for display
+            short_name = ic_name[len(ns_prefix):]
             lines.append(f"| [`{ic_kind} {short_name}`]({page}.md) |")
         lines.append("")
 
@@ -1466,9 +1516,12 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                         lines += [_md_escape_cell(m["brief"]), ""]
                     vals = m.get("enum_values") or []
                     if vals:
-                        lines += ["| Enumerator | |", "|---|---|"]
+                        has_desc = any(v.get("brief") for v in vals)
+                        if has_desc:
+                            lines += ["| Enumerator | Description |", "|---|---|"]
+                        else:
+                            lines += ["| Enumerator |", "|---|"]
                         for v in vals:
-                            # enum class: values scoped under type; regular enum: namespace scope
                             scope = qualified if m.get("strong") else ns["name"]
                             cpp_key = f"{scope}::{v['name']}"
                             py_entries = _PY_SIGNATURES.get(cpp_key, [])
@@ -1476,7 +1529,11 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             cell = f"`{v['name']}`"
                             if py_name:
                                 cell += f"<br>Python: `{py_name}`"
-                            lines.append(f"| {cell} | |")
+                            if has_desc:
+                                desc = _md_escape_cell(v.get("brief") or "")
+                                lines.append(f"| {cell} | {desc} |")
+                            else:
+                                lines.append(f"| {cell} |")
                         lines.append("")
             continue
 
@@ -1503,7 +1560,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
         lines.append("")
         for spec, dname in rendered:
-            short = spec.split("::")[-1].split("(")[0]
+            short = spec.split("(")[0].split("::")[-1]
             suffix = "()" if dname == "doxygenfunction" else ""
             lines += [
                 f"### {short}{suffix}",
@@ -1582,19 +1639,6 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         return
     if not xml_dir.is_dir():
         return  # No XML yet (sphinx-xml not run); degrade silently.
-    src_index = xml_dir / "index.xml"
-    root_md = out_dir / "api_root.markdown"
-    if (src_index.is_file() and root_md.is_file()
-            and root_md.stat().st_mtime >= src_index.stat().st_mtime):
-        # Cache hit: stubs are current. Just reseed the refid → docname
-        # map for every existing per-class page so cross-refs still work.
-        for stub in out_dir.iterdir():
-            n = stub.name
-            if n.endswith(".md") and (n.startswith("class")
-                                      or n.startswith("struct")):
-                refid = n[:-3]
-                _ANCHOR_TO_DOC[refid] = f"api/{refid}"
-        return
     out_dir.mkdir(parents=True, exist_ok=True)
     global _stub_written
     _stub_written = set()
@@ -1617,10 +1661,18 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         all_nodes = _collect_all_nodes(tree)
         all_refids = ["group__" + n.replace("_", "__") for n in all_nodes]
         ns_group_map = _build_ns_group_map(all_refids, _API_XML_DIR)
+        # Flatten the group tree into {name: {title, parent}} for breadcrumbs.
+        group_info: dict[str, dict] = {}
+        def _flatten(node: dict, parent: str | None) -> None:
+            group_info[node["name"]] = {"title": node["title"], "parent": parent}
+            for child in node.get("children", []):
+                _flatten(child, node["name"])
+        _flatten(tree, None)
         ns_map: dict[str, list] = {}
         for group_name in all_nodes:
             for ns in _namespaces_for_group(group_name, _API_XML_DIR, ns_group_map):
-                anchor, _ = _write_namespace_stub(ns, out_dir, _API_XML_DIR)
+                anchor, _ = _write_namespace_stub(ns, out_dir, _API_XML_DIR,
+                                                  ns_group_map, group_info)
                 ns_map.setdefault(group_name, []).append((ns["name"], anchor))
         _write_api_stub(tree, out_dir, classes_seen, ns_map)
     # Per-class pages (one per unique refid across all groups). We also
@@ -1633,7 +1685,6 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         _ANCHOR_TO_DOC[cls["refid"]] = f"api/{_class_page_name(cls['refid'])}"
     # (out_dir / "api_root.markdown").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
     _stub_write(out_dir / "api_root.markdown", "\n".join(root_lines) + "\n")
-    # Remove stale files from removed modules.
     for _p in list(out_dir.iterdir()):
         if _p not in _stub_written:
             _p.unlink(missing_ok=True)

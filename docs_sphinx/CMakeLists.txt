@@ -112,6 +112,23 @@ endif()
 # ---------------------------------------------------------------------------
 set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
 set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
+
+# Modules to process with Doxygen — must match OPENCV_API_MODULES used at
+# sphinx-build time. Default "core" matches conf.py's OPENCV_API_MODULES default.
+# Override: cmake -DSPHINX_API_MODULES="core;photo;imgproc;objdetect;3d"
+if(NOT DEFINED SPHINX_API_MODULES)
+  set(SPHINX_API_MODULES "core")
+endif()
+set(_doxy_input "")
+foreach(_m ${SPHINX_API_MODULES})
+  foreach(_base "${CMAKE_SOURCE_DIR}/modules" "${OPENCV_EXTRA_MODULES_PATH}")
+    if(EXISTS "${_base}/${_m}/include")
+      string(APPEND _doxy_input " ${_base}/${_m}/include")
+      break()
+    endif()
+  endforeach()
+endforeach()
+
 if(EXISTS "${_LEGACY_DOXYFILE}")
   set(_SPHINX_DOXYFILE "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile-xml")
   file(WRITE "${_SPHINX_DOXYFILE}"
@@ -121,33 +138,23 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "GENERATE_XML = YES\n"
     "XML_OUTPUT = xml\n"
     "XML_PROGRAMLISTING = NO\n"
-    # Flat XML output — breathe reads index.xml then expects sibling files.
-    # Legacy Doxyfile has CREATE_SUBDIRS=YES for content-addressed HTML URLs
-    # (d0/de1/group__core.html); we override here so breathe finds files
-    # without traversing the subdir tree.
     "CREATE_SUBDIRS = NO\n"
-    # Exclude Objective-C headers. breathe 4.36 crashes with `KeyError: 'protocol'`
-    # on any Doxygen XML compound with kind="protocol". The only such header in
-    # opencv main is modules/videoio/include/opencv2/videoio/cap_ios.h. The
-    # legacy Doxygen HTML build still covers it via the navbar's external_links.
     "EXCLUDE_PATTERNS += cap_ios.h\n"
-    # Disable all graph/diagram generation. Doxygen emits <graph>/<dot> elements
-    # in XML for collaboration / inheritance / include graphs; breathe forwards
-    # them as `graphviz` docutils nodes, which require the sphinx.ext.graphviz
-    # extension to render. We don't load it, so these crash the HTML writer.
-    # Legacy Doxygen HTML still has the graphs.
     "CLASS_GRAPH = NO\n"
     "COLLABORATION_GRAPH = NO\n"
     "GROUP_GRAPHS = NO\n"
     "INCLUDE_GRAPH = NO\n"
     "INCLUDED_BY_GRAPH = NO\n"
     "DIRECTORY_GRAPH = NO\n"
+    "INPUT =${_doxy_input}\n"
+    "RECURSIVE = YES\n"
+    # Remove cv::traits::* so template structs (Depth, Type, SafeType, SafeFmt) are documented.
+    "EXCLUDE_SYMBOLS = cv::DataType<*> int void CV__* T __CV* cv::gapi::detail*\n"
+    # Expand CV_CREATE_MEMBER_CHECK to nothing so it doesn't crash the Doxygen C++ parser.
+    "PREDEFINED += CV_CREATE_MEMBER_CHECK(x)=\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)
-    # sphinx-xml: regenerates Doxygen XML. `sphinx` depends on it (see
-    # add_dependencies below) so a fresh `--target sphinx` always sees
-    # current XML. Run manually: cmake --build <build> --target sphinx-xml
     add_custom_target(sphinx-xml
       COMMAND ${CMAKE_COMMAND} -E make_directory ${_DOXYGEN_XML_DIR}
       COMMAND ${DOXYGEN_EXE} ${_SPHINX_DOXYFILE}
