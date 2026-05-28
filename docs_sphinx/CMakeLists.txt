@@ -140,7 +140,7 @@ set(_SPHINX_ENV
 if(NOT SPHINX_JOBS)
   set(SPHINX_JOBS "auto")
 endif()
-
+set(_SPHINX_WARNINGS "${CMAKE_CURRENT_BINARY_DIR}/sphinx-warnings.log")
 add_custom_target(sphinx
   COMMAND ${CMAKE_COMMAND} -E make_directory ${_SPHINX_OUTDIR}
   COMMAND ${CMAKE_COMMAND} -E env ${_SPHINX_ENV}

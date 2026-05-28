@@ -549,3 +549,130 @@ img.opencv-coll-graph {
     font-size: inherit !important;
     font-weight: inherit !important;
 }
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * API reference summary tables → vertical card list
+ *
+ * The MyST `attrs_block` extension attaches `class="api-reference-table"` to
+ * just the generated API summary tables (Classes / Functions / Typedefs /
+ * Variables / Macros — emitted by `_write_api_stub`, `_write_class_stub`,
+ * `_write_namespace_stub` in conf.py). Hand-written tutorial markdown
+ * tables and any other utility tables on the site are NOT affected —
+ * every rule below is gated on `table.api-reference-table`.
+ *
+ * Layout: each <tr> becomes a flat, borderless block item. The column header row
+ * is hidden. The first <td> is the item title (with blue link color for `cv::*`
+ * references); remaining <td>s wrap directly beneath it as supporting text.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* Reset the table grid — we re-lay everything as blocks. */
+table.api-reference-table {
+    display: block;
+    width: 100%;
+    border: none;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 0.6rem 0 1.2rem;
+}
+
+/* Column headers carry no per-item info — each block is self-describing. */
+table.api-reference-table thead {
+    display: none;
+}
+
+table.api-reference-table tbody {
+    display: block;
+}
+
+/* Each row is a clean, flat text block with no surrounding boxes or borders */
+table.api-reference-table tbody tr {
+    display: block;
+    margin-bottom: 1.2rem;  /* Increased spacing between items since borders are gone */
+    padding: 0.25rem 0;     /* Removed thick internal card padding */
+    border: none;           /* Removed the boundary outline */
+    background: transparent; /* Flat layout on the main page canvas */
+}
+
+/* Cells stack vertically inside the block container. */
+table.api-reference-table tbody tr td {
+    display: block;
+    border: none !important;
+    padding: 0;
+    background: transparent;
+}
+
+/* Zero out paragraph margins to maintain tight vertical hierarchy */
+table.api-reference-table tbody tr td > p {
+    margin: 0;
+}
+
+/* Hide an empty description cell entirely — no phantom gaps below the title */
+table.api-reference-table tbody tr td:not(:first-child):empty,
+table.api-reference-table tbody tr td:not(:first-child):has(> p:empty:only-child) {
+    display: none;
+}
+
+/* First cell = Item title (class/type/function name): larger, bolder. */
+table.api-reference-table tbody tr td:first-child {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+    line-height: 1.35;
+}
+
+/* Blue accent for `cv::*` and other API links inside the title. */
+table.api-reference-table tbody tr td:first-child a {
+    color: var(--pst-color-link, #0969da);
+    text-decoration: none;
+}
+table.api-reference-table tbody tr td:first-child a:hover {
+    text-decoration: underline;
+}
+
+/* Strip the default <code> pill so `class cv::Mat` reads as flowing title text. */
+table.api-reference-table tbody tr td:first-child code {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+}
+
+/* Subsequent cells = supporting text (return type / description), muted. */
+table.api-reference-table tbody tr td:not(:first-child) {
+    color: var(--pst-color-text-muted, #57606a);
+    font-size: 0.95rem;
+    line-height: 1.5;
+    margin-top: 0.15rem;
+}
+
+/* Keep inline description `code` elements legible */
+table.api-reference-table tbody tr td:not(:first-child) code {
+    color: var(--pst-color-text, #24292f);
+    background: var(--pst-color-surface, transparent);
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    font-size: 0.88em;
+}
+
+/* Dark theme overrides — ensures flat backgrounds and proper text contrasts */
+html[data-theme="dark"] table.api-reference-table tbody tr {
+    background: transparent;
+    border: none;
+}
+html[data-theme="dark"] table.api-reference-table tbody tr td:first-child a {
+    color: #58a6ff;
+}
+html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) {
+    color: #8b949e;
+}
+html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) code {
+    color: #c9d1d9;
+    background: #2d333b;
+}
+
+/* Turn off horizontal scroll wrappers for card-list tables */
+.table-wrapper:has(> table.api-reference-table) {
+    overflow: visible;
+}

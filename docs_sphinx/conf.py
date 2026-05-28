@@ -599,11 +599,15 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     # `_generate_api_stubs` emits (one .md per refid, deduped across groups).
     if node["innerclasses"]:
         lines += ["## Classes", "",
+                  "{.api-reference-table}",
                   "| Name | Description |", "|---|---|"]
         for c in node["innerclasses"]:
             classes_seen.setdefault(c["refid"], c)
             page = _class_page_name(c["refid"])
-            link = f"[`{c['kind']} {c['name']}`]({page}.md)"
+            # The class/struct keyword is plain prose; only the qualified
+            # name is the clickable link (matches the user-facing convention
+            # of treating the C++ keyword as a type label, not a hyperlink).
+            link = f"{c['kind']} [`{c['name']}`]({page}.md)"
             lines.append(f"| {link} | {_md_escape_cell(c['brief'])} |")
         lines.append("")
 
@@ -651,7 +655,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["| Return | Name | Description |", "|---|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
                 ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
@@ -659,7 +664,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 lines.append(
                     f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title in ("Typedefs", "Variables"):
-            lines += ["| Type | Name | Description |", "|---|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
                 t = _md_escape_cell(m["type"]) or "&nbsp;"
                 name_link = _member_anchor_link(m, m["name"])
@@ -679,7 +685,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 lines.append("")
             continue   # already appended trailing blank
         else:  # Macros
-            lines += ["| Name | Description |", "|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Name | Description |", "|---|---|"]
             for m in items:
                 name_link = _member_anchor_link(m, m["name"])
                 lines.append(f"| {name_link} | {_md_escape_cell(m['brief'])} |")
@@ -1031,7 +1038,8 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         non_enum_items = [m for m in items if m["kind"] != "enum"]
         enum_items = [m for m in items if m["kind"] == "enum"]
         if non_enum_items:
-            lines += ["| Return | Name | Description |", "|---|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
                 ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 if m["static"]:
@@ -1400,11 +1408,14 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
             except _ET.ParseError:
                 continue
     if innerclasses:
-        lines += ["## Classes", "", "| Name |", "|---|"]
+        lines += ["## Classes", "",
+                  "{.api-reference-table}",
+                  "| Name |", "|---|"]
         for ic_refid, ic_name, ic_kind, ic_brief in innerclasses:
             page = _class_page_name(ic_refid)
             short_name = ic_name[len(ns_prefix):]  # strip namespace prefix for display
-            lines.append(f"| [`{ic_kind} {short_name}`]({page}.md) |")
+            # Keyword `class`/`struct` as plain text; only the name is linked.
+            lines.append(f"| {ic_kind} [`{short_name}`]({page}.md) |")
         lines.append("")
 
     # Member summary tables.
@@ -1415,13 +1426,15 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["| Return | Name | Description |", "|---|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
                 ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 lines.append(f"| `{ret}` | [`{label}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         elif section_title in ("Typedefs", "Variables"):
-            lines += ["| Type | Name | Description |", "|---|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
                 t = _md_escape_cell(m["type"]) or "&nbsp;"
                 lines.append(f"| `{t}` | [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
@@ -1436,7 +1449,8 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.append("")
             continue
         else:  # Macros
-            lines += ["| Name | Description |", "|---|---|"]
+            lines += ["{.api-reference-table}",
+                      "| Name | Description |", "|---|---|"]
             for m in items:
                 lines.append(f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         lines.append("")
@@ -1570,13 +1584,18 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
             and root_md.stat().st_mtime >= src_index.stat().st_mtime):
         # Cache hit: stubs are current. Just reseed the refid → docname
         # map for every existing per-class page so cross-refs still work.
+        has_ns_stubs = False
         for stub in out_dir.iterdir():
             n = stub.name
             if n.endswith(".md") and (n.startswith("class")
                                       or n.startswith("struct")):
                 refid = n[:-3]
                 _ANCHOR_TO_DOC[refid] = f"api/{refid}"
-        return
+            elif n.endswith(".md") and n.startswith("namespace_"):
+                has_ns_stubs = True
+                if has_ns_stubs:
+                    return
+
     import shutil
     if out_dir.exists():
         shutil.rmtree(out_dir)
