@@ -571,6 +571,122 @@ html[data-theme="dark"] button.copybtn.success {
     text-align: center;
 }
 
+/* --- Clickable enum synopsis (.opencv-enum-synopsis) -------------------- */
+/* The class-page enum block is emitted by _enum_synopsis_html() as raw HTML
+   that uses the Pygments-cpp span classes (`k` keyword, `n` name, `o`
+   operator, `p` punctuation, …). Wrapping it in `.highlight-cpp .highlight`
+   makes Sphinx's existing code-block CSS (background, padding, monospace)
+   apply automatically — we don't have to re-style the block itself. Only
+   the inner anchors need explicit colouring so the names stand out as links
+   instead of inheriting the dark `.n` (identifier) colour. */
+/* Match the exact hex the body uses for every other link so the enum
+   names sit in the same blue palette as `cv::Mat` / `cv::KeyPoint` text
+   links elsewhere on the page. No underline, just the colour. */
+.opencv-enum-synopsis a.opencv-enum-link {
+    color: #0969da !important;
+    text-decoration: none;
+    border-radius: 2px;
+}
+.opencv-enum-synopsis a.opencv-enum-link:hover {
+    color: #0550ae !important;          /* matches `.bd-content a:hover` */
+}
+html[data-theme="dark"] .opencv-enum-synopsis a.opencv-enum-link {
+    color: #539bf5 !important;          /* matches the dark body-link rule */
+}
+html[data-theme="dark"] .opencv-enum-synopsis a.opencv-enum-link:hover {
+    color: #6cb6ff !important;
+}
+
+/* The Member Enumeration Documentation block has the same synopsis as a
+   plain Pygments code block (no `<a>` wrappers). Paint its identifiers
+   with the same hex so the two sections look identical. */
+section#member-enumeration-documentation .highlight-cpp .n {
+    color: #0969da !important;
+}
+html[data-theme="dark"] section#member-enumeration-documentation .highlight-cpp .n {
+    color: #539bf5 !important;
+}
+
+/* (Legacy) Anchor target hidden in the detail section. Empty inline spans
+   used to live here before the per-row layout below replaced them; kept for
+   pages that still carry the old markup. */
+.opencv-enum-target {
+    scroll-margin-top: 5rem;
+}
+
+/* --- Member Enumeration Documentation: per-value detail list ----------- */
+/* Each enum becomes a heading + a `<dl>` where every value is its own row.
+   This is visually distinct from the code-block synopsis at the top of the
+   page, so navigating from a Public Types link feels like a real jump. Each
+   `<dt>` carries an `id="_CPPv4…E"` anchor so clicks land on the specific
+   value, not just the top of the enum block. */
+.opencv-enum-heading {
+    margin: 1.5rem 0 0.5rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--pst-color-text-base);
+    scroll-margin-top: 5rem;        /* keep below the sticky navbar */
+}
+.opencv-enum-heading .opencv-enum-name {
+    color: #0969da;
+    font-family: var(--pst-font-family-monospace);
+}
+html[data-theme="dark"] .opencv-enum-heading .opencv-enum-name {
+    color: #539bf5;
+}
+.opencv-enum-detail {
+    margin: 0 0 1.5rem;
+    padding: 0;
+}
+.opencv-enum-detail dt {
+    /* card-style row so each enumerator is visually a clear entry, not just
+       another line of code. */
+    padding: 0.5rem 0.8rem;
+    margin-top: 0.5rem;
+    background: var(--pst-color-surface);
+    border-left: 3px solid #0969da;
+    border-radius: 0 4px 4px 0;
+    font-family: var(--pst-font-family-monospace);
+    font-size: 0.9rem;
+    /* scroll-margin-top so a URL-hash landing on this row sits below the
+       sticky navbar instead of behind it. */
+    scroll-margin-top: 5rem;
+}
+html[data-theme="dark"] .opencv-enum-detail dt {
+    border-left-color: #539bf5;
+}
+.opencv-enum-detail dt .opencv-enum-name {
+    color: #0969da;
+}
+html[data-theme="dark"] .opencv-enum-detail dt .opencv-enum-name {
+    color: #539bf5;
+}
+.opencv-enum-detail dt .opencv-enum-init {
+    color: var(--pst-color-text-muted);
+    font-weight: normal;
+}
+.opencv-enum-detail dd {
+    margin: 0.25rem 0 0 1.5rem;
+    color: var(--pst-color-text-muted);
+}
+/* Subtle target highlight: when the URL hash matches a row, fade it in so
+   the user sees exactly where they landed. */
+.opencv-enum-detail dt:target {
+    background: color-mix(in srgb, var(--pst-color-link) 12%, transparent);
+    transition: background 0.6s ease-out;
+}
+/* The inner `<span class="n">` carries Pygments' identifier colour; the
+   anchor's colour above should win, but be explicit to defeat any theme
+   override on `.highlight .n`. */
+.opencv-enum-synopsis a.opencv-enum-link > span.n {
+    color: inherit !important;
+}
+/* Soft scroll-anchor padding so when a shared URL hash lands here, the line
+   isn't flush against the site header — gives a bit of breathing room. */
+.opencv-enum-synopsis a.opencv-enum-link {
+    scroll-margin-top: 4rem;
+}
+
 /* --- "On this page" TOC: C++ domain entries ---------------------------- */
 /* Breathe's per-member directives register C++ domain objects, so their
    TOC entries arrive wrapped in <code class="literal"> pills — unlike the

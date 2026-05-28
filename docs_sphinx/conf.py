@@ -958,20 +958,47 @@ _MEMBER_DETAIL_SECTION = {
 }
 
 
-def _enum_synopsis_lines(m: dict) -> list[str]:
-    """Render an enum as a Doxygen-style code synopsis: one `enum {…}` block
-    listing every value with its initializer. Used in place of breathe's
-    `{doxygenenum}` directive, which emits a discrete signature box per
-    enumerator (one box for the enum + one per value) — that's the layout
-    in the user's "before" screenshot. Doxygen's group page renders the
-    enum as a single code-style box; this helper reproduces that.
+def _sphinx_cpp_v4_id(qualified_name: str) -> str:
+    """Build the Sphinx C++ domain v4 anchor id for a fully-qualified C++ name.
 
-    Value-name qualification follows Doxygen:
-      * Scoped (`enum class`) → values prefixed with the enum's own
-        qualified name.
-      * Unscoped → values prefixed with the enum's *parent* scope
-        (namespace or enclosing class), so they look like the C++ name
-        you'd actually write in code."""
+    Format: `_CPPv4` + `N` + each scope segment encoded as `<len><name>` + `E`.
+    Examples:
+      * `cv::_InputArray::KindFlag` → `_CPPv4N2cv11_InputArray8KindFlagE`
+      * `cv::_InputArray::KindFlag::KIND_SHIFT`
+        → `_CPPv4N2cv11_InputArray8KindFlag10KIND_SHIFTE`
+
+    Why: when the synopsis is rendered as raw HTML below, each enum /
+    enumerator name needs an `id=` so links to `#_CPPv4…` snap there. We
+    compute it ourselves instead of asking Breathe to emit a (now hidden)
+    `{doxygenenum}` directive — that would bloat the page and create
+    duplicate ids. The mangling matches Sphinx's own so URLs follow the
+    same convention as every other C++ symbol on the site."""
+    parts = qualified_name.split("::")
+    mangled = "".join(f"{len(p)}{p}" for p in parts)
+    return f"_CPPv4N{mangled}E"
+
+
+def _enum_synopsis_html(m: dict, strip_scope: str = "") -> list[str]:
+    """Render an enum as a code-styled HTML block with clickable enum and
+    enumerator names. Used on class pages in place of `_enum_synopsis_lines`
+    (the plain Markdown code-fence version) so the names become real `<a>`
+    anchors with stable URL hashes.
+
+    Strategy:
+      * Span classes (`k`, `n`, `o`, `p`, …) mirror Pygments' cpp-lexer output
+        so the existing code-block CSS (`.highlight-cpp`, `.highlight pre`)
+        gives this block the same colours and typography as a real
+        ` ```cpp ` fence — no special chrome to maintain.
+      * Each name is wrapped in `<a class="opencv-enum-link" id="<cpp v4 id>"
+        href="#<cpp v4 id>">…</a>`. The id is both the anchor target and the
+        click target, so URL hash updates correctly on click and a shared
+        link (`…#_CPPv4N2cv11_InputArray8KindFlagE`) snaps the browser to
+        the synopsis.
+      * `strip_scope` removes the redundant `<class>::` prefix from displayed
+        names — but it never changes the *id* we mangle (the id always uses
+        the FULL qualified name, so cross-references stay stable).
+    """
+    import html as _html
     qualified = m.get("qualified") or m["name"]
     is_strong = bool(m.get("strong"))
     keyword = "enum class" if is_strong else "enum"
@@ -981,7 +1008,90 @@ def _enum_synopsis_lines(m: dict) -> list[str]:
         prefix = qualified.rsplit("::", 1)[0] + "::"
     else:
         prefix = ""
-    out = [f"{keyword} {qualified} {{"]
+    # Displayed names lose the redundant scope; ids keep it.
+    display_enum = qualified
+    if strip_scope and qualified.startswith(strip_scope + "::"):
+        display_enum = qualified[len(strip_scope) + 2:]
+    display_prefix = prefix
+    if strip_scope and prefix.startswith(strip_scope + "::"):
+        display_prefix = prefix[len(strip_scope) + 2:]
+
+    enum_id = _sphinx_cpp_v4_id(qualified)
+    out = [
+        '<div class="highlight-cpp notranslate opencv-enum-synopsis">'
+        '<div class="highlight"><pre>'
+    ]
+    # IMPORTANT — the synopsis carries the click *sources* (`href=…`) but NOT
+    # the anchor *targets* (no `id=…`). The actual `id="_CPPv4…"` anchors are
+    # emitted by the Member Enumeration Documentation loop further down, so a
+    # click from here scrolls *to* the detail block rather than self-anchoring.
+    enum_link = (
+        f'<a class="opencv-enum-link" href="#{enum_id}">'
+        f'<span class="n">{_html.escape(display_enum)}</span></a>'
+    )
+    out.append(
+        f'<span class="k">{_html.escape(keyword)}</span> '
+        f'{enum_link} <span class="p">{{</span>'
+    )
+    vals = m.get("enum_values", []) or []
+    for i, v in enumerate(vals):
+        comma = '<span class="p">,</span>' if i < len(vals) - 1 else ""
+        val_id = _sphinx_cpp_v4_id(f"{qualified}::{v['name']}")
+        val_link = (
+            f'<a class="opencv-enum-link" href="#{val_id}">'
+            f'<span class="n">{_html.escape(v["name"])}</span></a>'
+        )
+        init_html = (" " + _html.escape(v["initializer"])) if v["initializer"] else ""
+        prefix_html = ""
+        if display_prefix:
+            stripped = display_prefix.rstrip(":")
+            prefix_html = (
+                f'<span class="n">{_html.escape(stripped)}</span>'
+                f'<span class="o">::</span>'
+            )
+        out.append(f"    {prefix_html}{val_link}{init_html}{comma}")
+    out.append('<span class="p">}</span></pre></div></div>')
+    return out
+
+
+def _enum_synopsis_lines(m: dict, strip_scope: str = "") -> list[str]:
+    """Render an enum as a Doxygen-style code synopsis: one `enum {…}` block
+    listing every value with its initializer. Used in place of breathe's
+    `{doxygenenum}` directive (which emits a discrete signature box per
+    enumerator). Doxygen's class/group page renders the enum as a single
+    code-style box; this helper reproduces that.
+
+    Value-name qualification follows Doxygen:
+      * Scoped (`enum class`) → values prefixed with the enum's own
+        qualified name.
+      * Unscoped → values prefixed with the enum's *parent* scope
+        (namespace or enclosing class), so they look like the C++ name
+        you'd actually write in code.
+
+    `strip_scope` lets the caller drop a redundant qualifier when the
+    reader is already inside that scope. On the `cv::_InputArray` class
+    page, passing `strip_scope="cv::_InputArray"` makes the synopsis read
+    `enum KindFlag { KIND_SHIFT = 16, … }` instead of the noisy
+    `enum cv::_InputArray::KindFlag { cv::_InputArray::KIND_SHIFT = 16, … }`.
+    """
+    qualified = m.get("qualified") or m["name"]
+    is_strong = bool(m.get("strong"))
+    keyword = "enum class" if is_strong else "enum"
+    if is_strong:
+        prefix = qualified + "::"
+    elif "::" in qualified:
+        prefix = qualified.rsplit("::", 1)[0] + "::"
+    else:
+        prefix = ""
+    # Drop the leading `<strip_scope>::` from both the enum's own label and
+    # the per-value prefix when the caller has identified that the page is
+    # already inside that scope.
+    enum_label = qualified
+    if strip_scope and qualified.startswith(strip_scope + "::"):
+        enum_label = qualified[len(strip_scope) + 2:]
+    if strip_scope and prefix.startswith(strip_scope + "::"):
+        prefix = prefix[len(strip_scope) + 2:]
+    out = [f"{keyword} {enum_label} {{"]
     vals = m.get("enum_values", []) or []
     for i, v in enumerate(vals):
         comma = "," if i < len(vals) - 1 else ""
@@ -1294,6 +1404,10 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        # Per-value brief description (used in the Member
+                        # Enumeration Documentation list so each enumerator
+                        # row carries its own description, like docs.opencv.org).
+                        "brief":       _itertext(ev.find("briefdescription")).strip(),
                     })
             items.append({
                 "id":          md.get("id", ""),
@@ -1547,9 +1661,15 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             if m["brief"]:
                 lines.append(_md_escape_cell(m["brief"]))
                 lines.append("")
-            lines.append("```cpp")
-            lines.extend(_enum_synopsis_lines(m))
-            lines.append("```")
+            # Raw HTML synopsis (NOT a markdown code fence): emits a code-styled
+            # `<div class="highlight-cpp">…<pre>` block where each enum and
+            # enumerator name is wrapped in `<a class="opencv-enum-link"
+            # id="_CPPv4…" href="#_CPPv4…">…</a>`. Same id on the anchor and the
+            # href, so clicking the name updates the URL hash to the
+            # Sphinx-C++-domain-style id and the page snaps to the synopsis
+            # line. `strip_scope=qualified` drops the redundant `cv::_ClassName::`
+            # prefix from the displayed names; the ids keep the full path.
+            lines.extend(_enum_synopsis_html(m, strip_scope=qualified))
             lines.append("")
 
     # 2) "Detailed Description" section for the class itself.
@@ -1610,18 +1730,47 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines += _emit_member_directive(m, "doxygentypedef", _scoped(m))
 
     if enum_items_all:
-        # Enums render as code-block synopses (matches the group-page
-        # treatment — breathe's `{doxygenenum}` gives the discrete
-        # one-signature-per-value layout the user wanted replaced).
+        # Member Enumeration Documentation: the *destination* the Public Types
+        # synopsis links navigate to. We DON'T repeat the code-block synopsis
+        # here (visually identical to the source the user came from — felt
+        # like clicking went nowhere). Instead each enum becomes a heading +
+        # a definition list where every enumerator is its own row with its
+        # own `id="_CPPv4…"` anchor and (when Doxygen provided one) a brief
+        # description — matching the docs.opencv.org reference layout.
+        import html as _html
         lines += ["## Member Enumeration Documentation", ""]
         for m in enum_items_all:
+            # Keep the legacy MyST anchor (`(<doxygen-refid>)=`) so any older
+            # `@ref` cross-references that point at it still resolve.
             lines.append(f"({m['id']})=")
+            enum_qualified = m.get("qualified") or m["name"]
+            enum_id = _sphinx_cpp_v4_id(enum_qualified)
+            enum_short = enum_qualified.rsplit("::", 1)[-1]
+            # Heading carries the enum-level `_CPPv4N…E` anchor — clicking the
+            # enum name in Public Types lands here.
+            lines.append(
+                f'<h3 class="opencv-enum-heading" id="{enum_id}">'
+                f'enum <span class="opencv-enum-name">{_html.escape(enum_short)}</span></h3>'
+            )
             if m["brief"]:
-                lines.append(_md_escape_cell(m["brief"]))
-                lines.append("")
-            lines.append("```cpp")
-            lines.extend(_enum_synopsis_lines(m))
-            lines.append("```")
+                lines.append(f"<p>{_html.escape(_md_escape_cell(m['brief']))}</p>")
+            # Per-enumerator rows. Each `<dt>` carries the enumerator's own
+            # `_CPPv4N…E` id so clicking a specific value name in Public Types
+            # lands on its own row, not on the top of the enum block.
+            lines.append('<dl class="opencv-enum-detail">')
+            for _v in (m.get("enum_values") or []):
+                val_id = _sphinx_cpp_v4_id(f"{enum_qualified}::{_v['name']}")
+                init = _html.escape(_v["initializer"]) if _v["initializer"] else ""
+                init_html = f' <span class="opencv-enum-init">{init}</span>' if init else ""
+                lines.append(
+                    f'  <dt id="{val_id}">'
+                    f'<span class="opencv-enum-name">{_html.escape(_v["name"])}</span>'
+                    f'{init_html}</dt>'
+                )
+                brief = (_v.get("brief") or "").strip()
+                if brief:
+                    lines.append(f'  <dd>{_html.escape(brief)}</dd>')
+            lines.append('</dl>')
             lines.append("")
 
     # Dedupe functions: a method can appear in multiple sectiondefs (e.g.
