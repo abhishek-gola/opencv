@@ -1184,9 +1184,21 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
     Patching: for each `<member refid>` in a target compound's sectiondef
     whose id targets `group__…`, we open the group XML, find the matching
     `<memberdef id="…">`, and append it into the compound's sectiondef.
-    The original XML on disk is untouched."""
+    The original XML on disk is untouched.
+
+    Freshness guard: skip the whole rebuild if `out_dir/index.xml` is at
+    least as new as `xml_dir/index.xml`. The patcher parses ~1500 compound
+    XMLs on a clean run — rerunning that on every sphinx-build is what
+    made incremental rebuilds feel sluggish. `sphinx-xml` updates the
+    source `xml/` tree's mtimes, so a real Doxygen change always
+    invalidates this cache."""
     import xml.etree.ElementTree as _ET
     import os as _osmod, shutil as _shutil
+    src_index = xml_dir / "index.xml"
+    dst_index = out_dir / "index.xml"
+    if (src_index.is_file() and dst_index.is_file()
+            and dst_index.stat().st_mtime >= src_index.stat().st_mtime):
+        return
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Mirror every file from xml_dir into out_dir as a symlink. Cleaning
@@ -1227,12 +1239,22 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
     #    `class*.xml`/`struct*.xml`/`union*.xml` already carry full
     #    memberdefs for their methods, but they may *also* have
     #    `<member refid>` from @addtogroup tagged methods — patch them too.
+    # Fast pre-filter: most compound XMLs don't reference any group at all;
+    # parsing+walking them is wasted work. A bytes-level substring scan is
+    # ~100x faster than ET.parse and lets us short-circuit those files.
     _SKIP_PREFIXES = ("group", "index")
+    _GROUP_REF_MARKER = b'refid="group__'
     for compound_file in xml_dir.glob("*.xml"):
         if any(compound_file.name.startswith(p) for p in _SKIP_PREFIXES):
             continue
         try:
-            tree = _ET.parse(compound_file)
+            raw = compound_file.read_bytes()
+        except OSError:
+            continue
+        if _GROUP_REF_MARKER not in raw:
+            continue  # no <member refid="group__…"> → nothing to patch
+        try:
+            tree = _ET.ElementTree(_ET.fromstring(raw))
         except _ET.ParseError:
             continue
         root = tree.getroot()
@@ -1541,7 +1563,23 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
     if not modules:
         return
     if not xml_dir.is_dir():
+        return  # No XML yet (sphinx-xml not run); degrade silently.
+    src_index = xml_dir / "index.xml"
+    root_md = out_dir / "api_root.markdown"
+    if (src_index.is_file() and root_md.is_file()
+            and root_md.stat().st_mtime >= src_index.stat().st_mtime):
+        # Cache hit: stubs are current. Just reseed the refid → docname
+        # map for every existing per-class page so cross-refs still work.
+        for stub in out_dir.iterdir():
+            n = stub.name
+            if n.endswith(".md") and (n.startswith("class")
+                                      or n.startswith("struct")):
+                refid = n[:-3]
+                _ANCHOR_TO_DOC[refid] = f"api/{refid}"
         return
+    import shutil
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     global _stub_written
     _stub_written = set()
