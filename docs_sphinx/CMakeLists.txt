@@ -172,14 +172,26 @@ set(_SPHINX_ENV
   "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
 )
 
+# Parallel knob. Sphinx supports `-j auto` (=nproc), `-j N`, or a literal
+# integer; override per-build with -DSPHINX_JOBS=8. `auto` is the sweet spot
+# on developer machines — using nproc workers takes the API-reference build
+# from minutes to seconds. conf.py declares `parallel_read_safe`/
+# `parallel_write_safe`, and breathe ≥ 4.30 is parallel-safe, so this is
+# unconditionally enabled. `--keep-going` keeps the build progressing past
+# non-fatal warnings (we still see them in the log).
+if(NOT SPHINX_JOBS)
+  set(SPHINX_JOBS "auto")
+endif()
+
 add_custom_target(sphinx
   COMMAND ${CMAKE_COMMAND} -E make_directory ${_SPHINX_OUTDIR}
   COMMAND ${CMAKE_COMMAND} -E env ${_SPHINX_ENV}
-          ${SPHINX_BUILD} -c ${_SPHINX_CONFDIR}
+          ${SPHINX_BUILD} -j ${SPHINX_JOBS} --keep-going
+                          -c ${_SPHINX_CONFDIR}
                           ${_SPHINX_INPUT_ROOT}
                           ${_SPHINX_OUTDIR}
   WORKING_DIRECTORY ${_SPHINX_CONFDIR}
-  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR}"
+  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR} (jobs=${SPHINX_JOBS})"
   VERBATIM)
 
 # Ensure breathe sees current XML on every `sphinx` build.
