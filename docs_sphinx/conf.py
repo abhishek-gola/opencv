@@ -141,6 +141,20 @@ _API_XML_DIR = pathlib.Path(
 # at sphinx-build time, mirrors the original XML via symlinks, and only the
 # affected namespace XMLs are rewritten in place.
 _PATCHED_XML_DIR = _API_XML_DIR.parent / "xml_for_sphinx"
+
+# Python enum/constant signatures; built by: cmake --build --target gen_opencv_python_source
+_PY_SIGNATURES: dict = {}
+for _pysigs_candidate in [
+    _API_XML_DIR.parents[2] / "modules/python_bindings_generator/pyopencv_signatures.json",
+    _os.environ.get("OPENCV_PYTHON_SIGNATURES_FILE", ""),
+]:
+    _pysigs_path = pathlib.Path(str(_pysigs_candidate)) if _pysigs_candidate else None
+    if _pysigs_path and _pysigs_path.is_file():
+        import json as _json
+        _PY_SIGNATURES = _json.loads(_pysigs_path.read_text(encoding="utf-8"))
+        break
+del _pysigs_candidate, _pysigs_path
+
 if API_MODULES:
     try:
         import breathe  # noqa: F401
@@ -205,7 +219,12 @@ myst_enable_extensions = [
     "attrs_inline", "attrs_block", "smartquotes",
 ]
 myst_heading_anchors = 4
-suppress_warnings = ["myst.header", "myst.xref_missing", "toc.not_included"]
+suppress_warnings = [
+    "myst.header", "myst.xref_missing", "toc.not_included",
+    "misc.highlighting_failure",
+    "image.not_readable",
+    "cpp.duplicate_declaration",
+]
 
 # -- Doxygen integration -----------------------------------------------------
 # External links in the navbar and unbuilt-module sidebar entries point at
@@ -388,6 +407,27 @@ for _m in CONTRIB_MODULES:
 def _itertext(el) -> str:
     """Flatten an XML element's inner text. None-safe."""
     return "".join(el.itertext()).strip() if el is not None else ""
+
+
+def _type_to_md(type_elem) -> str:
+    """Render <type> XML as markdown; turns <ref> children into links."""
+    if type_elem is None:
+        return ""
+    out = type_elem.text or ""
+    for child in type_elem:
+        if child.tag == "ref":
+            word = (child.text or "").strip()
+            refid = child.get("refid", "")
+            kindref = child.get("kindref", "")
+            if kindref == "compound" and refid in _ANCHOR_TO_DOC:
+                fn = _ANCHOR_TO_DOC[refid].split("/")[-1]
+                out += f"[{word}]({fn}.md)"
+            elif refid:
+                out += f"[{word}](#{refid})"
+            else:
+                out += word
+        out += child.tail or ""
+    return out.strip()
 
 
 # memberdef@kind → display section title. Mirrors Doxygen's group-page order.
@@ -595,7 +635,10 @@ def _function_signature(member: dict) -> str:
     matches against Doxygen's `<param><type>` text). Empty-arg functions get
     `()` — required for breathe to match correctly even for non-overloads."""
     types = ", ".join((t or "").strip() for t in member.get("param_types", []))
-    return f"({types})"
+    sig = f"({types})"
+    if member.get("const"):
+        sig += " const"
+    return sig
 
 
 def _class_page_name(refid: str) -> str:
@@ -1019,8 +1062,12 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
     ctor_dtor_items: list[dict] = []
     func_items: list[dict] = []
     var_items: list[dict] = []
+    _detail_seen: set[str] = set()
     for sd_items in data["sections"].values():
         for m in sd_items:
+            if m["id"] in _detail_seen:
+                continue
+            _detail_seen.add(m["id"])
             if m["kind"] == "typedef":
                 typedef_items.append(m)
             elif m["kind"] == "enum":
@@ -1034,7 +1081,7 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                 var_items.append(m)
 
     def _emit_member_directive(m: dict, directive: str, spec: str) -> list[str]:
-        # MyST anchor label so the summary-table `#refid` link resolves.
+        spec = spec.replace("< ", "<").replace(" >", ">")
         return [
             f"({m['id']})=",
             f"```{{{directive}}} {spec}",
@@ -1286,6 +1333,10 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             continue
                         qualified = (md.findtext("qualifiedname") or "").strip() or \
                                     (md.findtext("name") or "").strip()
+                        # Skip class methods / sub-namespace members inlined via group patching.
+                        _ns_pfx = ns["name"] + "::"
+                        if qualified.startswith(_ns_pfx) and "::" in qualified[len(_ns_pfx):]:
+                            continue
                         def _pt(p) -> str:
                             t = _itertext(p.find("type"))
                             arr = (p.findtext("array") or "").strip()
@@ -1303,6 +1354,8 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             "name":        (md.findtext("name") or "").strip(),
                             "qualified":   qualified,
                             "type":        _itertext(md.find("type")),
+                            "type_elem":   md.find("type"),
+                            "static":      md.get("static") == "yes",
                             "args":        (md.findtext("argsstring") or "").strip(),
                             "param_types": [_pt(p) for p in md.findall("param")],
                             "brief":       _itertext(md.find("briefdescription")),
@@ -1345,16 +1398,23 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["| Return | Name | Description |", "|---|---|---|"]
+            lines += ["| Return | Name |", "|---|---|"]
             for m in items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_md = _type_to_md(m.get("type_elem"))
+                if not ret_md:
+                    ret_md = _md_escape_cell(m["type"]) or "&nbsp;"
+                if m.get("static"):
+                    ret_md = "static " + ret_md
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                lines.append(f"| `{ret}` | [`{label}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
+                lines.append(f"| {ret_md} | [`{label}`](#{m['id']}) |")
         elif section_title in ("Typedefs", "Variables"):
-            lines += ["| Type | Name | Description |", "|---|---|---|"]
             for m in items:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
-                lines.append(f"| `{t}` | [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
+                lines.append("```cpp")
+                lines.append(f"typedef {m['type']} {m['name']}" if section_title == "Typedefs"
+                              else f"{m['type']} {m['name']}")
+                lines.append("```")
+                lines.append("")
+            continue
         elif section_title == "Enumerations":
             for m in items:
                 if m["brief"]:
@@ -1371,8 +1431,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.append(f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         lines.append("")
 
-    # Detailed Description only when namespace has description text.
-    if ns.get("brief") or ns.get("detailed"):
+    if not ns_sections and not innerclasses:
         lines += [
             "## Detailed Description",
             "",
@@ -1380,6 +1439,8 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
             ":project: opencv",
             "```",
         ]
+    elif ns.get("detailed"):
+        lines += ["## Detailed Description", "", ns["detailed"], ""]
 
     # Per-member detail blocks.
     seen_define_names: set[str] = set()
@@ -1387,14 +1448,44 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         items = ns_sections.get(section_title, [])
         if not items:
             continue
+
+        # Enums: heading + declaration + Enumerator table with Python names.
+        if section_title == "Enumerations":
+            enum_items = [m for m in items if "<" not in (m.get("name") or "")]
+            if enum_items:
+                lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
+                lines.append("")
+                for m in enum_items:
+                    qualified = m["qualified"] or m["name"]
+                    keyword = "enum class" if m.get("strong") else "enum"
+                    lines.append(f"({m['id']})=")
+                    lines.append(f"### {m['name']}")
+                    lines.append("")
+                    lines += [f"`{keyword} {qualified}`", ""]
+                    if m.get("brief"):
+                        lines += [_md_escape_cell(m["brief"]), ""]
+                    vals = m.get("enum_values") or []
+                    if vals:
+                        lines += ["| Enumerator | |", "|---|---|"]
+                        for v in vals:
+                            # enum class: values scoped under type; regular enum: namespace scope
+                            scope = qualified if m.get("strong") else ns["name"]
+                            cpp_key = f"{scope}::{v['name']}"
+                            py_entries = _PY_SIGNATURES.get(cpp_key, [])
+                            py_name = py_entries[0]["name"] if py_entries else None
+                            cell = f"`{v['name']}`"
+                            if py_name:
+                                cell += f"<br>Python: `{py_name}`"
+                            lines.append(f"| {cell} | |")
+                        lines.append("")
+            continue
+
         directive = _MEMBER_DIRECTIVE.get(kind_key)
         if not directive:
             continue
         rendered = []
         for m in items:
             if "<" in (m.get("name") or ""):  # skip template specializations
-                continue
-            if m["kind"] == "enum":
                 continue
             qualified = m["qualified"] or m["name"]
             if m["kind"] == "function":
@@ -2339,8 +2430,11 @@ def _silence_breathe_anon_enum_warning():
         def filter(self, record: logging.LogRecord) -> bool:
             msg = record.getMessage()
             return not (
-                "Invalid C++ declaration" in msg
-                and "Expected identifier in nested name" in msg
+                ("Invalid C++ declaration" in msg
+                 and "Expected identifier in nested name" in msg)
+                or
+                ("Duplicate C++ declaration" in msg
+                 and "cpp:None::" in msg)
             )
     # docutils warning messages route through both 'sphinx' and 'docutils'
     # loggers depending on entry point; attach to both for coverage.

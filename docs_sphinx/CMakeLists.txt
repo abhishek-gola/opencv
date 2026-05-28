@@ -178,6 +178,9 @@ set(_SPHINX_ENV
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
   "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
 )
+if(OPENCV_PYTHON_SIGNATURES_FILE)
+  list(APPEND _SPHINX_ENV "OPENCV_PYTHON_SIGNATURES_FILE=${OPENCV_PYTHON_SIGNATURES_FILE}")
+endif()
 
 # Parallel knob. Sphinx supports `-j auto` (=nproc), `-j N`, or a literal
 # integer; override per-build with -DSPHINX_JOBS=8. `auto` is the sweet spot
@@ -204,6 +207,10 @@ add_custom_target(sphinx
 # Ensure breathe sees current XML on every `sphinx` build.
 if(TARGET sphinx-xml)
   add_dependencies(sphinx sphinx-xml)
+endif()
+# Auto-generate Python binding signatures (needed for Python names in enum tables).
+if(TARGET gen_opencv_python_source)
+  add_dependencies(sphinx gen_opencv_python_source)
 endif()
 
 # Clean rebuild: `cmake --build <build> --target sphinx-clean`
