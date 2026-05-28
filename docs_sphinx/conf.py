@@ -1369,13 +1369,26 @@ def _svg_dark_variant(text: str) -> str:
     Order matters: blank the backdrop first, *then* repaint the remaining white
     node fills, so the two `fill="white"` cases don't collide."""
     text = _svg_make_transparent(text)              # backdrop → transparent
-    text = text.replace('fill="white"', 'fill="#1c2128"')   # node box fills → dark slate
-    text = text.replace('fill="#bfbfbf"', 'fill="#373e47"')  # header bar → darker grey
-    text = text.replace('stroke="black"', 'stroke="#c9d1d9"')  # borders → light
-    text = text.replace('stroke="#404040"', 'stroke="#768390"')  # arrows → lighter grey
-    # Graphviz <text> has no fill attribute (defaults to black); inject a light
-    # fill so labels are readable on the dark canvas.
-    text = text.replace('<text ', '<text fill="#adbac7" ')
+    # Every panel — class body, header strip, template stripes, secondary
+    # blocks — collapses to the SAME dark slate, so the whole diagram reads as
+    # one consistent set of boxes (no two-tone cards, no odd-coloured `_Tp`).
+    # We cover both Doxygen 1.12's palette (`white` / `grey` / `#999999`) and
+    # the legacy 1.9 palette (`#bfbfbf`) so this works regardless of which
+    # Doxygen drew the SVG.
+    for _old in ('fill="white"', 'fill="grey"',
+                 'fill="#999999"', 'fill="#bfbfbf"'):
+        text = text.replace(_old, 'fill="#1c2128"')
+    # Box borders and connector strokes: lighten so they're clearly visible
+    # on the dark canvas. Covers Doxygen 1.12 (`#666666`) and legacy
+    # (`black`, `#404040`).
+    for _old in ('stroke="#666666"', 'stroke="black"', 'stroke="#404040"'):
+        text = text.replace(_old, 'stroke="#c9d1d9"')
+    text = text.replace('fill="#666666"', 'fill="#c9d1d9"')   # arrowheads match
+    # Edge lines that Doxygen 1.12 paints blue (`#63b8ff`) stay blue — that
+    # reads cleanly on the dark page and matches docs.opencv.org's look.
+    # Graphviz <text> has no fill attribute (defaults to black); inject white
+    # so labels read clearly on the slate panels / dark page.
+    text = text.replace('<text ', '<text fill="#ffffff" ')
     return text
 
 
@@ -2927,6 +2940,75 @@ def _silence_breathe_anon_enum_warning():
 _silence_breathe_anon_enum_warning()
 
 
+def _inline_collaboration_svgs(api_dir: pathlib.Path,
+                              image_dir: pathlib.Path) -> None:
+    """After the HTML is written, replace each collaboration-diagram `<img>`
+    with the SVG inlined into the page.
+
+    Why: an SVG embedded via `<img>` is rendered as a flat picture — its
+    internal `<a>` links are dead. Inlining the `<svg>` makes those links
+    clickable, and (being inside the page) they resolve against our Sphinx
+    site. Each `xlink:href` is rewritten from the legacy Doxygen path
+    (`../../d6/d50/classcv_1_1Size__.html`) to the matching Sphinx class page
+    when we generate one (`classcv_1_1Size__.html`, same `api/` dir), else to
+    the upstream docs.opencv.org page so the link still resolves.
+
+    Connected to `build-finished`, so it runs once the output exists. It is
+    idempotent: a page whose diagram is already inlined has no `<img>` left to
+    match, so a re-run (incremental build) is a no-op."""
+    import re
+    if not api_dir.is_dir():
+        return
+    img_re = re.compile(
+        r'<img alt="(?P<alt>[^"]*)" '
+        r'class="(?P<cls>opencv-coll-graph[^"]*)" '
+        r'src="\.\./_images/(?P<file>[^"]+\.svg)"\s*/?>')
+    href_re = re.compile(r'xlink:href="(?P<path>[^"]+)"')
+
+    def _rewrite_href(m: "re.Match") -> str:
+        path = m.group("path")
+        if "://" in path:                       # already absolute/external
+            return m.group(0)
+        base = path.rsplit("/", 1)[-1]
+        if (api_dir / base).is_file():           # we generate this class page
+            return f'xlink:href="{base}"'
+        rel = path.lstrip("./")                  # strip leading ../ and ./
+        return f'xlink:href="{DOXYGEN_BASE_URL}{rel}"'
+
+    for html in api_dir.glob("*.html"):
+        text = html.read_text(encoding="utf-8")
+        if "opencv-coll-graph" not in text:
+            continue
+
+        def _inline(m: "re.Match") -> str:
+            svg_path = image_dir / m.group("file")
+            if not svg_path.is_file():
+                return m.group(0)
+            svg = svg_path.read_text(encoding="utf-8")
+            start = svg.find("<svg")             # drop xml decl / doctype / comments
+            if start < 0:
+                return m.group(0)
+            svg = href_re.sub(_rewrite_href, svg[start:])
+            # Carry the img's theme classes + alt onto the inline <svg> so the
+            # light/dark swap still works and it stays accessible.
+            return svg.replace(
+                "<svg ",
+                f'<svg class="{m.group("cls")}" role="img" '
+                f'aria-label="{m.group("alt")}" ', 1)
+
+        new = img_re.sub(_inline, text)
+        if new != text:
+            html.write_text(new, encoding="utf-8")
+
+
+def _inline_coll_graphs_on_finish(app, exception):
+    if exception is not None:
+        return
+    out = pathlib.Path(app.outdir)
+    _inline_collaboration_svgs(out / "api", out / "_images")
+
+
 def setup(app):
     app.connect("source-read", _source_read)
+    app.connect("build-finished", _inline_coll_graphs_on_finish)
     return {"parallel_read_safe": True, "parallel_write_safe": True}

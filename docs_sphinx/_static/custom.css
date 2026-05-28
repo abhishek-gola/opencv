@@ -532,17 +532,21 @@ html[data-theme="dark"] button.copybtn.success {
    mode and exempts the dark one from its forced-white image background. We
    only need to size them here — no `display`/`filter` rules, which would
    fight the theme's `!important` swap. */
-img.opencv-coll-graph {
+/* Class-only selector: the diagram is inlined as <svg> at build-finished
+   (conf.py) so its links work, so this must match <svg>, not just <img>. */
+.opencv-coll-graph {
     display: block;                  /* needed for margin-auto centering    */
     margin: 1rem auto 1.5rem;        /* horizontally centered in the column  */
-    max-width: 100%;                 /* never overflow the content width     */
+    width: auto;
     height: auto;                    /* preserve aspect ratio                */
-    /* Diagrams vary widely (≈270pt–580pt). The narrow ones are narrow
-       because they're tall, so widening them all would blow up their height.
-       Instead, only the small ones are nudged up to a comfortable minimum;
-       already-large diagrams keep their native size. `min(…, 100%)` keeps it
-       safe on narrow screens (never wider than the column). */
-    min-width: min(30rem, 100%);
+    /* Size relative to the window, capped so a diagram never dominates the
+       page. max-width keeps it inside the content column (which itself scales
+       with the window); max-height ties it to the viewport height. Diagrams
+       scale down to fit within both — tall ones bound by height, wide ones by
+       width — and resize as the window changes. Small diagrams stay at their
+       native size. Same behaviour on every class page. */
+    max-width: 100%;
+    max-height: 70vh;
 }
 
 /* --- "On this page" TOC: C++ domain entries ---------------------------- */
