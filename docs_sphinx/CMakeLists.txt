@@ -93,23 +93,96 @@ if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
   endforeach()
 endif()
 
+# API reference: Generate Doxygen XML by overriding legacy Doxyfile format flags.
+# The legacy Doxyfile exists because doc configures before docs_sphinx.
+set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
+set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
+if(EXISTS "${_LEGACY_DOXYFILE}")
+  set(_SPHINX_DOXYFILE "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile-xml")
+  file(WRITE "${_SPHINX_DOXYFILE}"
+    "@INCLUDE = ${_LEGACY_DOXYFILE}\n"
+    "GENERATE_HTML = NO\n"
+    "GENERATE_LATEX = NO\n"
+    "GENERATE_XML = YES\n"
+    "XML_OUTPUT = xml\n"
+    "XML_PROGRAMLISTING = NO\n"
+    # Force flat XML output for Breathe compatibility (disables CREATE_SUBDIRS).
+    "CREATE_SUBDIRS = NO\n"
+    # Exclude Objective-C headers to prevent Breathe crashes down the line.
+    "EXCLUDE_PATTERNS += cap_ios.h\n"
+    # Disable graph generation as we don't load sphinx.ext.graphviz.
+    "CLASS_GRAPH = NO\n"
+    "COLLABORATION_GRAPH = NO\n"
+    "GROUP_GRAPHS = NO\n"
+    "INCLUDE_GRAPH = NO\n"
+    "INCLUDED_BY_GRAPH = NO\n"
+    "DIRECTORY_GRAPH = NO\n"
+  )
+  find_program(DOXYGEN_EXE NAMES doxygen)
+  if(DOXYGEN_EXE)
+    # sphinx-xml target regenerates Doxygen XML; runs automatically with `sphinx`.
+    add_custom_target(sphinx-xml
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${_DOXYGEN_XML_DIR}
+      COMMAND ${DOXYGEN_EXE} ${_SPHINX_DOXYFILE}
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/doc
+      COMMENT "Doxygen XML (for Sphinx breathe) -> ${_DOXYGEN_XML_DIR}"
+      VERBATIM)
+    message(STATUS "docs_sphinx: sphinx-xml target enabled (doxygen: ${DOXYGEN_EXE})")
+  else()
+    message(STATUS "docs_sphinx: doxygen not found; `sphinx-xml` disabled")
+  endif()
+
+  # API stubs generation relies on parsing Doxygen XML.
+  # This is deferred to sphinx-build logic within conf.py.
+else()
+  message(STATUS "docs_sphinx: legacy Doxyfile not present at ${_LEGACY_DOXYFILE}; "
+                 "`sphinx-xml` disabled (re-run cmake after doc/ subdir configures)")
+endif()
+
 # Forward staging info to conf.py via env. OPENCV_CONTRIB_MODULES is NOT
 # forwarded — conf.py's default list wins unless the caller sets it in their
 # shell env (OPENCV_CONTRIB_MODULES=ml cmake --build ...) to override per-build.
 set(_SPHINX_ENV
   "OPENCV_SPHINX_INPUT_ROOT=${_SPHINX_INPUT_ROOT}"
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
+  "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
 )
+
+# Warnings sink for `sphinx-build -w`. Defaulted here since pr-11-src referenced
+# _SPHINX_WARNINGS without defining it; override with -D_SPHINX_WARNINGS=… if
+# you want a different path.
+if(NOT _SPHINX_WARNINGS)
+  set(_SPHINX_WARNINGS "${CMAKE_CURRENT_BINARY_DIR}/sphinx-warnings.log")
+endif()
+
+# Parallel knob. Sphinx supports `-j auto` (=nproc), `-j N`, or a literal
+# integer; override per-build with -DSPHINX_JOBS=8. `auto` is the sweet spot
+# on developer machines — using nproc workers takes the API-reference build
+# from minutes to seconds. conf.py declares `parallel_read_safe`/
+# `parallel_write_safe`, and breathe ≥ 4.30 is parallel-safe, so this is
+# unconditionally enabled. `--keep-going` keeps the build progressing past
+# non-fatal warnings (we still see them in the log).
+if(NOT SPHINX_JOBS)
+  set(SPHINX_JOBS "auto")
+endif()
 
 add_custom_target(sphinx
   COMMAND ${CMAKE_COMMAND} -E make_directory ${_SPHINX_OUTDIR}
   COMMAND ${CMAKE_COMMAND} -E env ${_SPHINX_ENV}
-          ${SPHINX_BUILD} -c ${_SPHINX_CONFDIR}
+          ${SPHINX_BUILD} -j ${SPHINX_JOBS}
+                          --keep-going
+                          -w ${_SPHINX_WARNINGS}
+                          -c ${_SPHINX_CONFDIR}
                           ${_SPHINX_INPUT_ROOT}
                           ${_SPHINX_OUTDIR}
   WORKING_DIRECTORY ${_SPHINX_CONFDIR}
-  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR}"
+  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR} (jobs=${SPHINX_JOBS})"
   VERBATIM)
+
+# Ensure breathe sees current XML on every `sphinx` build.
+if(TARGET sphinx-xml)
+  add_dependencies(sphinx sphinx-xml)
+endif()
 
 # Clean rebuild: `cmake --build <build> --target sphinx-clean`
 add_custom_target(sphinx-clean
