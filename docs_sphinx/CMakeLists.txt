@@ -130,14 +130,26 @@ set(_SPHINX_ENV
   "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
 )
 
+# Parallelism: conf.py's setup() declares the build parallel_read_safe and
+# parallel_write_safe, so Sphinx can read/write across all cores. Defaults to
+# `auto` (one worker per CPU core); override with -DSPHINX_JOBS=N.
+set(SPHINX_JOBS "auto" CACHE STRING "sphinx-build -j value (process count or 'auto')")
+
+# Collect every warning into one file (--keep-going so the build doesn't abort
+# on the first warning), making the warning corpus reviewable after a build.
+set(_SPHINX_WARNINGS "${CMAKE_CURRENT_BINARY_DIR}/sphinx-warnings.log")
+
 add_custom_target(sphinx
   COMMAND ${CMAKE_COMMAND} -E make_directory ${_SPHINX_OUTDIR}
   COMMAND ${CMAKE_COMMAND} -E env ${_SPHINX_ENV}
-          ${SPHINX_BUILD} -c ${_SPHINX_CONFDIR}
+          ${SPHINX_BUILD} -j ${SPHINX_JOBS}
+                          --keep-going
+                          -w ${_SPHINX_WARNINGS}
+                          -c ${_SPHINX_CONFDIR}
                           ${_SPHINX_INPUT_ROOT}
                           ${_SPHINX_OUTDIR}
   WORKING_DIRECTORY ${_SPHINX_CONFDIR}
-  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR}"
+  COMMENT "Building Sphinx HTML site (-j ${SPHINX_JOBS}) -> ${_SPHINX_OUTDIR}"
   VERBATIM)
 
 # Ensure breathe sees current XML on every `sphinx` build.

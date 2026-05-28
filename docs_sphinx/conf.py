@@ -139,6 +139,7 @@ suppress_warnings = [
     "myst.header", "myst.xref_missing", "toc.not_included",
     "misc.highlighting_failure",
     "image.not_readable",
+    "cpp.duplicate_declaration",
 ]
 
 # -- Doxygen integration -----------------------------------------------------
@@ -151,16 +152,48 @@ _TAG_FILE = pathlib.Path(_os.environ.get(
     str(HERE.parent.parent / "build" / "doc" / "doxygen" / "html" / "opencv.tag"),
 ))
 
+# # anchor -> doxygen URL filename (from opencv.tag if available).
+# _TAG_FILENAMES: dict[str, str] = {}
+# if _TAG_FILE.is_file():
+#     try:
+#         import xml.etree.ElementTree as _ET
+#         for _c in _ET.parse(str(_TAG_FILE)).getroot().iter("compound"):
+#             if _c.get("kind") == "page":
+#                 _n, _f = _c.findtext("name"), _c.findtext("filename")
+#                 if _n and _f:
+#                     _TAG_FILENAMES[_n] = _f if _f.endswith(".html") else _f + ".html"
+#     except Exception:
+#         pass
+if not _TAG_FILE.is_file():
+    _TAG_FILE = HERE.parent.parent / "build" / "doc" / "opencv.tag"
+
 # anchor -> doxygen URL filename (from opencv.tag if available).
 _TAG_FILENAMES: dict[str, str] = {}
+# anchor -> human-readable page title (from opencv.tag).
+_TAG_PAGE_TITLES: dict[str, str] = {}
+_CV_API: dict[str, str] = {}
 if _TAG_FILE.is_file():
     try:
         import xml.etree.ElementTree as _ET
         for _c in _ET.parse(str(_TAG_FILE)).getroot().iter("compound"):
             if _c.get("kind") == "page":
                 _n, _f = _c.findtext("name"), _c.findtext("filename")
+                _t = _c.findtext("title", "")
                 if _n and _f:
                     _TAG_FILENAMES[_n] = _f if _f.endswith(".html") else _f + ".html"
+                    if _t:
+                        _TAG_PAGE_TITLES[_n] = _t
+            if _c.get("kind") == "class":
+                _cn = (_c.findtext("name") or "").split("::")[-1]
+                _cf = _c.findtext("filename", "")
+                if _cn and _cf:
+                    _CV_API.setdefault(_cn, DOXYGEN_BASE_URL + (_cf if _cf.endswith(".html") else _cf + ".html"))
+            for _m in _c.findall("member"):
+                _n = _m.findtext("name", "")
+                _af = _m.findtext("anchorfile", "")
+                _an = _m.findtext("anchor", "")
+                if _n and _af and _an:
+                    _CV_API.setdefault(_n, DOXYGEN_BASE_URL + _af + "#" + _an)
     except Exception:
         pass
 
@@ -1060,6 +1093,17 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                 var_items.append(m)
 
     def _emit_member_directive(m: dict, directive: str, spec: str) -> list[str]:
+        # docutils splits a directive's arguments on whitespace and caps
+        # doxygentypedef/doxygenvariable/doxygendefine at their declared arg
+        # count, so a spec carrying template-argument spaces (Doxygen emits
+        # e.g. `cv::ParamType< String >::member_type`) parses as 3 arguments
+        # and is rejected with "maximum N argument(s) allowed". Collapse the
+        # whitespace for these name-only directives — the C++ domain matches
+        # names whitespace-insensitively. doxygenfunction is exempt: it takes a
+        # full signature (final_argument_whitespace) whose `(...)` parameter
+        # types need their spaces.
+        if directive != "doxygenfunction":
+            spec = re.sub(r"\s+", "", spec)
         # MyST anchor label so the summary-table `#refid` link resolves.
         return [
             f"({m['id']})=",
@@ -1375,15 +1419,19 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.append(f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         lines.append("")
 
-    # Detailed Description only when namespace has description text.
-    if ns.get("brief") or ns.get("detailed"):
-        lines += [
-            "## Detailed Description",
-            "",
-            f"```{{doxygennamespace}} {ns['name']}",
-            ":project: opencv",
-            "```",
-        ]
+    # Detailed Description: emit the namespace's own description *text*, not a
+    # `{doxygennamespace}` directive. breathe expands that directive into every
+    # member of the namespace inline — for `cv` that is essentially the whole
+    # library — which (a) re-declares thousands of symbols already documented on
+    # their group/class pages, producing a flood of "Duplicate C++ declaration"
+    # warnings, (b) re-parses every hard template/intrinsic signature, producing
+    # thousands of "Error when parsing function declaration" warnings, and
+    # (c) collides with the per-member detail blocks emitted below, producing
+    # "Duplicate explicit target name" warnings. The summary tables + per-member
+    # blocks already cover the members, so only the prose description is needed
+    # here. (Mirrors how `_write_api_stub` renders group-page descriptions.)
+    if ns.get("detailed"):
+        lines += ["## Detailed Description", "", ns["detailed"], ""]
 
     # Per-member detail blocks.
     seen_define_names: set[str] = set()
@@ -1552,20 +1600,6 @@ if API_MODULES:
 # Scan external modules directly from DOC_ROOT.
 for _toc in (DOC_ROOT / "tutorials").glob("*/table_of_content_*.markdown"):
     if _toc.parent.name not in DOC_MODULES:
-        _scan_external(_toc)
-
-_scan_internal(DOC_ROOT / "js_tutorials" / "js_tutorials.markdown", base=DOC_ROOT)
-for _m in DOC_JS_MODULES:
-    _scan_internal(DOC_ROOT / "js_tutorials" / _m, base=DOC_ROOT)
-for _toc in (DOC_ROOT / "js_tutorials").glob("*/js_table_of_contents_*.markdown"):
-    if _toc.parent.name not in DOC_JS_MODULES:
-        _scan_external(_toc)
-
-_scan_internal(DOC_ROOT / "py_tutorials" / "py_tutorials.markdown", base=DOC_ROOT)
-for _m in DOC_PY_MODULES:
-    _scan_internal(DOC_ROOT / "py_tutorials" / _m, base=DOC_ROOT)
-for _toc in (DOC_ROOT / "py_tutorials").glob("*/py_table_of_contents_*.markdown"):
-    if _toc.parent.name not in DOC_PY_MODULES:
         _scan_external(_toc)
 
 for _m in CONTRIB_MODULES:
@@ -1904,8 +1938,25 @@ def _translate(text: str, docname: str | None = None) -> str:
     text = re.sub(r'@ref\s+(?P<name>[\w:-]+)(?:\s+"(?P<disp>[^"]+)")?',
                   _ref_repl, text)
 
-    # 8. @cite KEY -> [KEY]
-    text = re.sub(r"@cite\s+([\w-]+)", r"[\1]", text)
+    # # 8. @cite KEY -> [KEY]
+    # text = re.sub(r"@cite\s+([\w-]+)", r"[\1]", text)
+    # 7b. cv.Name → [cv.Name](doxygen url) for names in the API index.
+    if _CV_API:
+        def _cvlink_repl(m: re.Match) -> str:
+            url = _CV_API.get(m.group(1))
+            return f'[cv.{m.group(1)}]({url})' if url else m.group(0)
+        _parts = re.split(r'(```.*?```|`[^`\n]+`)', text, flags=re.DOTALL)
+        text = ''.join(
+            p if i % 2 else re.sub(
+                r'(?<!\[)(?<!\()cv\.([A-Za-z][A-Za-z0-9_]*)',
+                _cvlink_repl, p)
+            for i, p in enumerate(_parts))
+
+    # 8. @cite KEY → [[KEY]](link to docs.opencv.org citelist)
+    text = re.sub(
+        r"@cite\s+([\w-]+)",
+        lambda m: f"[[{m.group(1)}]](https://docs.opencv.org/5.x/d0/de3/citelist.html#CITEREF_{m.group(1)})",
+        text)
 
     # 8b. @youtube{ID}  -> responsive embed (raw HTML, passed through by MyST).
     text = re.sub(
@@ -2220,6 +2271,32 @@ def _silence_breathe_anon_enum_warning():
 
 
 _silence_breathe_anon_enum_warning()
+
+
+def _silence_cpp_duplicate_declaration_warning():
+    """Suppress Sphinx's "Duplicate C++ declaration, also defined at …" warning.
+
+    The generated API tree intentionally documents a symbol in more than one
+    place — a free function appears both on its module *group* page and on its
+    *namespace* page, exactly as Doxygen's own HTML does. Sphinx's C++ domain,
+    however, keeps a single global symbol table and warns once per symbol that
+    is declared on a second page. For the `cv` namespace that is thousands of
+    benign warnings.
+
+    `suppress_warnings = ['cpp.duplicate_declaration']` does NOT catch these:
+    in Sphinx 8.1 the warning is logged untyped (see
+    sphinx/domains/cpp/__init__.py — `logger.warning(msg, location=signode)`
+    with no `type=`/`subtype=`), so the only reliable hook is a logging filter,
+    matching the approach already used for the anonymous-enum warning above."""
+    import logging
+    class _DupDeclFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "Duplicate C++ declaration" not in record.getMessage()
+    for _name in ("sphinx", "docutils"):
+        logging.getLogger(_name).addFilter(_DupDeclFilter())
+
+
+_silence_cpp_duplicate_declaration_warning()
 
 
 def setup(app):
