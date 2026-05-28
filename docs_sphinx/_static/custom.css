@@ -535,18 +535,40 @@ html[data-theme="dark"] button.copybtn.success {
 /* Class-only selector: the diagram is inlined as <svg> at build-finished
    (conf.py) so its links work, so this must match <svg>, not just <img>. */
 .opencv-coll-graph {
-    display: block;                  /* needed for margin-auto centering    */
-    margin: 1rem auto 1.5rem;        /* horizontally centered in the column  */
+    /* Centre small diagrams in the column. Margin-auto needs a block-level
+       element to work. */
+    display: block;
+    margin: 1rem auto 1.5rem;
+
+    /* Render at the SVG's NATIVE intrinsic size. Doxygen / Graphviz already
+       sized each diagram so the text is readable — we just honour that.
+       `width: auto` + `height: auto` keep the aspect ratio. */
     width: auto;
-    height: auto;                    /* preserve aspect ratio                */
-    /* Size relative to the window, capped so a diagram never dominates the
-       page. max-width keeps it inside the content column (which itself scales
-       with the window); max-height ties it to the viewport height. Diagrams
-       scale down to fit within both — tall ones bound by height, wide ones by
-       width — and resize as the window changes. Small diagrams stay at their
-       native size. Same behaviour on every class page. */
+    height: auto;
+
+    /* Crucially NO `max-width: 100%` and NO `max-height: …` here. Those caps
+       used to squash wide diagrams (e.g. cv::NAryMatIterator) down to the
+       content-column width — and once a graph is shrunk uniformly, every
+       label inside it shrinks proportionally and becomes illegible. By
+       removing the caps the diagram keeps its native size; small diagrams
+       fit naturally, large ones overflow into the scrollable wrapper below. */
+}
+
+/* The Sphinx `<p>` that wraps the inlined SVG becomes the horizontal-scroll
+   container. So:
+   * A SMALL diagram (narrower than the column) just sits at native size,
+     centred by the margin:auto above — `text-align: center` keeps it
+     centred for browsers that handle inline svg as inline.
+   * A WIDE diagram (e.g. NAryMatIterator at ~580pt ≈ 770px, or anything
+     larger than the column) overflows to the right, and `overflow-x: auto`
+     exposes a horizontal scrollbar instead of clipping or downscaling.
+   We DON'T touch the `<p>`'s vertical sizing, so tall diagrams still flow
+   normally and push the rest of the content down — they just don't squash. */
+.bd-content p:has(> svg.opencv-coll-graph),
+.bd-content p:has(> img.opencv-coll-graph) {
+    overflow-x: auto;
     max-width: 100%;
-    max-height: 70vh;
+    text-align: center;
 }
 
 /* --- "On this page" TOC: C++ domain entries ---------------------------- */
