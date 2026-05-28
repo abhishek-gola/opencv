@@ -1368,27 +1368,58 @@ def _svg_dark_variant(text: str) -> str:
 
     Order matters: blank the backdrop first, *then* repaint the remaining white
     node fills, so the two `fill="white"` cases don't collide."""
+    import re as _re
     text = _svg_make_transparent(text)              # backdrop → transparent
-    # Every panel — class body, header strip, template stripes, secondary
-    # blocks — collapses to the SAME dark slate, so the whole diagram reads as
-    # one consistent set of boxes (no two-tone cards, no odd-coloured `_Tp`).
-    # We cover both Doxygen 1.12's palette (`white` / `grey` / `#999999`) and
-    # the legacy 1.9 palette (`#bfbfbf`) so this works regardless of which
-    # Doxygen drew the SVG.
-    for _old in ('fill="white"', 'fill="grey"',
-                 'fill="#999999"', 'fill="#bfbfbf"'):
-        text = text.replace(_old, 'fill="#1c2128"')
-    # Box borders and connector strokes: lighten so they're clearly visible
-    # on the dark canvas. Covers Doxygen 1.12 (`#666666`) and legacy
-    # (`black`, `#404040`).
+    # Strokes + arrowheads first (covers Doxygen 1.12 `#666666` and legacy
+    # `black` / `#404040`). Done before the per-node pass so per-node text
+    # re-colouring isn't confused by stroke values.
     for _old in ('stroke="#666666"', 'stroke="black"', 'stroke="#404040"'):
         text = text.replace(_old, 'stroke="#c9d1d9"')
     text = text.replace('fill="#666666"', 'fill="#c9d1d9"')   # arrowheads match
+    # Per-node pass. A Doxygen class node carries a grey HEADER STRIP at the
+    # top — `fill="#999999"` in 1.12 (or `#bfbfbf` in 1.9). Per request, the
+    # header strip is repainted WHITE so it stands out in dark mode; the
+    # class BODY (originally `fill="white"`) becomes the dark slate. The
+    # class title (the first <text> in the node) sits on the white strip, so
+    # it has to be DARK ink; member texts below it sit on the slate body and
+    # stay WHITE. Template-style nodes that don't have a header strip just
+    # get their body re-coloured and keep white text.
+    def _process_node(m):
+        block = m.group(0)
+        # Body fills → TRANSPARENT so the page background shows through. This
+        # keeps every box exactly the same colour as `cv::_InputArray`'s body
+        # (which has no body polygon in the Doxygen SVG and therefore already
+        # shows the page directly) — no two-tone blues side-by-side.
+        block = block.replace('fill="white"', 'fill="none"')
+        block = block.replace('fill="grey"',  'fill="none"')
+        # Header strip → a clear DARK GREY card on top of the transparent body.
+        # Distinct from the page bg, distinct from the borders, readable with
+        # white text. Covers Doxygen 1.12 (`#999999`) and legacy 1.9 (`#bfbfbf`).
+        block = block.replace('fill="#999999"', 'fill="#2d333b"')
+        block = block.replace('fill="#bfbfbf"', 'fill="#2d333b"')
+        # All text on either the (transparent body = dark page) or the dark-grey
+        # header strip is plain WHITE — both backgrounds are dark, no special
+        # title-on-white-strip handling needed any more.
+        block = block.replace('<text ', '<text fill="#ffffff" ')
+        return block
+    text = _re.sub(r'<g[^>]*class="node"[^>]*>.*?</g>',
+                   _process_node, text, flags=_re.DOTALL)
+    # Catch any grey fills that live OUTSIDE `<g class="node">` blocks
+    # (graphviz cluster/subgraph constructs). Repaint them with the same dark
+    # palette: `grey`/keyword → transparent (match the body treatment),
+    # named greys (`#999999`/`#bfbfbf`) → dark-grey strip colour.
+    text = text.replace('fill="grey"',     'fill="none"')
+    text = text.replace('fill="#999999"',  'fill="#2d333b"')
+    text = text.replace('fill="#bfbfbf"',  'fill="#2d333b"')
+    # Edge labels (#flags / #sz / …) live outside <g class="node"> blocks
+    # and haven't been re-coloured yet — paint them white so they read on
+    # the dark page. The negative lookahead avoids double-prefixing the
+    # per-node texts we already handled above.
+    text = _re.sub(r'<text (?!fill)', '<text fill="#ffffff" ', text)
     # Edge lines that Doxygen 1.12 paints blue (`#63b8ff`) stay blue — that
     # reads cleanly on the dark page and matches docs.opencv.org's look.
-    # Graphviz <text> has no fill attribute (defaults to black); inject white
-    # so labels read clearly on the slate panels / dark page.
-    text = text.replace('<text ', '<text fill="#ffffff" ')
+    # NOTE: the global `<text> → white` block below the original loop is now
+    # redundant — the per-node + lookahead passes above handle all texts.
     return text
 
 
