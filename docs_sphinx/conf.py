@@ -32,7 +32,18 @@ OPENCV_ROOT = HERE.parent.resolve()
 import os as _os
 DOC_MODULES = [
     m.strip()
-    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,core,calib3d,features,introduction").split(",")
+    for m in (_os.environ.get("OPENCV_DOC_MODULES") or "photo,objdetect,imgproc,3d,app,ios").split(",")
+    if m.strip()
+]
+DOC_JS_MODULES = [
+    m.strip()
+    for m in (_os.environ.get("OPENCV_DOC_JS_MODULES") or "js_gui,js_core,js_imgproc,js_video,js_dnn").split(",")
+    if m.strip()
+]
+
+DOC_PY_MODULES = [
+    m.strip()
+    for m in (_os.environ.get("OPENCV_DOC_PY_MODULES") or "py_gui,py_features,py_calib3d,py_ml,py_bindings").split(",")
     if m.strip()
 ]
 
@@ -72,6 +83,31 @@ SPHINX_INPUT_ROOT = pathlib.Path(
     _os.environ.get("OPENCV_SPHINX_INPUT_ROOT") or str(DOC_ROOT)
 ).resolve()
 
+# Expose enabled contrib modules via symlinks + html_extra_path.
+# Output URLs: /contrib_modules/<m>/... — no duplication in srcdir.
+html_extra_path: list[str] = []
+def _in_source_tree(p: pathlib.Path) -> bool:
+    for _root in (DOC_ROOT, CONTRIB_ROOT):
+        try:
+            p.relative_to(_root)
+            return True
+        except ValueError:
+            pass
+    return False
+
+if not _in_source_tree(SPHINX_INPUT_ROOT):
+    _extras = SPHINX_INPUT_ROOT.parent / "contrib_extras"
+    _prefix = _extras / "contrib_modules"
+    _prefix.mkdir(parents=True, exist_ok=True)
+    for _m in CONTRIB_MODULES:
+        _src, _link = CONTRIB_ROOT / _m, _prefix / _m
+        if _src.is_dir() and not _link.exists():
+            try:
+                _os.symlink(_src, _link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pass
+    html_extra_path = [str(_extras)]
+
 # -- Project ----------------------------------------------------------------
 project = "OpenCV"
 author = "OpenCV Team"
@@ -103,6 +139,20 @@ _API_XML_DIR = pathlib.Path(
 # at sphinx-build time, mirrors the original XML via symlinks, and only the
 # affected namespace XMLs are rewritten in place.
 _PATCHED_XML_DIR = _API_XML_DIR.parent / "xml_for_sphinx"
+
+# Python enum/constant signatures; built by: cmake --build --target gen_opencv_python_source
+_PY_SIGNATURES: dict = {}
+for _pysigs_candidate in [
+    _API_XML_DIR.parents[2] / "modules/python_bindings_generator/pyopencv_signatures.json",
+    _os.environ.get("OPENCV_PYTHON_SIGNATURES_FILE", ""),
+]:
+    _pysigs_path = pathlib.Path(str(_pysigs_candidate)) if _pysigs_candidate else None
+    if _pysigs_path and _pysigs_path.is_file():
+        import json as _json
+        _PY_SIGNATURES = _json.loads(_pysigs_path.read_text(encoding="utf-8"))
+        break
+del _pysigs_candidate, _pysigs_path
+
 if API_MODULES:
     try:
         import breathe  # noqa: F401
@@ -125,26 +175,42 @@ if API_MODULES:
 
 source_suffix = {".md": "markdown", ".markdown": "markdown"}
 
+# Tell Sphinx's C/C++ domain parser to treat OpenCV's compatibility macros
+# as identifier attributes (i.e. swallow them silently during parsing).
+# Without this, signatures like
+#     inline virtual const char *getName() const CV_OVERRIDE
+# raise "Invalid C++ declaration: Expected end of definition" because the
+# parser sees CV_OVERRIDE as an unknown token after `const`. These macros
+# expand to `override` / `noexcept` / `final` / nothing in cvdef.h.
+cpp_id_attributes = [
+    "CV_OVERRIDE", "CV_FINAL", "CV_NOEXCEPT",
+    "CV_NORETURN", "CV_DEPRECATED", "CV_DEPRECATED_EXTERNAL",
+    "CV_NODISCARD_STD", "CV_NODISCARD",
+    "CV_EXPORTS", "CV_EXPORTS_W",
+    "CV_WRAP",
+]
+c_id_attributes = list(cpp_id_attributes)
+
 # Root tutorial index (lists all modules via @subpage). Stays the master
 # regardless of how many modules are in DOC_MODULES.
 master_doc = "tutorials/tutorials"
 
-# Source dir is the staged tree (or DOC_ROOT for legacy ad-hoc runs).
-# Scope: master + enabled main modules + (optionally) enabled contrib modules.
+# Source dir is opencv/doc/ — scope to the master + enabled modules only.
 include_patterns = ["tutorials/tutorials.markdown"] + [
     f"tutorials/{m}/**" for m in DOC_MODULES
-]
-if CONTRIB_MODULES and (SPHINX_INPUT_ROOT / "tutorials_contrib").is_dir():
-    include_patterns.append("tutorials_contrib/contrib_root.markdown")
-    include_patterns += [f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES]
+] + (["js_tutorials/js_tutorials.markdown"] + [
+    f"js_tutorials/{m}/**" for m in DOC_JS_MODULES
+] if DOC_JS_MODULES else []) + (["py_tutorials/py_tutorials.markdown"] + [
+    f"py_tutorials/{m}/**" for m in DOC_PY_MODULES
+] if DOC_PY_MODULES else []) + (["tutorials_contrib/contrib_root.markdown"] + [
+    f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES
+] if CONTRIB_MODULES else [])
+
+# Add API stubs if API_MODULES is defined by the cherry-picked commit
 if API_MODULES:
-    # Include generated API stubs recursively.
     include_patterns.append("api/**")
-exclude_patterns = [
-    "**/Thumbs.db", "**/.DS_Store",
-    "tutorials/core/how_to_use_OpenCV_parallel_for_/**",
-    "tutorials/introduction/load_save_image/**",
-]
+
+exclude_patterns = ["**/Thumbs.db", "**/.DS_Store", "tutorials/app/_old/**"]
 
 myst_enable_extensions = [
     "colon_fence", "deflist", "dollarmath", "amsmath",
@@ -168,7 +234,6 @@ _TAG_FILE = pathlib.Path(_os.environ.get(
     "OPENCV_DOXYGEN_TAGFILE",
     str(HERE.parent.parent / "build" / "doc" / "doxygen" / "html" / "opencv.tag"),
 ))
-
 if not _TAG_FILE.is_file():
     _TAG_FILE = HERE.parent.parent / "build" / "doc" / "opencv.tag"
 
@@ -450,6 +515,27 @@ def _itertext(el) -> str:
     return "".join(el.itertext()).strip() if el is not None else ""
 
 
+def _type_to_md(type_elem) -> str:
+    """Render <type> XML as markdown; turns <ref> children into links."""
+    if type_elem is None:
+        return ""
+    out = type_elem.text or ""
+    for child in type_elem:
+        if child.tag == "ref":
+            word = (child.text or "").strip()
+            refid = child.get("refid", "")
+            kindref = child.get("kindref", "")
+            if kindref == "compound" and refid in _ANCHOR_TO_DOC:
+                fn = _ANCHOR_TO_DOC[refid].split("/")[-1]
+                out += f"[{word}]({fn}.md)"
+            elif refid:
+                out += f"[{word}](#{refid})"
+            else:
+                out += word
+        out += child.tail or ""
+    return out.strip()
+
+
 # memberdef@kind → display section title. Mirrors Doxygen's group-page order.
 _MEMBERDEF_SECTIONS = (
     ("typedef",  "Typedefs"),
@@ -479,6 +565,147 @@ def _read_class_brief(refid: str, xml_dir: pathlib.Path,
     return brief
 
 
+def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
+    """Convert a Doxygen <detaileddescription> (or similar) element to Markdown."""
+    if el is None:
+        return ""
+
+    def _hl_text(hl_node) -> str:
+        """Extract text from a <highlight> element, treating <sp/> as a space."""
+        parts = []
+        if hl_node.text:
+            parts.append(hl_node.text)
+        for child in hl_node:
+            if child.tag == "sp":
+                parts.append(" ")
+            elif child.tag == "ref":
+                parts.append("".join(child.itertext()))
+            else:
+                parts.append("".join(child.itertext()))
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    def _programlisting(node) -> str:
+        lines = []
+        for codeline in node.findall("codeline"):
+            lines.append("".join(_hl_text(hl) for hl in codeline.findall("highlight")))
+        return "```cpp\n" + "\n".join(lines) + "\n```"
+
+    def _inline(node) -> str:
+        """Render inline content of a node (inline elements only)."""
+        parts = []
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            t = child.tag
+            if t in _BLOCK_TAGS:
+                break  # stop at block-level — caller handles separately
+            inner = "".join(child.itertext())
+            if t == "ulink":
+                url = child.get("url", "")
+                parts.append(f"[{inner}]({url})" if url else inner)
+            elif t in ("ref", "computeroutput"):
+                parts.append(f"`{inner}`" if inner else "")
+            elif t == "emphasis":
+                parts.append(f"*{inner}*" if inner else "")
+            elif t in ("bold", "strong"):
+                parts.append(f"**{inner}**" if inner else "")
+            elif t == "sp":
+                parts.append(" ")
+            elif t == "linebreak":
+                parts.append("\n")
+            else:
+                parts.append(inner)
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting"}
+
+    def _listitem_text(item) -> str:
+        parts = []
+        for child in item:
+            if child.tag == "para":
+                parts.append(_inline(child).strip())
+        return " ".join(p for p in parts if p)
+
+    def _emit_block(sub, result: list, level: int) -> None:
+        t = sub.tag
+        if t == "programlisting":
+            result.append(_programlisting(sub))
+        elif t == "orderedlist":
+            for i, item in enumerate(sub.findall("listitem"), 1):
+                result.append(f"{i}. {_listitem_text(item)}")
+        elif t == "itemizedlist":
+            for item in sub.findall("listitem"):
+                result.append(f"- {_listitem_text(item)}")
+
+    def _blocks(node, level: int) -> list[str]:
+        result = []
+        for child in node:
+            t = child.tag
+            if t == "title":
+                continue
+            elif t == "para":
+                # Walk para children; flush text before each block-level child.
+                pending: list[str] = []
+                if child.text:
+                    pending.append(child.text)
+                for sub in child:
+                    if sub.tag in _BLOCK_TAGS:
+                        text = "".join(pending).strip()
+                        if text:
+                            result.append(text)
+                        pending = []
+                        _emit_block(sub, result, level)
+                        if sub.tail and sub.tail.strip():
+                            pending.append(sub.tail)
+                    else:
+                        inner = "".join(sub.itertext())
+                        st = sub.tag
+                        if st == "ulink":
+                            url = sub.get("url", "")
+                            pending.append(f"[{inner}]({url})" if url else inner)
+                        elif st in ("ref", "computeroutput"):
+                            pending.append(f"`{inner}`" if inner else "")
+                        elif st == "emphasis":
+                            pending.append(f"*{inner}*" if inner else "")
+                        elif st in ("bold", "strong"):
+                            pending.append(f"**{inner}**" if inner else "")
+                        elif st == "sp":
+                            pending.append(" ")
+                        elif st == "linebreak":
+                            pending.append("\n")
+                        else:
+                            pending.append(inner)
+                        if sub.tail:
+                            pending.append(sub.tail)
+                text = "".join(pending).strip()
+                if text:
+                    result.append(text)
+            elif t in ("sect1", "sect2", "sect3"):
+                offset = {"sect1": 0, "sect2": 1, "sect3": 2}[t]
+                lv = level + offset
+                title_text = child.findtext("title") or ""
+                result.append(f"{'#' * lv} {title_text}")
+                result.extend(_blocks(child, lv + 1))
+            elif t in _BLOCK_TAGS:
+                _emit_block(child, result, level)
+            elif t == "simplesect":
+                kind = child.get("kind", "")
+                admon = {"note": "note", "warning": "warning",
+                         "attention": "warning", "remark": "note"}.get(kind)
+                body = "\n\n".join(_blocks(child, level))
+                if admon:
+                    result.append(f":::{{{admon}}}\n{body}\n:::")
+                elif body:
+                    result.append(body)
+        return result
+
+    return "\n\n".join(b for b in _blocks(el, h_level) if b.strip())
+
+
 def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                          _seen: set | None = None) -> dict | None:
     """Walk a group XML's <innergroup> children recursively.
@@ -501,12 +728,10 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
         return None
     name = (cd.findtext("compoundname") or "").strip()
     title = (cd.findtext("title") or name).strip()
-    # Extract detailed description for context-display.
+    # Detailed description (used on parent index pages; breathe handles it
+    # on leaf pages, so we extract it for context-display only).
     detailed_el = cd.find("detaileddescription")
-    detailed = ""
-    if detailed_el is not None:
-        paras = [_itertext(p) for p in detailed_el.findall("para")]
-        detailed = "\n\n".join(p for p in paras if p)
+    detailed = _doxygen_desc_to_md(detailed_el, h_level=3)
     # Inner classes (public only). One read per class's XML for its brief.
     # `qualified` is what `{doxygenclass}` needs (e.g. cv::ocl::Context); the
     # innerclass element's text already carries that, but normalize spaces.
@@ -558,6 +783,7 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        "brief":       _itertext(ev.find("briefdescription")),
                     })
             sections.setdefault(section_title, []).append({
                 "id":          md.get("id", ""),
@@ -651,19 +877,8 @@ def _enum_synopsis_lines(m: dict) -> list[str]:
 def _function_signature(member: dict) -> str:
     """Disambiguator used after a qualified function name in `{doxygenfunction}`.
     Breathe expects `name(type1, type2, …)` with parameter names dropped (it
-    matches against Doxygen's `<param><type>` text, and on the type-mangled
-    signature — parameter names *and* default values are irrelevant to the
-    match). Empty-arg functions get `()` — required for breathe to match
-    correctly even for non-overloads.
-
-    Trailing `const` is appended for const member functions: breathe matches
-    the cv-qualifier as part of the declaration, so a bare `(types)` arg list
-    fails to resolve a `const` method. Doxygen stores `int channels(int i=-1)
-    const`; `{doxygenfunction} cv::_InputArray::channels(int)` (no const)
-    parses to a non-const AST and reports "Unable to resolve function … with
-    arguments (int)". Appending ` const` makes the directive arg-list match
-    the stored declaration. Group-page members carry no `const` key, so free
-    functions are unaffected."""
+    matches against Doxygen's `<param><type>` text). Empty-arg functions get
+    `()` — required for breathe to match correctly even for non-overloads."""
     types = ", ".join((t or "").strip() for t in member.get("param_types", []))
     sig = f"({types})"
     if member.get("const"):
@@ -695,10 +910,16 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     out = out_dir / f"{name}.md"
 
     if node["children"]:
-        # List children for navigation index pages.
+        # Navigation index page — list children as @subpage entries; the
+        # existing _subpage_list_to_toctree rule converts them to a real
+        # toctree at translate time.
         lines = [f"# {title} {{#api_{name}}}", ""]
+        lines += ["## Topics", ""]
+        for child in node["children"]:
+            lines.append(f"- @subpage api_{child['name']}")
+        lines.append("")
         if node["detailed"]:
-            lines += [node["detailed"], ""]
+            lines += ["## Detailed Description", "", node["detailed"], ""]
         if ns_map and ns_map.get(name):
             lines += ["## Namespaces", ""]
             for _ns_name, anchor in ns_map[name]:
@@ -715,6 +936,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
     # ---- Leaf page ----------------------------------------------------------
     lines = [f"# {title} {{#api_{name}}}", ""]
+    if node["detailed"]:
+        lines += ["## Detailed Description", "", node["detailed"], ""]
 
     if ns_map and ns_map.get(name):
         lines += ["## Namespaces", ""]
@@ -726,15 +949,11 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     # `_generate_api_stubs` emits (one .md per refid, deduped across groups).
     if node["innerclasses"]:
         lines += ["## Classes", "",
-                  "{.api-reference-table}",
                   "| Name | Description |", "|---|---|"]
         for c in node["innerclasses"]:
             classes_seen.setdefault(c["refid"], c)
             page = _class_page_name(c["refid"])
-            # The class/struct keyword is plain prose; only the qualified
-            # name is the clickable link (matches the user-facing convention
-            # of treating the C++ keyword as a type label, not a hyperlink).
-            link = f"{c['kind']} [`{c['name']}`]({page}.md)"
+            link = f"[`{c['kind']} {c['name']}`]({page}.md)"
             lines.append(f"| {link} | {_md_escape_cell(c['brief'])} |")
         lines.append("")
 
@@ -991,6 +1210,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        "brief":       _itertext(ev.find("briefdescription")),
                     })
             items.append({
                 "id":          md.get("id", ""),
@@ -1235,8 +1455,12 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
     ctor_dtor_items: list[dict] = []
     func_items: list[dict] = []
     var_items: list[dict] = []
+    _detail_seen: set[str] = set()
     for sd_items in data["sections"].values():
         for m in sd_items:
+            if m["id"] in _detail_seen:
+                continue
+            _detail_seen.add(m["id"])
             if m["kind"] == "typedef":
                 typedef_items.append(m)
             elif m["kind"] == "enum":
@@ -1262,6 +1486,7 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         if directive != "doxygenfunction":
             spec = re.sub(r"\s+", "", spec)
         # MyST anchor label so the summary-table `#refid` link resolves.
+        spec = spec.replace("< ", "<").replace(" >", ">")
         return [
             f"({m['id']})=",
             f"```{{{directive}}} {spec}",
@@ -1496,18 +1721,38 @@ def _build_ns_group_map(all_refids: list[str],
             ns_name = (ns_cd.findtext("compoundname") or "").strip()
             if any(p in ns_name.split("::") for p in ("detail", "internal", "impl")):
                 continue
+            if not (ns_cd.findall("sectiondef") or
+                    ns_cd.findall("innerclass") or
+                    ns_cd.findall("innernamespace")):
+                continue
             ns_to_groups.setdefault(ns_name, set()).add(cname)
     return ns_to_groups
 
 
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
-                          xml_dir: pathlib.Path) -> tuple[str, str]:
+                          xml_dir: pathlib.Path,
+                          ns_group_map: dict | None = None,
+                          group_info: dict | None = None) -> tuple[str, str]:
     """Write api/namespace_<slug>.md for one namespace. Returns (anchor, fname)."""
     import xml.etree.ElementTree as _ET
     slug = ns["name"].replace("::", "__")
     anchor = f"api_ns_{slug}"
     fname = f"namespace_{slug}.md"
     lines = [f"# {ns['name']} namespace {{#{anchor}}}", ""]
+    if ns_group_map and group_info:
+        crumbs: list[str] = []
+        for grp in sorted(ns_group_map.get(ns["name"], set())):
+            chain: list[str] = []
+            cur: str | None = grp
+            while cur and cur in group_info:
+                chain.append(cur)
+                cur = group_info[cur]["parent"]
+            chain.reverse()
+            parts = [f"[{group_info[g]['title']}]({g}.md)" for g in chain]
+            if parts:
+                crumbs.append(" » ".join(parts))
+        if crumbs:
+            lines += [" | ".join(crumbs), ""]
     if ns["brief"]:
         lines += [ns["brief"], ""]
 
@@ -1526,6 +1771,10 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             continue
                         qualified = (md.findtext("qualifiedname") or "").strip() or \
                                     (md.findtext("name") or "").strip()
+                        # Skip class methods / sub-namespace members inlined via group patching.
+                        _ns_pfx = ns["name"] + "::"
+                        if qualified.startswith(_ns_pfx) and "::" in qualified[len(_ns_pfx):]:
+                            continue
                         def _pt(p) -> str:
                             t = _itertext(p.find("type"))
                             arr = (p.findtext("array") or "").strip()
@@ -1536,6 +1785,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                                 enum_values.append({
                                     "name":        (ev.findtext("name") or "").strip(),
                                     "initializer": (ev.findtext("initializer") or "").strip(),
+                                    "brief":       _itertext(ev.find("briefdescription")),
                                 })
                         ns_sections.setdefault(section_title, []).append({
                             "id":          md.get("id", ""),
@@ -1543,6 +1793,8 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             "name":        (md.findtext("name") or "").strip(),
                             "qualified":   qualified,
                             "type":        _itertext(md.find("type")),
+                            "type_elem":   md.find("type"),
+                            "static":      md.get("static") == "yes",
                             "args":        (md.findtext("argsstring") or "").strip(),
                             "param_types": [_pt(p) for p in md.findall("param")],
                             "brief":       _itertext(md.find("briefdescription")),
@@ -1552,8 +1804,42 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         except _ET.ParseError:
             pass
 
-    # Namespace XML lacks <innerclass> in Doxygen 1.12; glob by refid prefix.
+    # Sub-namespaces: read <innernamespace> directly from the namespace XML.
     ns_prefix = ns["name"] + "::"
+    innernamespaces = []
+    if ns_xml_path and ns_xml_path.is_file():
+        try:
+            cd_ns2 = _ET.parse(ns_xml_path).getroot().find("compounddef")
+            if cd_ns2 is not None:
+                for inn in cd_ns2.findall("innernamespace"):
+                    iname = (inn.text or "").strip()
+                    irefid = inn.get("refid", "")
+                    if iname:
+                        innernamespaces.append((iname, irefid))
+        except _ET.ParseError:
+            pass
+    def _ns_has_content(refid: str) -> bool:
+        f = xml_dir / f"{refid}.xml"
+        if not f.is_file():
+            return True  # can't check → keep
+        try:
+            cd3 = _ET.parse(f).getroot().find("compounddef")
+            return cd3 is not None and bool(
+                cd3.findall("sectiondef") or
+                cd3.findall("innerclass") or
+                cd3.findall("innernamespace"))
+        except _ET.ParseError:
+            return True
+    nonempty_ns = [(n, r) for n, r in innernamespaces if _ns_has_content(r)]
+    if nonempty_ns:
+        lines += ["## Namespaces", "", "| Namespace |", "|---|"]
+        for iname, irefid in sorted(nonempty_ns, key=lambda x: x[0].lower()):
+            short = iname[len(ns_prefix):] if iname.startswith(ns_prefix) else iname
+            islug = iname.replace("::", "__")
+            lines.append(f"| [namespace {short}](namespace_{islug}.md) |")
+        lines.append("")
+
+    # Namespace XML lacks <innerclass> in Doxygen 1.12; glob by refid prefix.
     refid_prefix = ns["name"].replace("::", "_1_1") + "_1_1"
     innerclasses = []
     for kind in ("struct", "class"):
@@ -1647,18 +1933,15 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.append(f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         lines.append("")
 
-    # Detailed Description: emit the namespace's own description *text*, not a
-    # `{doxygennamespace}` directive. breathe expands that directive into every
-    # member of the namespace inline — for `cv` that is essentially the whole
-    # library — which (a) re-declares thousands of symbols already documented on
-    # their group/class pages, producing a flood of "Duplicate C++ declaration"
-    # warnings, (b) re-parses every hard template/intrinsic signature, producing
-    # thousands of "Error when parsing function declaration" warnings, and
-    # (c) collides with the per-member detail blocks emitted below, producing
-    # "Duplicate explicit target name" warnings. The summary tables + per-member
-    # blocks already cover the members, so only the prose description is needed
-    # here. (Mirrors how `_write_api_stub` renders group-page descriptions.)
-    if ns.get("detailed"):
+    if not ns_sections and not innerclasses:
+        lines += [
+            "## Detailed Description",
+            "",
+            f"```{{doxygennamespace}} {ns['name']}",
+            ":project: opencv",
+            "```",
+        ]
+    elif ns.get("detailed"):
         lines += ["## Detailed Description", "", ns["detailed"], ""]
 
     # Per-member detail blocks.
@@ -1667,6 +1950,45 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         items = ns_sections.get(section_title, [])
         if not items:
             continue
+
+        # Enums: heading + declaration + Enumerator table with Python names.
+        if section_title == "Enumerations":
+            enum_items = [m for m in items if "<" not in (m.get("name") or "")]
+            if enum_items:
+                lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
+                lines.append("")
+                for m in enum_items:
+                    qualified = m["qualified"] or m["name"]
+                    keyword = "enum class" if m.get("strong") else "enum"
+                    lines.append(f"({m['id']})=")
+                    lines.append(f"### {m['name']}")
+                    lines.append("")
+                    lines += [f"`{keyword} {qualified}`", ""]
+                    if m.get("brief"):
+                        lines += [_md_escape_cell(m["brief"]), ""]
+                    vals = m.get("enum_values") or []
+                    if vals:
+                        has_desc = any(v.get("brief") for v in vals)
+                        if has_desc:
+                            lines += ["| Enumerator | Description |", "|---|---|"]
+                        else:
+                            lines += ["| Enumerator |", "|---|"]
+                        for v in vals:
+                            scope = qualified if m.get("strong") else ns["name"]
+                            cpp_key = f"{scope}::{v['name']}"
+                            py_entries = _PY_SIGNATURES.get(cpp_key, [])
+                            py_name = py_entries[0]["name"] if py_entries else None
+                            cell = f"`{v['name']}`"
+                            if py_name:
+                                cell += f"<br>Python: `{py_name}`"
+                            if has_desc:
+                                desc = _md_escape_cell(v.get("brief") or "")
+                                lines.append(f"| {cell} | {desc} |")
+                            else:
+                                lines.append(f"| {cell} |")
+                        lines.append("")
+            continue
+
         directive = _MEMBER_DIRECTIVE.get(kind_key)
         if not directive:
             continue
@@ -1751,17 +2073,6 @@ def _stub_write(path: pathlib.Path, content: str) -> None:
         path.write_text(content, encoding="utf-8")
     _stub_written.add(path)
 
-
-# # ORIGINAL (wipe-and-regenerate) — uncomment to restore:
-# def _generate_api_stubs(modules, xml_dir, out_dir):
-#     if not modules: return
-#     if not xml_dir.is_dir(): return
-#     import shutil
-#     if out_dir.exists(): shutil.rmtree(out_dir)
-#     out_dir.mkdir(parents=True, exist_ok=True)
-#     ... (rest unchanged)
-
-
 def _generate_api_stubs(modules, xml_dir, out_dir):
     """Generate the full api/ stub tree. Write-if-changed so Sphinx incremental
     builds only reprocess pages whose content actually changed. Stale files
@@ -1813,10 +2124,18 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         all_nodes = _collect_all_nodes(tree)
         all_refids = ["group__" + n.replace("_", "__") for n in all_nodes]
         ns_group_map = _build_ns_group_map(all_refids, _API_XML_DIR)
+        # Flatten the group tree into {name: {title, parent}} for breadcrumbs.
+        group_info: dict[str, dict] = {}
+        def _flatten(node: dict, parent: str | None) -> None:
+            group_info[node["name"]] = {"title": node["title"], "parent": parent}
+            for child in node.get("children", []):
+                _flatten(child, node["name"])
+        _flatten(tree, None)
         ns_map: dict[str, list] = {}
         for group_name in all_nodes:
             for ns in _namespaces_for_group(group_name, _API_XML_DIR, ns_group_map):
-                anchor, _ = _write_namespace_stub(ns, out_dir, _API_XML_DIR)
+                anchor, _ = _write_namespace_stub(ns, out_dir, _API_XML_DIR,
+                                                  ns_group_map, group_info)
                 ns_map.setdefault(group_name, []).append((ns["name"], anchor))
         _write_api_stub(tree, out_dir, classes_seen, ns_map)
     # Per-class pages (one per unique refid across all groups). We also
@@ -1829,7 +2148,6 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         _ANCHOR_TO_DOC[cls["refid"]] = f"api/{_class_page_name(cls['refid'])}"
     # (out_dir / "api_root.markdown").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
     _stub_write(out_dir / "api_root.markdown", "\n".join(root_lines) + "\n")
-    # Remove stale files from removed modules.
     for _p in list(out_dir.iterdir()):
         if _p not in _stub_written:
             _p.unlink(missing_ok=True)
@@ -1846,17 +2164,25 @@ if API_MODULES:
     # Recursive scan picks up api_root.markdown + every group stub.
     _scan_internal(SPHINX_INPUT_ROOT / "api")
 
-# External scan: every OTHER main module's top-level table_of_content_*.markdown.
-# Sources live under DOC_ROOT (the staged tree only contains *enabled* main
-# modules, not the rest), so scan DOC_ROOT directly here.
+# External scan: every OTHER module's top-level table_of_content_*.markdown.
 for _toc in (DOC_ROOT / "tutorials").glob("*/table_of_content_*.markdown"):
     if _toc.parent.name not in DOC_MODULES:
         _scan_external(_toc)
 
-# Belt-and-suspenders anchor scan over the contrib source trees directly,
-# walking both `.markdown` and `.md` files. Catches anchors `_scan_internal`
-# above might miss when the staged symlinks aren't followed (e.g. by older
-# pathlib versions).
+_scan_internal(DOC_ROOT / "js_tutorials" / "js_tutorials.markdown", base=DOC_ROOT)
+for _m in DOC_JS_MODULES:
+    _scan_internal(DOC_ROOT / "js_tutorials" / _m, base=DOC_ROOT)
+for _toc in (DOC_ROOT / "js_tutorials").glob("*/js_table_of_contents_*.markdown"):
+    if _toc.parent.name not in DOC_JS_MODULES:
+        _scan_external(_toc)
+
+_scan_internal(DOC_ROOT / "py_tutorials" / "py_tutorials.markdown", base=DOC_ROOT)
+for _m in DOC_PY_MODULES:
+    _scan_internal(DOC_ROOT / "py_tutorials" / _m, base=DOC_ROOT)
+for _toc in (DOC_ROOT / "py_tutorials").glob("*/py_table_of_contents_*.markdown"):
+    if _toc.parent.name not in DOC_PY_MODULES:
+        _scan_external(_toc)
+
 for _m in CONTRIB_MODULES:
     _tut_dir = CONTRIB_ROOT / _m / "tutorials"
     if not _tut_dir.is_dir():
@@ -1870,33 +2196,31 @@ for _m in CONTRIB_MODULES:
         for _mm in re.finditer(r"\{#([\w-]+)\}", _head):
             _ANCHOR_TO_DOC[_mm.group(1)] = _rel
 
-# Basename -> srcdir-relative URL index for image lookup, mirroring
-# Doxygen's flat IMAGE_PATH. Walks source trees directly (not the staged
-# tree) because pathlib.rglob in Python <3.13 doesn't follow symlinks.
+# Doxygen flattens IMAGE_PATH across every `images/` folder under the tutorial
+# tree, so a tutorial can reference `images/foo.png` even when `foo.png` lives
+# in a sibling module's `images/` directory. Mirror that behavior by building
+# a basename -> doc-root-relative-path index once at import time.
 _IMAGE_INDEX: dict[str, str] = {}
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp"}
-for _img in (DOC_ROOT / "tutorials").rglob("images/*"):
+for _img_tree in (DOC_ROOT / "tutorials", DOC_ROOT / "js_tutorials", DOC_ROOT / "py_tutorials"):
+    for _img in _img_tree.rglob("images/*"):
+        if _img.is_file():
+            _IMAGE_INDEX.setdefault(_img.name, _img.relative_to(DOC_ROOT).as_posix())
+for _img in (DOC_ROOT / "js_tutorials" / "js_assets").glob("*"):
     if _img.is_file():
-        _IMAGE_INDEX.setdefault(_img.name,
-                                _img.relative_to(DOC_ROOT).as_posix())
+        _IMAGE_INDEX.setdefault(_img.name, _img.relative_to(DOC_ROOT).as_posix())
+for _img in (DOC_ROOT / "images").glob("*"):
+    if _img.is_file():
+        _IMAGE_INDEX.setdefault(_img.name, _img.relative_to(DOC_ROOT).as_posix())
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp"}
 for _m in CONTRIB_MODULES:
-    # <m>/tutorials/**/images/* — same shape as main, reachable through
-    # the existing tutorials_contrib/<m> symlink CMake stages.
-    _tut = CONTRIB_ROOT / _m / "tutorials"
-    if _tut.is_dir():
-        # Walk every image under <m>/tutorials/, not just `images/*`
-        # subdirs — some contrib modules (e.g. face) park assets in
-        # non-standard sibling dirs like `img/`, `gender_classification/`,
-        # or `facerec_video/` that Doxygen IMAGE_PATH already flattens
-        # by basename.
-        for _img in _tut.rglob("*"):
+    _tut_dir = CONTRIB_ROOT / _m / "tutorials"
+    if _tut_dir.is_dir():
+        for _img in _tut_dir.rglob("*"):
             if _img.is_file() and _img.suffix.lower() in _IMAGE_EXTS:
-                _rel = _img.relative_to(_tut).as_posix()
-                _IMAGE_INDEX.setdefault(_img.name,
-                                        f"tutorials_contrib/{_m}/{_rel}")
-    # Contrib images outside <m>/tutorials/ (e.g. <m>/doc/pics, <m>/samples)
-    # aren't staged; index with a _contrib_images/<rel> URL and materialize
-    # lazily on first use via _materialize_contrib_image().
+                _rel_str = "tutorials_contrib/" + _m + "/" + _img.relative_to(_tut_dir).as_posix()
+                _IMAGE_INDEX.setdefault(_img.name, _rel_str)
+    # Contrib images outside <m>/tutorials/. URL is contrib_modules/<m>/<rest>.
+    # Files served via html_extra_path — no copies in srcdir.
     for _sub in ("doc", "samples"):
         _src = CONTRIB_ROOT / _m / _sub
         if _src.is_dir():
@@ -1999,9 +2323,7 @@ _TOGGLE_LABELS = {"cpp": "C++", "java": "Java", "python": "Python"}
 
 # Mirror of Doxygen's EXAMPLE_PATH (see opencv/doc/Doxyfile.in) — the bases a
 # bare `@snippet some/path.cpp` is resolved against. OPENCV_ROOT comes first so
-# fully-qualified paths like `samples/cpp/...` keep working. Contrib module
-# samples are appended so `@snippet introduction_to_svm.cpp ...` in a contrib
-# tutorial resolves to opencv_contrib/modules/<m>/samples/...
+# fully-qualified paths like `samples/cpp/...` keep working.
 _SNIPPET_BASES = [
     OPENCV_ROOT,
     OPENCV_ROOT / "samples",
@@ -2095,19 +2417,35 @@ def _read_snippet(rel_path: str, label: str | None) -> tuple[str, str]:
     return "\n".join(lines), lang
 
 
-def _emit_toggles(tabs: list[tuple[str, str]]) -> str:
+def _emit_toggles(tabs: list[tuple[str, str]], indent: str = "") -> str:
+    def _dedent(body: str) -> str:
+        # Fully dedent the tab-item body to column 0. The {tab-item} directive
+        # resets the parser context, so directives (```{code-block}```) must be
+        # at column 0 to be recognised — not at 4-space where CommonMark treats
+        # them as indented code blocks. Using the actual minimum indent of all
+        # non-empty lines (instead of exactly len(indent)) handles the case
+        # where @snippet/@include is indented deeper than @add_toggle (e.g.
+        # 8-space snippet inside a 4-space toggle block).
+        lines = body.split("\n")
+        non_empty = [l for l in lines if l.strip()]
+        if not non_empty:
+            return body
+        min_ind = min(len(l) - len(l.lstrip()) for l in non_empty)
+        if min_ind == 0:
+            return body
+        return "\n".join(l[min_ind:] if l.strip() else l for l in lines)
     if HAVE_SPHINX_DESIGN:
         out = ["", "``````{tab-set}"]
         for lang, body in tabs:
             label = _TOGGLE_LABELS.get(lang, lang.title())
-            out += [f"`````{{tab-item}} {label}", body, "`````"]
+            out += [f"`````{{tab-item}} {label}", _dedent(body), "`````"]
         out += ["``````", ""]
         return "\n".join(out)
     # Fallback: render each toggle as a labeled section.
     out = [""]
     for lang, body in tabs:
         label = _TOGGLE_LABELS.get(lang, lang.title())
-        out += [f"**{label}**", "", body, ""]
+        out += [f"**{label}**", "", _dedent(body), ""]
     return "\n".join(out)
 
 
@@ -2790,106 +3128,483 @@ def _translate(text: str, docname: str | None = None) -> str:
         lambda m: m.group(1) + re.sub(r"^    ", "", m.group(2), flags=re.MULTILINE),
         text, flags=re.MULTILINE)
 
-    # 12. Image paths `images/foo.png`. Try the doc's local `images/`
-    #     sibling first, then the global basename index, then a final
-    #     well-known fallback dir (mirrors Doxygen flat IMAGE_PATH).
+    # 1a-iii. 4-space list items under a plain paragraph line → strip to fix lazy continuation.
+    text = re.sub(
+        r"(^(?![ \t#@`]|-#|[-*+]\s|\d+[.)]\s)[^\n]+\n)((?:    [-*+][ \t][^\n]*\n(?:[ \t]{5,}[^\n]*\n)*)+)",
+        lambda m: m.group(1) + re.sub(r"^    ", "", m.group(2), flags=re.MULTILINE),
+        text, flags=re.MULTILINE)
+
+    # 1b0. \b word → **word** (Doxygen bold macro — single next word only).
+    text = re.sub(r"\\b\s+(\S+)", r"**\1**", text)
+
+    # 1b. @note ... / @see ...  -> MyST admonitions.
+    #     Runs BEFORE math conversion so that \f[...\f] inside a note body is
+    #     still on one logical line and does not create a blank-line terminator
+    #     that would cut the body short.
+    #     Allow optional leading indent and bare @note (body on next line).
+    #     Dedent the body so indented lines don't become code blocks inside
+    #     the directive.
+    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning", "sa": "seealso"}
+    def _admon_repl(m: re.Match) -> str:
+        indent = m.group("indent")
+        kind = _ADMON_KIND[m.group("dir")]
+        raw = m.group("body")
+        lines = raw.split("\n")
+        min_ind = min(
+            (len(l) - len(l.lstrip()) for l in lines if l.strip()), default=0)
+        body = "\n".join(l[min_ind:] for l in lines).strip()
+        return f"\n{indent}:::{{{kind}}}\n{indent}{body}\n{indent}:::\n"
+    text = re.sub(
+        r"^(?P<indent>[ \t]*)@(?P<dir>note|see|warning|sa)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
+        _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
+
+    # 1c. @param / @return → MyST definition list.
+    def _param_block_repl(m: re.Match) -> str:
+        items: list[list] = []
+        for line in m.group(0).split("\n"):
+            pm = re.match(r"^@param\s+(\S+)\s*(.*)", line)
+            rm = re.match(r"^@return\s*(.*)", line)
+            if pm:
+                items.append([f"`{pm.group(1)}`", [pm.group(2).strip()]])
+            elif rm:
+                items.append(["*(return value)*", [rm.group(1).strip()]])
+            elif items and line.strip():
+                items[-1][1].append(line.strip())
+        def _inline_block_math(s: str) -> str:
+            if re.match(r"^\\f\[.+\\f\]$", s.strip()):
+                return s
+            return re.sub(r"\\f\[(.+?)\\f\]", lambda mm: f"${mm.group(1).strip()}$", s)
+        result = []
+        has_param = False
+        for key, desc_lines in items:
+            desc_lines = [l for l in desc_lines if l]
+            if not desc_lines:
+                continue
+            if key != "*(return value)*":
+                has_param = True
+            entry = f"{key}\n: {_inline_block_math(desc_lines[0])}"
+            for cont in desc_lines[1:]:
+                entry += f"\n  {_inline_block_math(cont)}"
+            result.append(entry)
+        header = "\n**Parameters**\n\n" if has_param else "\n"
+        return header + "\n\n".join(result) + "\n"
+    text = re.sub(
+        r"((?:^@(?:param\s+\S+|return)\s+[^\n]+\n(?:[ \t]+[^\n]+\n)*)+)",
+        _param_block_repl, text, flags=re.MULTILINE)
+
+    # 2. Doxygen LaTeX math markers.
+    #    Block \f[...\f]: consume leading indent and re-emit it on the $$
+    #    fence lines so the block stays inside any enclosing list item and
+    #    the text that follows (at the same indent) is not misread as a code block.
+    #
+    #    Preprocess: when two \f[...\f] blocks are adjacent on the same source
+    #    line (e.g. \end{bmatrix}\f]\f[G_{y}), split them onto separate lines
+    #    and prefix the second \f[ with the line's own leading indent.  Without
+    #    this the primary regex below would convert the first block correctly but
+    #    leave the second \f[ at column 0 in the output; the fallback then emits
+    #    that block at column 0, breaking any enclosing list structure.
+    def _split_adj_math(m: re.Match) -> str:
+        indent = m.group("indent")
+        return m.group(0).replace("\\f]\\f[", f"\\f]\n{indent}\\f[")
+    text = re.sub(r"^(?P<indent>[ \t]*)[^\n]*\\f\]\\f\[",
+                  _split_adj_math, text, flags=re.MULTILINE)
+
+    def _block_math_repl(m: re.Match) -> str:
+        ind = m.group("indent")
+        return f"\n{ind}$$\n{m.group('body').strip()}\n{ind}$$\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)\\f\[(?P<body>.+?)\\f\]",
+                  _block_math_repl, text, flags=re.DOTALL | re.MULTILINE)
+    # Fallback for any \f[...\f] not at line-start (e.g. two adjacent blocks).
+    text = re.sub(r"\\f\[(.+?)\\f\]",
+                  lambda m: f"\n$$\n{m.group(1).strip()}\n$$\n",
+                  text, flags=re.DOTALL)
+    # Inline math.
+    text = re.sub(r"\\f\$(.+?)\\f\$", lambda m: f"${m.group(1)}$",
+                  text, flags=re.DOTALL)
+
+    # 2b. Normalise unknown Pygments lexer names: plaintext/bash/sh → text.
+    text = re.sub(r"^([ \t]*)```plaintext\b", r"\1```text", text, flags=re.MULTILINE)
+    text = re.sub(r"^([ \t]*)```(?:bash|sh)\b", r"\1```text", text, flags=re.MULTILINE)
+
+    # 3. @code{.lang} ... @endcode
+    # Capture leading indent so the fence stays inside any enclosing list item.
+    def _code_repl(m: re.Match) -> str:
+        indent = m.group("indent")
+        lang = (m.group("lang") or "").strip(".") or "text"
+        if lang in ("none", "plaintext"):
+            lang = "text"
+        if lang in ("bash", "sh"):
+            lang = "text"
+        if lang == "m":
+            lang = "objc"
+        if lang == "js":
+            lang = "javascript"
+        raw = m.group("body").split("\n")
+        non_empty = [l for l in raw if l.strip()]
+        min_ind = min((len(l) - len(l.lstrip()) for l in non_empty), default=0)
+        lines = [l[min_ind:] if l.strip() else "" for l in raw]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        body = "\n".join(indent + l for l in lines)
+        return f"\n{indent}```{{code-block}} {lang}\n{body}\n{indent}```\n"
+    text = re.sub(
+        r"^(?P<indent>[ \t]*)@code(?:\{(?P<lang>[^}]*)\})?\s*\n(?P<body>.*?)\n?[ \t]*@endcode",
+        _code_repl, text, flags=re.DOTALL | re.MULTILINE)
+
+    # 4. @include path  /  @includelineno path
+    #    Indent preserved so code blocks inside list items don't break the list.
+    def _include_repl(m: re.Match) -> str:
+        indent = m.group("indent")
+        code, lang = _read_snippet(m.group("path"), None)
+        body = "\n".join(indent + l for l in code.rstrip().split("\n"))
+        return f"\n{indent}```{{code-block}} {lang}\n{body}\n{indent}```\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)@include(?:lineno)?\s+(?P<path>\S+)",
+                  _include_repl, text, flags=re.MULTILINE)
+
+    # 4b. Remove stray @snippet that immediately follows @end_toggle at the same
+    #     indent (no blank line between them). These are Doxygen fallback snippets
+    #     for non-toggle Doxygen mode; the Sphinx build already shows them inside
+    #     the tab-set, so the stray duplicate must be dropped before step 5
+    #     converts it to a {code-block} that would land at document level with an
+    #     invalid 4-space closing fence.
+    text = re.sub(
+        r"(^([ \t]*)@end_toggle[ \t]*\n)\2@snippet[^\n]*\n",
+        r"\1",
+        text, flags=re.MULTILINE)
+
+    # 5. @snippet path [Label]
+    # Indent preserved so code blocks inside list items don't break the list.
+    def _snippet_repl(m: re.Match) -> str:
+        indent = m.group("indent")
+        code, lang = _read_snippet(m.group("path"), m.group("label"))
+        body = "\n".join(indent + l for l in code.rstrip().split("\n"))
+        return f"\n{indent}```{{code-block}} {lang}\n{body}\n{indent}```\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)@snippet\s+(?P<path>\S+)\s+(?P<label>[^\n]+?)\s*$",
+                  _snippet_repl, text, flags=re.MULTILINE)
+
+    # 5b. @snippetlineno — same as @snippet with :linenos:.
+    def _snippetlineno_repl(m: re.Match) -> str:
+        indent = m.group("indent")
+        code, lang = _read_snippet(m.group("path"), m.group("label"))
+        body = "\n".join(indent + l for l in code.rstrip().split("\n"))
+        return f"\n{indent}```{{code-block}} {lang}\n{indent}:linenos:\n{body}\n{indent}```\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)@snippetlineno\s+(?P<path>\S+)\s+(?P<label>[^\n]+?)\s*$",
+                  _snippetlineno_repl, text, flags=re.MULTILINE)
+
+    # 6. @add_toggle_LANG ... @end_toggle  (coalesce runs into one tab-set)
+    #    Capture the leading indent of each toggle block and emit the tab-set
+    #    fence lines at the same indent, so toggles inside list items stay as
+    #    list-item continuation content (where 4-space fences are valid).
+    #    Body content is dedented so code blocks at column 0 inside the
+    #    directive body are parsed correctly by myst-parser.
+    def _toggle_collapse(src: str) -> str:
+        out, i = [], 0
+        opener = re.compile(r"^([ \t]*)@add_toggle_(\w+)[ \t]*$", re.MULTILINE)
+        while True:
+            m = opener.search(src, i)
+            if not m:
+                out.append(src[i:]); break
+            out.append(src[i:m.start()])
+            block_ind, tabs, j = m.group(1), [], m.start()
+            while True:
+                m2 = re.match(
+                    r"[ \t]*@add_toggle_(\w+)[ \t]*\n(.*?)\n[ \t]*@end_toggle[ \t]*\n?",
+                    src[j:], flags=re.DOTALL)
+                if not m2:
+                    break
+                tabs.append((m2.group(1), m2.group(2)))
+                j += m2.end()
+                k = re.match(r"\s*", src[j:])
+                if not k or not re.match(r"@add_toggle_", src[j + k.end():]):
+                    break
+                j += k.end()
+            if not tabs:
+                out.append(src[m.start():m.start() + 1]); i = m.start() + 1; continue
+            out.append(_emit_toggles(tabs, block_ind))
+            i = j
+        return "".join(out)
+    text = _toggle_collapse(text)
+
+    # 6b. Strip list-item continuation indent stranded after a col-0 tab-set close.
+    def _strip_tabset_continuations(src: str) -> str:
+        lines = src.split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line == "``````":
+                out.append(line)
+                i += 1
+                while i < len(lines):
+                    ln = lines[i]
+                    if ln.startswith("    "):
+                        out.append(ln[4:])
+                        i += 1
+                    elif not ln.strip():
+                        out.append(ln)
+                        i += 1
+                    else:
+                        break
+            else:
+                out.append(line)
+                i += 1
+        return "\n".join(out)
+    text = _strip_tabset_continuations(text)
+
+    # 7. toctree before @ref so list-item @ref tutorial_* entries aren't converted first
+    def _subpage_list_to_toctree(src: str) -> str:
+        if not src.endswith("\n"):
+            src += "\n"
+        pat = re.compile(
+            r"((?:^[ \t]*-\s+@(?:subpage\s+[\w-]+|ref\s+tutorial_[\w-]+)[^\n]*\n(?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)+)",
+            re.MULTILINE)
+        def repl(m: re.Match) -> str:
+            block = m.group(1)
+            entries = re.findall(r"@(?:subpage|ref)\s+([\w-]+)", block)
+            dm = re.search(
+                r"@(?:subpage|ref)\s+[\w-]+[^\n]*\n((?:(?:[ \t]*\n)?[ \t]+[^\n]+\n)*)", block)
+            desc_raw = dm.group(1) if dm and dm.group(1) else ""
+            _groups: list[list[str]] = [[]]
+            for _l in desc_raw.splitlines():
+                if _l.strip():
+                    _groups[-1].append(_l.strip())
+                elif _groups[-1]:
+                    _groups.append([])
+            desc = "\n\n".join(" ".join(g) for g in _groups if g) or None
+            lines = []
+            for e in entries:
+                if e in _ANCHOR_TO_DOC:
+                    lines.append("/" + _ANCHOR_TO_DOC[e])
+                elif e in _ANCHOR_TO_EXTERNAL:
+                    title, url = _ANCHOR_TO_EXTERNAL[e]
+                    lines.append(f"{title} <{url}>")
+                elif e in _TAG_FILENAMES:
+                    title = _TAG_PAGE_TITLES.get(e, e)
+                    lines.append(f"{title} <{DOXYGEN_BASE_URL + _TAG_FILENAMES[e]}>")
+            if not lines:
+                return ""
+            body = "\n".join(lines)
+            result = f"\n```{{toctree}}\n:maxdepth: 1\n\n{body}\n```\n"
+            if desc:
+                result += f"\n{desc}\n"
+            return result
+        return pat.sub(repl, src)
+    text = _subpage_list_to_toctree(text)
+
+    # 7b. @ref name [optional "Display Text"]
+    def _ref_repl(m: re.Match) -> str:
+        name = m.group("name"); disp = m.group("disp")
+        target = _ANCHOR_TO_DOC.get(name)
+        if target:
+            return f"[{disp or name}]({'/' + target})"
+        return f"[{disp or name}](#{name})"
+    text = re.sub(r'@ref\s+(?P<name>[\w:-]+)(?:\s+"(?P<disp>[^"]+)")?',
+                  _ref_repl, text)
+
+    # 7b. cv.Name → [cv.Name](doxygen url) for names in the API index.
+    if _CV_API:
+        def _cvlink_repl(m: re.Match) -> str:
+            url = _CV_API.get(m.group(1))
+            return f'[cv.{m.group(1)}]({url})' if url else m.group(0)
+        _parts = re.split(r'(```.*?```|`[^`\n]+`)', text, flags=re.DOTALL)
+        text = ''.join(
+            p if i % 2 else re.sub(
+                r'(?<!\[)(?<!\()cv\.([A-Za-z][A-Za-z0-9_]*)',
+                _cvlink_repl, p)
+            for i, p in enumerate(_parts))
+
+    # 8. @cite KEY → [[KEY]](link to docs.opencv.org citelist)
+    text = re.sub(
+        r"@cite\s+([\w-]+)",
+        lambda m: f"[[{m.group(1)}]](https://docs.opencv.org/5.x/d0/de3/citelist.html#CITEREF_{m.group(1)})",
+        text)
+
+    # 8b. @youtube{ID}  -> responsive embed (raw HTML, passed through by MyST).
+    text = re.sub(
+        r"^@youtube\{(?P<id>[\w-]+)\}\s*$",
+        lambda m: (
+            '\n<div class="opencv-youtube">'
+            f'<iframe src="https://www.youtube-nocookie.com/embed/{m.group("id")}" '
+            'title="YouTube video player" frameborder="0" '
+            'allow="accelerometer; autoplay; clipboard-write; encrypted-media; '
+            'gyroscope; picture-in-picture" allowfullscreen></iframe></div>\n'
+        ),
+        text, flags=re.MULTILINE)
+
+    # 9. @next_tutorial / @prev_tutorial  -> drop
+    text = re.sub(r"^@(?:next|prev)_tutorial\{[^}]*\}\s*$", "",
+                  text, flags=re.MULTILINE)
+
+    # 10a. col-8 -# under a col-0 parent: move to col 5 (avoids CommonMark code-block threshold).
+    def _fix_nested_ordered(src: str) -> str:
+        lines = src.split("\n")
+        out = []
+        for i, line in enumerate(lines):
+            if re.match(r"^        -#\s", line):
+                nearest = ""
+                for j in range(i - 1, max(i - 40, -1), -1):
+                    m = re.match(r"^([ \t]*)-", lines[j])
+                    if m and len(m.group(1)) < 8:
+                        nearest = lines[j]
+                        break
+                out.append(line if (nearest and re.match(r"^    ", nearest)) else "     " + line[8:])
+            else:
+                out.append(line)
+        return "\n".join(out)
+    text = _fix_nested_ordered(text)
+
+    # 10b. Doxygen ordered-list marker: "-#" -> "1."
+    text = re.sub(r"^([ \t]*)-#([ \t]+)", r"\g<1>1.\g<2>",
+                  text, flags=re.MULTILINE)
+
+    # 11. @tableofcontents -> drop (PyData right sidebar replaces it)
+    text = re.sub(r"^@tableofcontents\s*$", "", text, flags=re.MULTILINE)
+
+    # 11b. @cond NAME ... @endcond  -> strip just the markers; if the
+    #      enclosed @subpage points to a disabled module it gets dropped
+    #      by _subpage_list_to_toctree above.
+    text = re.sub(r"^@cond\s+\S+\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^@endcond\s*$", "", text, flags=re.MULTILINE)
+
+    text = re.sub(r"</?center>", "", text, flags=re.IGNORECASE)
+
+    # 11d. Escape C++ template <Type> in paragraph text; skip fenced code blocks.
+    _cpp_tpl_re = re.compile(r'\b(\w+)<([A-Za-z_][\w:, *&]*?)>')
+    _lines_out: list[str] = []
+    _in_fence = False
+    for _ln in text.splitlines(keepends=True):
+        if re.match(r'^\s*```', _ln):
+            _in_fence = not _in_fence
+        if not _in_fence:
+            _ln = _cpp_tpl_re.sub(lambda m: f'{m.group(1)}&lt;{m.group(2)}&gt;', _ln)
+        _lines_out.append(_ln)
+    text = "".join(_lines_out)
+
+    # 11c. Wrap bare http(s) URLs in <> for CommonMark autolink.
+    # Group 1 = full [text](url) link → pass through; else wrap bare URL.
+    def _autolink_repl(m: re.Match) -> str:
+        if m.group(1):
+            return m.group(1)
+        url = m.group(0)
+        trail = ""
+        while url and url[-1] in ".,;:!?)":
+            trail = url[-1] + trail
+            url = url[:-1]
+        return f"<{url}>{trail}" if url else m.group(0)
+    text = re.sub(
+        r'(\[[^\]]*\]\([^)]*\))|(?<!\]\()(?<![<"])https?://\S+',
+        _autolink_repl, text)
+
+    # Depth-relative prefix for contrib_modules/ URLs (html_extra_path output).
+    _depth = docname.count("/") if docname else 0
+    _contrib_url_prefix = ("../" * _depth) + "contrib_modules/"
+
+    def _emit_contrib_img(rel_url: str, alt: str) -> str:
+        src = _contrib_url_prefix + rel_url
+        return f'<img src="{src}" alt="{alt}"/>'
+
+    # 12. Image paths "images/foo.png" — resolve like Doxygen's flat IMAGE_PATH:
+    #     prefer the doc's own "images/" sibling, then fall back to a global
+    #     basename lookup across every tutorial `images/` folder. As a final
+    #     fallback, point at the consolidated `tutorials/others/images/` dir
+    #     (where modules like `photo` store their assets).
     def _img_repl(m: re.Match) -> str:
-        rel = m.group("rel")
+        alt, rel = m.group("alt"), m.group("rel")
         if docname:
-            parts = pathlib.Path(docname).parent.parts
-            local = None
-            is_contrib_doc = len(parts) >= 2 and parts[0] == "tutorials_contrib"
-            if parts and parts[0] == "tutorials":
-                local = DOC_ROOT / pathlib.Path(docname).parent / "images" / rel
-            elif is_contrib_doc:
-                # Contrib doc → resolve under <m>/tutorials/<rest>/images/.
-                rest = pathlib.Path(*parts[2:]) if len(parts) > 2 else pathlib.Path()
-                local = CONTRIB_ROOT / parts[1] / "tutorials" / rest / "images" / rel
-            if local is not None and local.is_file():
-                if is_contrib_doc:
-                    # Stage under a unique module-prefixed basename to keep
-                    # Sphinx's `_images/<basename>` slot collision-proof
-                    # against main-tree images of the same name.
-                    staged = _stage_unique_contrib_image(local, parts[1])
-                    if staged:
-                        return f'{m.group("pre")}/{staged})'
-                return f'{m.group("pre")}images/{rel})'
+            local = DOC_ROOT / pathlib.Path(docname).parent / "images" / rel
+            if local.is_file():
+                return m.group(0)
         hit = _IMAGE_INDEX.get(pathlib.Path(rel).name)
         if hit:
-            src_info = _contrib_source_from_url(hit)
-            if src_info:
-                staged = _stage_unique_contrib_image(*src_info[::-1])
-                if staged:
-                    return f'{m.group("pre")}/{staged})'
-            _materialize_contrib_image(hit)
-            return f'{m.group("pre")}/{hit})'
-        return f'{m.group("pre")}/tutorials/others/images/{rel})'
+            if hit.startswith("contrib_modules/"):
+                return _emit_contrib_img(hit[len("contrib_modules/"):], alt)
+            return f'![{alt}](/{hit})'
+        if docname and docname.startswith("js_tutorials/"):
+            return m.group(0)
+        return f'![{alt}](/tutorials/others/images/{rel})'
     text = re.sub(
-        r'(?P<pre>!\[[^\]]*\]\()(?:[^)]*?/)?images/(?P<rel>[^)]+)\)',
+        r'!\[(?P<alt>[^\]]*)\]\(images/(?P<rel>[^)]+)\)',
         _img_repl, text)
 
-    # 12b. Cross-tree image refs (Doxygen IMAGE_PATH flattening) for
-    #      contrib pages: `pics/foo.jpg` (<m>/doc/pics/), `<m>/samples/...`,
-    #      etc. Try module-relative bases; first match gets materialized.
-    def _img_xtree(m: re.Match) -> str:
-        rel = m.group("rel")
-        if rel.startswith("/") or "://" in rel:
-            return m.group(0)
-        if rel.startswith("./"):
-            rel = rel[2:]
-        if not docname or not docname.startswith("tutorials_contrib/"):
-            return m.group(0)
-        parts = pathlib.Path(docname).parent.parts
-        if len(parts) < 2:
-            return m.group(0)
-        module = parts[1]
-        for cand in (f"{module}/doc/{rel}",
-                     f"{module}/{rel}",
-                     rel):
-            src = CONTRIB_ROOT / cand
-            if src.is_file():
-                # Stage under a unique module-prefixed basename — see
-                # _stage_unique_contrib_image() for why.
-                staged = _stage_unique_contrib_image(src, module)
-                if staged:
-                    return f'{m.group("pre")}/{staged})'
-        # Final fallback: Doxygen IMAGE_PATH flattening by basename. Catches
-        # bare filenames (`![](ab.jpg)`) and refs whose path prefix is wrong
-        # for the contrib layout but whose basename Doxygen would find anyway
-        # (`![](tutorials/gender_classification/arnie_*.jpg)` in face).
-        hit = _IMAGE_INDEX.get(pathlib.Path(rel).name)
+    # 12a2. "pics/foo.png" — contrib modules use pics/ instead of images/.
+    def _pics_img_repl(m: re.Match) -> str:
+        alt = m.group("alt")
+        hit = _IMAGE_INDEX.get(pathlib.Path(m.group("rel")).name)
         if hit:
-            src_info = _contrib_source_from_url(hit)
-            if src_info:
-                staged = _stage_unique_contrib_image(*src_info[::-1])
-                if staged:
-                    return f'{m.group("pre")}/{staged})'
-            _materialize_contrib_image(hit)
+            if hit.startswith("contrib_modules/"):
+                return _emit_contrib_img(hit[len("contrib_modules/"):], alt)
+            return f'![{alt}](/{hit})'
+        return m.group(0)
+    text = re.sub(
+        r'!\[(?P<alt>[^\]]*)\]\(pics/(?P<rel>[^)]+)\)',
+        _pics_img_repl, text)
+
+    # 12b. Bare image filenames with no directory prefix (e.g. "psf.png") that
+    #      Doxygen resolves via IMAGE_PATH but Sphinx cannot find as-is.
+    #      Redirect to images/<name> when the file lives in the doc's own
+    #      images/ sibling, otherwise fall back to the global index.
+    def _bare_img_repl(m: re.Match) -> str:
+        rel = m.group("rel")
+        if docname:
+            local = DOC_ROOT / pathlib.Path(docname).parent / "images" / rel
+            if local.is_file():
+                return f'{m.group("pre")}images/{rel})'
+        hit = _IMAGE_INDEX.get(rel)
+        if hit:
             return f'{m.group("pre")}/{hit})'
         return m.group(0)
     text = re.sub(
-        r'(?P<pre>!\[[^\]]*\]\()(?P<rel>[^)]+)\)',
-        _img_xtree, text)
+        r'(?P<pre>!\[[^\]]*\]\()(?P<rel>[A-Za-z0-9_.-]+\.[A-Za-z]{2,4})\)',
+        _bare_img_repl, text)
 
-    # 12d. Force a blank line between consecutive `Label: ![](image)`
-    #      lines so each pair becomes its own paragraph (otherwise the
-    #      images flow inline). Skip `|`-prefixed table rows.
+    # 12c. Standalone ![Caption](path) → {figure} so alt text is a visible caption.
     text = re.sub(
-        r"^(?P<line>(?!\|)[^\n]*!\[[^\]]*\]\([^)]+\)[^\n]*)\n"
-        r"(?=(?!\|)[^\n]*!\[[^\]]*\]\([^)]+\))",
-        r"\g<line>\n\n", text, flags=re.MULTILINE)
-
-    # 12e. `![Figure N: …](url)` → `:::{figure} url\nFigure N: …\n:::`
-    #      so the caption renders below the image (pr-11-src feature).
-    text = re.sub(
-        r"^(?P<indent>[ \t]*)!\[(?P<caption>Figure\s[^\]]+)\]\((?P<url>[^)]+)\)\s*$",
-        lambda m: (f"{m.group('indent')}:::{{figure}} {m.group('url')}\n"
-                   f"{m.group('indent')}{m.group('caption')}\n"
-                   f"{m.group('indent')}:::"),
+        r"^([ \t]*)!\[(?P<alt>[^\]]+)\]\((?P<path>[^)\n]+)\)[ \t]*$",
+        lambda m: (
+            f"\n{m.group(1)}```{{figure}} {m.group('path')}\n"
+            f"{m.group(1)}{m.group('alt').strip()}\n"
+            f"{m.group(1)}```\n"
+        ),
         text, flags=re.MULTILINE)
 
-    # 13. Wrap the Original-author/Compatibility front-matter table
-    #     in a `.opencv-meta-table` div so custom.css can style it.
+    # 12d. Doxygen ^ rowspan cell → merge into row above via <hr class="cv-rowdiv">.
+    def _merge_caret_rows(src: str) -> str:
+        lines = src.split("\n")
+        out: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("|") and "|" in stripped[1:]:
+                cells = [c.strip() for c in stripped.strip("|").split("|")]
+                if "^" in cells:
+                    prev_idx = next(
+                        (k for k in range(len(out) - 1, -1, -1)
+                         if out[k].strip().startswith("|") and
+                            not re.match(r"^\|[\s|:-]+\|$", out[k].strip())),
+                        None)
+                    if prev_idx is not None:
+                        prev_cells = [c.strip() for c in
+                                      out[prev_idx].strip().strip("|").split("|")]
+                        merged = []
+                        for j, cell in enumerate(cells):
+                            pv = prev_cells[j] if j < len(prev_cells) else ""
+                            if cell == "^":
+                                merged.append(pv)
+                            else:
+                                sep = '<hr class="cv-rowdiv">'
+                                merged.append(f"{pv}{sep}{cell}" if pv else cell)
+                        out[prev_idx] = "| " + " | ".join(merged) + " |"
+                        continue
+            out.append(line)
+        return "\n".join(out)
+    text = _merge_caret_rows(text)
+
+    # 13. Front-matter table: OpenCV tutorials use the "| -: | :- |"
+    #     alignment pattern for the Original-author/Compatibility block.
+    #     Wrap it in a {div} carrying .opencv-meta-table so custom.css
+    #     can pin the rounded card + label-column styling without us
+    #     modifying the .markdown source.
     def _wrap_front_matter(src: str) -> str:
         pat = re.compile(
             r"(^\|[^\n]*\|[ \t]*\n"     # header row (often empty)
@@ -2962,24 +3677,32 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 
 def _source_read(app, docname, source):
-    # Translate any tutorial doc — the root index, everything under an enabled
-    # main module, and (when staged) everything under an enabled contrib module.
-    # Also translate API stub docs (api/...) generated by _generate_api_stubs.
-    if not (docname.startswith("tutorials/")
-            or docname.startswith("tutorials_contrib/")
+    if not (docname.startswith("tutorials/") or docname.startswith("js_tutorials/")
+            or docname.startswith("py_tutorials/") or docname.startswith("tutorials_contrib/")
             or docname.startswith("api/")):
         return
-    text = source[0]
-    # On the master doc, append `- @subpage tutorial_contrib_root` and (when
-    # API_MODULES is set) `- @subpage api_root` so the contrib / API sites
-    # appear in the unified left sidebar without modifying
-    # opencv/doc/tutorials/tutorials.markdown on disk.
-    if docname == "tutorials/tutorials":
-        if CONTRIB_MODULES and "tutorial_contrib_root" in _ANCHOR_TO_DOC:
-            text = text.rstrip() + "\n\n- @subpage tutorial_contrib_root\n"
-        if API_MODULES and "api_root" in _ANCHOR_TO_DOC:
-            text = text.rstrip() + "\n\n- @subpage api_root\n"
-    source[0] = _translate(text, docname)
+    source[0] = _translate(source[0], docname)
+    if docname == "tutorials/tutorials" and DOC_JS_MODULES:
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: JavaScript Tutorials\n\n"
+            "/js_tutorials/js_tutorials\n```\n"
+        )
+    if docname == "tutorials/tutorials" and DOC_PY_MODULES:
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: Python Tutorials\n\n"
+            "/py_tutorials/py_tutorials\n```\n"
+        )
+    if docname == "tutorials/tutorials" and CONTRIB_MODULES:
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: Contrib Tutorials\n\n"
+            "/tutorials_contrib/contrib_root\n```\n"
+        )
+    if docname == "tutorials/tutorials" and API_MODULES \
+            and (SPHINX_INPUT_ROOT / "api" / "library_root.rst").exists():
+        source[0] += (
+            "\n\n```{toctree}\n:maxdepth: 1\n:caption: API Reference\n\n"
+            "/api/library_root\n```\n"
+        )
 
 
 def _patch_cpp_xref_resolver():
@@ -3024,6 +3747,11 @@ def _silence_breathe_anon_enum_warning():
             return not (
                 "Invalid C++ declaration" in msg
                 and "Expected identifier in nested name" in msg
+                ("Invalid C++ declaration" in msg
+                 and "Expected identifier in nested name" in msg)
+                or
+                ("Duplicate C++ declaration" in msg
+                 and "cpp:None::" in msg)
             )
     # docutils warning messages route through both 'sphinx' and 'docutils'
     # loggers depending on entry point; attach to both for coverage.
