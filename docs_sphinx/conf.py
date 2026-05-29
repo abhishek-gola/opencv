@@ -2341,24 +2341,39 @@ def _translate(text: str, docname: str | None = None) -> str:
     #     out of the live tagfile (only as a class-name → filename
     #     map; no docs.opencv.org URL ends up in the output).
     if docname == "api/core_basic":
-        # 8f. Insert "Shorter aliases for the most popular specializations
-        #     of Vec<T,n>" subheading before the Vec typedef rows, and
-        #     split the Typedefs table at the Vec/non-Vec boundary so the
-        #     subheading correctly applies only to the Vec specializations.
-        #     Mirrors the user-defined sectiondef in the Doxygen XML. Runs
-        #     BEFORE step 8b transforms the Type-column cells, while the
-        #     rows are still in their original markdown form.
-        text = re.sub(
-            r"(## Typedefs\n\n)"
-            r"(\| Type \| Name \| Description \|\n\|---\|---\|---\|\n)"
-            r"(\| `Vec<)",
-            r"\1### Shorter aliases for the most popular specializations of "
-            r"Vec<T,n>\n\n\2\3",
-            text)
-        text = re.sub(
-            r"(\| `Vec<[^`]*` \| [^\n]*\n)(\| `(?!Vec<))",
-            r"\1\n| Type | Name | Description |\n|---|---|---|\n\2",
-            text, count=1)
+        # 8f. Move Vec specialization rows out of the Typedefs table into
+        #     their own H2 section "Shorter aliases for the most popular
+        #     specializations of Vec<T,n>", placed between "## Functions"
+        #     and "## Typedef Documentation" to match the live Doxygen
+        #     page's ordering. Doxygen reorders user-defined sectiondefs
+        #     after the standard typedef/enum/function sections, but our
+        #     stub generator lumps everything into the main Typedefs
+        #     table; this pass restores the separation.
+        #
+        # Implementation: extract every consecutive `| `Vec<…` | … |`
+        # row from the typedef table (they're all together at the top of
+        # the table because of how the stub generator orders members),
+        # then re-emit them as a new H2 + table just before the
+        # `## Typedef Documentation` heading. Runs BEFORE the other
+        # api/core_basic rewrites so the moved rows still flow through
+        # the typedef-anchor / template-linkification / token-linkifier
+        # passes below.
+        _vec_rows_re = re.compile(
+            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
+        _vm = _vec_rows_re.search(text)
+        if _vm:
+            _vec_rows = _vm.group(0)
+            text = text[:_vm.start()] + text[_vm.end():]
+            _shorter = (
+                "## Shorter aliases for the most popular specializations of "
+                "Vec<T,n>\n\n"
+                "| Type | Name | Description |\n"
+                "|---|---|---|\n"
+                + _vec_rows + "\n")
+            text = text.replace(
+                "## Typedef Documentation",
+                _shorter + "## Typedef Documentation",
+                1)
 
         # 8c. Replace `{doxygentypedef} cv::Ptr` with a hand-rolled
         #     cpp:type directive. Breathe's doxygentypedef cannot render
