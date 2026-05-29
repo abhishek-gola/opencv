@@ -428,6 +428,19 @@ dl.cpp.function .sig-prename.descclassname { color: var(--pst-color-text-muted);
 /* --- MathJax inline alignment tweak ----------------------------------- */
 mjx-container.MathJax:not([display="true"]) { vertical-align: -0.15em !important; }
 
+/* --- Side-by-side images ---------------------------------------------- */
+/* When a paragraph contains multiple consecutive <img> tags (Doxygen's
+   pattern for showing two images horizontally — e.g. py_photo's chromatic
+   aberration "before/after" examples), constrain each image's width so
+   they fit on one row instead of stacking. */
+.bd-content p:has(img + img) img {
+    max-width: 49%;
+    height: auto;
+    display: inline-block;
+    vertical-align: top;
+}
+.bd-content p img + img { margin-left: 0.25rem; }
+
 /* --- Copy-to-clipboard button -----------------------------------------
  * Provided by the `sphinx-copybutton` extension, which injects
  * `<button class="copybtn">` into every `div.highlight > pre` at runtime
@@ -529,17 +542,159 @@ html[data-theme="dark"] button.copybtn.success {
    mode and exempts the dark one from its forced-white image background. We
    only need to size them here — no `display`/`filter` rules, which would
    fight the theme's `!important` swap. */
-img.opencv-coll-graph {
-    display: block;                  /* needed for margin-auto centering    */
-    margin: 1rem auto 1.5rem;        /* horizontally centered in the column  */
-    max-width: 100%;                 /* never overflow the content width     */
-    height: auto;                    /* preserve aspect ratio                */
-    /* Diagrams vary widely (≈270pt–580pt). The narrow ones are narrow
-       because they're tall, so widening them all would blow up their height.
-       Instead, only the small ones are nudged up to a comfortable minimum;
-       already-large diagrams keep their native size. `min(…, 100%)` keeps it
-       safe on narrow screens (never wider than the column). */
-    min-width: min(30rem, 100%);
+/* Class-only selector: the diagram is inlined as <svg> at build-finished
+   (conf.py) so its links work, so this must match <svg>, not just <img>. */
+.opencv-coll-graph {
+    /* Centre small diagrams in the column. Margin-auto needs a block-level
+       element to work. */
+    display: block;
+    margin: 1rem auto 1.5rem;
+
+    /* Render at the SVG's NATIVE intrinsic size. Doxygen / Graphviz already
+       sized each diagram so the text is readable — we just honour that.
+       `width: auto` + `height: auto` keep the aspect ratio. */
+    width: auto;
+    height: auto;
+
+    /* Crucially NO `max-width: 100%` and NO `max-height: …` here. Those caps
+       used to squash wide diagrams (e.g. cv::NAryMatIterator) down to the
+       content-column width — and once a graph is shrunk uniformly, every
+       label inside it shrinks proportionally and becomes illegible. By
+       removing the caps the diagram keeps its native size; small diagrams
+       fit naturally, large ones overflow into the scrollable wrapper below. */
+}
+
+/* The Sphinx `<p>` that wraps the inlined SVG becomes the horizontal-scroll
+   container. So:
+   * A SMALL diagram (narrower than the column) just sits at native size,
+     centred by the margin:auto above — `text-align: center` keeps it
+     centred for browsers that handle inline svg as inline.
+   * A WIDE diagram (e.g. NAryMatIterator at ~580pt ≈ 770px, or anything
+     larger than the column) overflows to the right, and `overflow-x: auto`
+     exposes a horizontal scrollbar instead of clipping or downscaling.
+   We DON'T touch the `<p>`'s vertical sizing, so tall diagrams still flow
+   normally and push the rest of the content down — they just don't squash. */
+.bd-content p:has(> svg.opencv-coll-graph),
+.bd-content p:has(> img.opencv-coll-graph) {
+    overflow-x: auto;
+    max-width: 100%;
+    text-align: center;
+}
+
+/* --- Clickable enum synopsis (.opencv-enum-synopsis) -------------------- */
+/* The class-page enum block is emitted by _enum_synopsis_html() as raw HTML
+   that uses the Pygments-cpp span classes (`k` keyword, `n` name, `o`
+   operator, `p` punctuation, …). Wrapping it in `.highlight-cpp .highlight`
+   makes Sphinx's existing code-block CSS (background, padding, monospace)
+   apply automatically — we don't have to re-style the block itself. Only
+   the inner anchors need explicit colouring so the names stand out as links
+   instead of inheriting the dark `.n` (identifier) colour. */
+/* Match the exact hex the body uses for every other link so the enum
+   names sit in the same blue palette as `cv::Mat` / `cv::KeyPoint` text
+   links elsewhere on the page. No underline, just the colour. */
+.opencv-enum-synopsis a.opencv-enum-link {
+    color: #0969da !important;
+    text-decoration: none;
+    border-radius: 2px;
+}
+.opencv-enum-synopsis a.opencv-enum-link:hover {
+    color: #0550ae !important;          /* matches `.bd-content a:hover` */
+}
+html[data-theme="dark"] .opencv-enum-synopsis a.opencv-enum-link {
+    color: #539bf5 !important;          /* matches the dark body-link rule */
+}
+html[data-theme="dark"] .opencv-enum-synopsis a.opencv-enum-link:hover {
+    color: #6cb6ff !important;
+}
+
+/* The Member Enumeration Documentation block has the same synopsis as a
+   plain Pygments code block (no `<a>` wrappers). Paint its identifiers
+   with the same hex so the two sections look identical. */
+section#member-enumeration-documentation .highlight-cpp .n {
+    color: #0969da !important;
+}
+html[data-theme="dark"] section#member-enumeration-documentation .highlight-cpp .n {
+    color: #539bf5 !important;
+}
+
+/* (Legacy) Anchor target hidden in the detail section. Empty inline spans
+   used to live here before the per-row layout below replaced them; kept for
+   pages that still carry the old markup. */
+.opencv-enum-target {
+    scroll-margin-top: 5rem;
+}
+
+/* --- Member Enumeration Documentation: per-value detail list ----------- */
+/* Each enum becomes a heading + a `<dl>` where every value is its own row.
+   This is visually distinct from the code-block synopsis at the top of the
+   page, so navigating from a Public Types link feels like a real jump. Each
+   `<dt>` carries an `id="_CPPv4…E"` anchor so clicks land on the specific
+   value, not just the top of the enum block. */
+.opencv-enum-heading {
+    margin: 1.5rem 0 0.5rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--pst-color-text-base);
+    scroll-margin-top: 5rem;        /* keep below the sticky navbar */
+}
+.opencv-enum-heading .opencv-enum-name {
+    color: #0969da;
+    font-family: var(--pst-font-family-monospace);
+}
+html[data-theme="dark"] .opencv-enum-heading .opencv-enum-name {
+    color: #539bf5;
+}
+.opencv-enum-detail {
+    margin: 0 0 1.5rem;
+    padding: 0;
+}
+.opencv-enum-detail dt {
+    /* card-style row so each enumerator is visually a clear entry, not just
+       another line of code. */
+    padding: 0.5rem 0.8rem;
+    margin-top: 0.5rem;
+    background: var(--pst-color-surface);
+    border-left: 3px solid #0969da;
+    border-radius: 0 4px 4px 0;
+    font-family: var(--pst-font-family-monospace);
+    font-size: 0.9rem;
+    /* scroll-margin-top so a URL-hash landing on this row sits below the
+       sticky navbar instead of behind it. */
+    scroll-margin-top: 5rem;
+}
+html[data-theme="dark"] .opencv-enum-detail dt {
+    border-left-color: #539bf5;
+}
+.opencv-enum-detail dt .opencv-enum-name {
+    color: #0969da;
+}
+html[data-theme="dark"] .opencv-enum-detail dt .opencv-enum-name {
+    color: #539bf5;
+}
+.opencv-enum-detail dt .opencv-enum-init {
+    color: var(--pst-color-text-muted);
+    font-weight: normal;
+}
+.opencv-enum-detail dd {
+    margin: 0.25rem 0 0 1.5rem;
+    color: var(--pst-color-text-muted);
+}
+/* Subtle target highlight: when the URL hash matches a row, fade it in so
+   the user sees exactly where they landed. */
+.opencv-enum-detail dt:target {
+    background: color-mix(in srgb, var(--pst-color-link) 12%, transparent);
+    transition: background 0.6s ease-out;
+}
+/* The inner `<span class="n">` carries Pygments' identifier colour; the
+   anchor's colour above should win, but be explicit to defeat any theme
+   override on `.highlight .n`. */
+.opencv-enum-synopsis a.opencv-enum-link > span.n {
+    color: inherit !important;
+}
+/* Soft scroll-anchor padding so when a shared URL hash lands here, the line
+   isn't flush against the site header — gives a bit of breathing room. */
+.opencv-enum-synopsis a.opencv-enum-link {
+    scroll-margin-top: 4rem;
 }
 
 /* --- "On this page" TOC: C++ domain entries ---------------------------- */

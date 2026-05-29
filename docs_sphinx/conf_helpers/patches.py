@@ -1,8 +1,9 @@
 """Runtime patches for Sphinx's C++ domain and breathe warnings.
 
 Importing this module applies them (each helper invokes itself at import):
-guard the C++ xref resolver against an upstream assertion, and silence two
-classes of benign breathe / cpp-domain warnings. conf.py imports it for effect.
+guard the C++ xref resolver against an upstream assertion, and silence the
+benign anonymous-enum parse warning breathe triggers. conf.py imports it for
+effect.
 """
 from __future__ import annotations
 
@@ -47,11 +48,8 @@ def _silence_breathe_anon_enum_warning():
         def filter(self, record: logging.LogRecord) -> bool:
             msg = record.getMessage()
             return not (
-                ("Invalid C++ declaration" in msg
-                 and "Expected identifier in nested name" in msg)
-                or
-                ("Duplicate C++ declaration" in msg
-                 and "cpp:None::" in msg)
+                "Invalid C++ declaration" in msg
+                and "Expected identifier in nested name" in msg
             )
     # docutils warning messages route through both 'sphinx' and 'docutils'
     # loggers depending on entry point; attach to both for coverage.
@@ -60,31 +58,3 @@ def _silence_breathe_anon_enum_warning():
 
 
 _silence_breathe_anon_enum_warning()
-
-
-def _silence_cpp_duplicate_declaration_warning():
-    """Suppress Sphinx's "Duplicate C++ declaration, also defined at …" warning.
-
-    The generated API tree intentionally documents a symbol in more than one
-    place — a free function appears both on its module *group* page and on its
-    *namespace* page, exactly as Doxygen's own HTML does. Sphinx's C++ domain,
-    however, keeps a single global symbol table and warns once per symbol that
-    is declared on a second page. For the `cv` namespace that is thousands of
-    benign warnings.
-
-    `suppress_warnings = ['cpp.duplicate_declaration']` does NOT catch these:
-    in Sphinx 8.1 the warning is logged untyped (see
-    sphinx/domains/cpp/__init__.py — `logger.warning(msg, location=signode)`
-    with no `type=`/`subtype=`), so the only reliable hook is a logging filter,
-    matching the approach already used for the anonymous-enum warning above."""
-    import logging
-    class _DupDeclFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            return "Duplicate C++ declaration" not in record.getMessage()
-    for _name in ("sphinx", "docutils"):
-        logging.getLogger(_name).addFilter(_DupDeclFilter())
-
-
-_silence_cpp_duplicate_declaration_warning()
-
-

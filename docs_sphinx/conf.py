@@ -26,13 +26,14 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 from conf_helpers.state import (
     DOC_ROOT, CONTRIB_ROOT, SPHINX_INPUT_ROOT,
-    DOC_MODULES, DOC_JS_MODULES, DOC_PY_MODULES, CONTRIB_MODULES, API_MODULES,
+    DOC_MODULES, JS_DOC_MODULES, PY_DOC_MODULES, CONTRIB_MODULES, API_MODULES,
     DOXYGEN_BASE_URL, _doxygen_url, _PATCHED_XML_DIR, HAVE_BREATHE,
 )
-import conf_helpers.build    # noqa: F401  runs anchor scans + API-stub generation
-#                                          + image/snippet indexing at import time.
-import conf_helpers.patches  # noqa: F401  applies the Sphinx C++ xref + warnings.
+import conf_helpers.build      # noqa: F401  bib staging + anchor scans + API-stub
+#                                            generation + image/snippet indexing.
+import conf_helpers.patches    # noqa: F401  Sphinx C++ xref + warning patches.
 from conf_helpers.translate import _source_read
+from conf_helpers.postprocess import _inline_coll_graphs_on_finish
 
 # -- Project ----------------------------------------------------------------
 project = "OpenCV"
@@ -40,10 +41,7 @@ author = "OpenCV Team"
 release = "5.x"
 
 # -- Sphinx core ------------------------------------------------------------
-extensions = ["myst_parser", "sphinx.ext.graphviz"]
-# Render Doxygen \dot ... \enddot blocks as inline SVG (matches Doxygen's
-# DOT_IMAGE_FORMAT=svg default — keeps text crisp and selectable).
-graphviz_output_format = "svg"
+extensions = ["myst_parser"]
 for _ext in ("sphinx_design", "sphinx_copybutton"):
     try:
         __import__(_ext)
@@ -51,7 +49,9 @@ for _ext in ("sphinx_design", "sphinx_copybutton"):
     except ImportError:
         pass
 
-# -- Breathe (Doxygen XML -> Sphinx C++ domain)
+# -- Breathe (Doxygen XML -> Sphinx C++ domain) -----------------------------
+# Availability detection lives in conf_helpers.state; here we just register the
+# extension and point breathe at the patched XML tree.
 if HAVE_BREATHE:
     extensions.append("breathe")
     breathe_projects = {"opencv": str(_PATCHED_XML_DIR)}
@@ -60,6 +60,13 @@ if HAVE_BREATHE:
 
 source_suffix = {".md": "markdown", ".markdown": "markdown"}
 
+# Tell Sphinx's C/C++ domain parser to treat OpenCV's compatibility macros
+# as identifier attributes (i.e. swallow them silently during parsing).
+# Without this, signatures like
+#     inline virtual const char *getName() const CV_OVERRIDE
+# raise "Invalid C++ declaration: Expected end of definition" because the
+# parser sees CV_OVERRIDE as an unknown token after `const`. These macros
+# expand to `override` / `noexcept` / `final` / nothing in cvdef.h.
 cpp_id_attributes = [
     "CV_OVERRIDE", "CV_FINAL", "CV_NOEXCEPT",
     "CV_NORETURN", "CV_DEPRECATED", "CV_DEPRECATED_EXTERNAL",
@@ -73,22 +80,31 @@ c_id_attributes = list(cpp_id_attributes)
 # regardless of how many modules are in DOC_MODULES.
 master_doc = "tutorials/tutorials"
 
-# Source dir is opencv/doc/ — scope to the master + enabled modules only.
-include_patterns = ["tutorials/tutorials.markdown"] + [
+# Source dir is the staged tree (or DOC_ROOT for legacy ad-hoc runs).
+# Scope: master + enabled main modules + (optionally) enabled contrib modules.
+include_patterns = ["tutorials/tutorials.markdown", "faq.markdown",
+                    "citelist.markdown", "intro.markdown"] + [
     f"tutorials/{m}/**" for m in DOC_MODULES
-] + (["js_tutorials/js_tutorials.markdown"] + [
-    f"js_tutorials/{m}/**" for m in DOC_JS_MODULES
-] if DOC_JS_MODULES else []) + (["py_tutorials/py_tutorials.markdown"] + [
-    f"py_tutorials/{m}/**" for m in DOC_PY_MODULES
-] if DOC_PY_MODULES else []) + (["tutorials_contrib/contrib_root.markdown"] + [
-    f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES
-] if CONTRIB_MODULES else [])
-
-# Add API stubs if API_MODULES is defined by the cherry-picked commit
+] + (["js_tutorials/js_tutorials.markdown"] if JS_DOC_MODULES else []) + [
+    f"js_tutorials/{m}/**" for m in JS_DOC_MODULES
+] + (["py_tutorials/py_tutorials.markdown"] if PY_DOC_MODULES else []) + [
+    f"py_tutorials/{m}/**" for m in PY_DOC_MODULES
+]
+if CONTRIB_MODULES and (SPHINX_INPUT_ROOT / "tutorials_contrib").is_dir():
+    include_patterns.append("tutorials_contrib/contrib_root.markdown")
+    include_patterns += [f"tutorials_contrib/{m}/**" for m in CONTRIB_MODULES]
 if API_MODULES:
+    # Stubs are generated below (in `_generate_api_stubs()`); the file set is
+    # recursive over the Doxygen group hierarchy and unknown at this point,
+    # so use a glob. The check happens at Sphinx source-enumeration time —
+    # if no files exist, the pattern just matches nothing.
     include_patterns.append("api/**")
 
-exclude_patterns = ["**/Thumbs.db", "**/.DS_Store", "tutorials/app/_old/**"]
+exclude_patterns = [
+    "**/Thumbs.db", "**/.DS_Store", "**/_old/**",
+    "tutorials/core/how_to_use_OpenCV_parallel_for_/**",
+    "tutorials/introduction/load_save_image/**",
+]
 
 myst_enable_extensions = [
     "colon_fence", "deflist", "dollarmath", "amsmath",
@@ -99,7 +115,6 @@ suppress_warnings = [
     "myst.header", "myst.xref_missing", "toc.not_included",
     "misc.highlighting_failure",
     "image.not_readable",
-    "cpp.duplicate_declaration",
 ]
 
 # -- HTML / PyData theme ----------------------------------------------------
@@ -147,32 +162,22 @@ html_theme_options = {
                     "icon": "fa-brands fa-github"}],
 }
 
-# Doxygen defines \fork{a}{b}{c}{d} as a piecewise-function shorthand.
-# Define it as a MathJax macro so threshold.markdown renders correctly.
-mathjax3_config = {
-    "tex": {
-        "macros": {
-            "fork": [r"\left\{ \begin{array}{ll} #1 & \mbox{#2}\\ #3 & \mbox{#4}\end{array} \right.", 4],
-        }
-    }
-}
-
 # Exposed to templates/navbar-nav.html so it can rewrite external_links
 # whose URL starts with this base into depth-aware relative paths to the
 # local Doxygen output, instead of redirecting users to docs.opencv.org.
 html_context = {"doxygen_base_url": DOXYGEN_BASE_URL}
 
-# -- Contrib asset serving via html_extra_path ------------------------------
-# Out-of-source-tree srcdirs expose enabled contrib modules under
-# /contrib_modules/<m>/... via symlinks + html_extra_path (no srcdir copies).
+# Expose each enabled contrib module as a symlink under a build-dir subdir
+# and let Sphinx's html_extra_path publish the tree to the output. Output
+# URLs are /contrib_modules/<m>/... — no files duplicated in srcdir.
+# Skipped when SPHINX_INPUT_ROOT lives inside a source tree (i.e. ad-hoc
+# sphinx-build without CMake's OPENCV_SPHINX_INPUT_ROOT) — matches the
+# documented "always build through CMake" expectation.
 html_extra_path: list[str] = []
 def _in_source_tree(p: pathlib.Path) -> bool:
     for _root in (DOC_ROOT, CONTRIB_ROOT):
-        try:
-            p.relative_to(_root)
-            return True
-        except ValueError:
-            pass
+        try: p.relative_to(_root); return True
+        except ValueError: pass
     return False
 if not _in_source_tree(SPHINX_INPUT_ROOT):
     _extras = SPHINX_INPUT_ROOT.parent / "contrib_extras"
@@ -181,13 +186,12 @@ if not _in_source_tree(SPHINX_INPUT_ROOT):
     for _m in CONTRIB_MODULES:
         _src, _link = CONTRIB_ROOT / _m, _prefix / _m
         if _src.is_dir() and not _link.exists():
-            try:
-                _os.symlink(_src, _link, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                pass
+            try: _os.symlink(_src, _link, target_is_directory=True)
+            except (OSError, NotImplementedError): pass
     html_extra_path = [str(_extras)]
 
 
 def setup(app):
     app.connect("source-read", _source_read)
+    app.connect("build-finished", _inline_coll_graphs_on_finish)
     return {"parallel_read_safe": True, "parallel_write_safe": True}
