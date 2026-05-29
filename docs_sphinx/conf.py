@@ -655,15 +655,37 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["{.api-reference-table}",
+            # Added '.api-function-table' class selector here for specialized layout handling
+            lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
+                # Dynamically extract and build specifier prefixes (static, virtual, etc.)
+                prefixes = []
+                if m.get("static") in ("yes", True): prefixes.append("static")
+                if m.get("inline") in ("yes", True): prefixes.append("inline")
+                if m.get("virtual") in ("yes", "virtual", True): prefixes.append("virtual")
+                prefix_str = " ".join(prefixes) + " " if prefixes else ""
+
                 ret = _md_escape_cell(m["type"]) or "&nbsp;"
-                label = f"{m['name']}{_md_escape_cell(m['args'])}"
+                # Combine your code qualifiers with the return type variable
+                full_return_type = f"{prefix_str}{ret}"
+
+                tpl = m.get("template", "")
+                tpl_html = f"<div class='api-template'>{_md_escape_cell(tpl)}</div>" if tpl else ""
+
+                label = f"cv::{m['name']}{_md_escape_cell(m['args'])}"
                 sig_link = _member_anchor_link(m, label)
-                lines.append(
-                    f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
-        elif section_title in ("Typedefs", "Variables"):
+
+                lines.append(f"| {tpl_html}{full_return_type} | {sig_link} | {_md_escape_cell(m['brief'])} |")
+
+        elif section_title == "Typedefs":
+            lines += ["{.api-typedef-table}",
+                      "| Type | Name | Description |", "|---|---|---|"]
+            for m in items:
+                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                name_link = _member_anchor_link(m, f"cv::{m['name']}")
+                lines.append(f"| typedef {t} | {name_link} | {_md_escape_cell(m['brief'])} |")
+        elif section_title == "Variables":
             lines += ["{.api-reference-table}",
                       "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
@@ -1426,13 +1448,33 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["{.api-reference-table}",
+            # Added '.api-function-table' class selector here as well
+            lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
+                prefixes = []
+                if m.get("static") in ("yes", True): prefixes.append("static")
+                if m.get("inline") in ("yes", True): prefixes.append("inline")
+                if m.get("virtual") in ("yes", "virtual", True): prefixes.append("virtual")
+                prefix_str = " ".join(prefixes) + " " if prefixes else ""
+
                 ret = _md_escape_cell(m["type"]) or "&nbsp;"
-                label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                lines.append(f"| `{ret}` | [`{label}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
-        elif section_title in ("Typedefs", "Variables"):
+                full_return_type = f"{prefix_str}{ret}"
+
+                tpl = m.get("template", "")
+                tpl_html = f"<div class='api-template'>{_md_escape_cell(tpl)}</div>" if tpl else ""
+
+                label = f"cv::{m['name']}{_md_escape_cell(m['args'])}"
+                # FIXED: Removed the internal markdown backticks here to drop the gray pills
+                lines.append(f"| {tpl_html}{full_return_type} | [{label}](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
+
+        elif section_title == "Typedefs":
+            lines += ["{.api-typedef-table}",
+                      "| Type | Name | Description |", "|---|---|---|"]
+            for m in items:
+                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                lines.append(f"| typedef {t} | [`cv::{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
+        elif section_title == "Variables":
             lines += ["{.api-reference-table}",
                       "| Type | Name | Description |", "|---|---|---|"]
             for m in items:

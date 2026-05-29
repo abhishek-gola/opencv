@@ -549,130 +549,354 @@ img.opencv-coll-graph {
     font-size: inherit !important;
     font-weight: inherit !important;
 }
+/* ===========================================================================
+ * API reference — card-style tables (classes, typedefs, functions, enums)
+ * ===========================================================================
+*/
 
-
-/* ─────────────────────────────────────────────────────────────────────────
- * API reference summary tables → vertical card list
- *
- * The MyST `attrs_block` extension attaches `class="api-reference-table"` to
- * just the generated API summary tables (Classes / Functions / Typedefs /
- * Variables / Macros — emitted by `_write_api_stub`, `_write_class_stub`,
- * `_write_namespace_stub` in conf.py). Hand-written tutorial markdown
- * tables and any other utility tables on the site are NOT affected —
- * every rule below is gated on `table.api-reference-table`.
- *
- * Layout: each <tr> becomes a flat, borderless block item. The column header row
- * is hidden. The first <td> is the item title (with blue link color for `cv::*`
- * references); remaining <td>s wrap directly beneath it as supporting text.
- * ───────────────────────────────────────────────────────────────────── */
-
-/* Reset the table grid — we re-lay everything as blocks. */
 table.api-reference-table {
     display: block;
     width: 100%;
     border: none;
     border-collapse: separate;
     border-spacing: 0;
-    margin: 0.6rem 0 1.2rem;
+    margin: 0.5rem 0 1rem;
+    padding: 8px !important;
+    border-radius: 10px;
+    background: #f0f2f5 !important;
 }
 
-/* Column headers carry no per-item info — each block is self-describing. */
+html[data-theme="dark"] table.api-reference-table {
+    background: #111622 !important;
+}
+
 table.api-reference-table thead {
-    display: none;
+    display: none  !important;
 }
 
 table.api-reference-table tbody {
     display: block;
 }
 
-/* Each row is a clean, flat text block with no surrounding boxes or borders */
-table.api-reference-table tbody tr {
+/* --- Card row: clean outline, uniform background, border-only hover ------- */
+table.api-reference-table tbody tr,
+table.api-reference-table tbody tr:nth-child(even),
+table.api-reference-table tbody tr:nth-child(odd) {
     display: block;
-    margin-bottom: 1.2rem;  /* Increased spacing between items since borders are gone */
-    padding: 0.25rem 0;     /* Removed thick internal card padding */
-    border: none;           /* Removed the boundary outline */
-    background: transparent; /* Flat layout on the main page canvas */
+    margin-bottom: 6px !important;
+    padding: 10px 14px !important;
+    border-radius: 6px;
+    border: 1px solid var(--pst-color-border, #d0d7de) !important;
+    background: #ffffff !important;
+    transition: border-color 100ms ease;
 }
 
-/* Cells stack vertically inside the block container. */
+table.api-reference-table tbody tr:last-child {
+    margin-bottom: 0 !important;
+}
+
+/* Hover effect modifies the border ONLY — background remains perfectly locked */
+table.api-reference-table tbody tr:hover {
+    border-color: var(--pst-color-link, #0969da) !important;
+    background: #ffffff !important;
+}
+
+/* Dark theme card settings */
+html[data-theme="dark"] table.api-reference-table tbody tr,
+html[data-theme="dark"] table.api-reference-table tbody tr:nth-child(even),
+html[data-theme="dark"] table.api-reference-table tbody tr:nth-child(odd) {
+    background: #1a2234 !important; /* "Little bluish" dark theme cards */
+    border-color: #2d3748 !important;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr:hover {
+    border-color: #58a6ff !important;
+    background: #1a2234 !important;
+}
+
+/* --- Cells: block layout, zero internal borders -------------------------- */
 table.api-reference-table tbody tr td {
     display: block;
     border: none !important;
-    padding: 0;
-    background: transparent;
+    padding: 0 !important;
+    background: transparent !important;
+    background-color: transparent !important;
 }
 
-/* Zero out paragraph margins to maintain tight vertical hierarchy */
 table.api-reference-table tbody tr td > p {
     margin: 0;
+    background: transparent !important;
 }
 
-/* Hide an empty description cell entirely — no phantom gaps below the title */
+/* --- Hide empty description cells ---------------------------------------- */
 table.api-reference-table tbody tr td:not(:first-child):empty,
 table.api-reference-table tbody tr td:not(:first-child):has(> p:empty:only-child) {
-    display: none;
+    display: none  !important;
 }
 
-/* First cell = Item title (class/type/function name): larger, bolder. */
+/* --- Title cell (class/function name) ------------------------------------ */
 table.api-reference-table tbody tr td:first-child {
-    font-size: 1.05rem;
-    font-weight: 600;
-    margin-bottom: 0.35rem;
-    line-height: 1.35;
-}
-
-/* Blue accent for `cv::*` and other API links inside the title. */
-table.api-reference-table tbody tr td:first-child a {
-    color: var(--pst-color-link, #0969da);
-    text-decoration: none;
-}
-table.api-reference-table tbody tr td:first-child a:hover {
-    text-decoration: underline;
-}
-
-/* Strip the default <code> pill so `class cv::Mat` reads as flowing title text. */
-table.api-reference-table tbody tr td:first-child code {
-    background: transparent;
-    border: none;
-    padding: 0;
-    font-size: inherit;
-    color: inherit;
-}
-
-/* Subsequent cells = supporting text (return type / description), muted. */
-table.api-reference-table tbody tr td:not(:first-child) {
-    color: var(--pst-color-text-muted, #57606a);
     font-size: 0.95rem;
-    line-height: 1.5;
-    margin-top: 0.15rem;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', var(--pst-font-family-monospace-system);
+    margin-bottom: 4px;
+    line-height: 1.4;
 }
 
-/* Keep inline description `code` elements legible */
+/* FIXED: Aggressively strips out the inner gray theme-strip behind the text strings */
+table.api-reference-table tbody tr td:first-child,
+table.api-reference-table tbody tr td:first-child * {
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
+/* Keywords like "class", "typedef" — muted, not clickable */
+table.api-reference-table tbody tr td:first-child {
+    color: var(--pst-color-text-muted, #656d76) !important;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr td:first-child {
+    color: #8b949e !important;
+}
+
+table.api-reference-table tbody tr td a,
+table.api-reference-table tbody tr td a:link,
+table.api-reference-table tbody tr td a:visited {
+    color: var(--pst-color-link, #0969da) !important;
+    text-decoration: none !important;
+    font-weight: 500 !important;
+}
+
+table.api-reference-table tbody tr td:first-child a:hover {
+    text-decoration: underline !important;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr td a,
+html[data-theme="dark"] table.api-reference-table tbody tr td a:link,
+html[data-theme="dark"] table.api-reference-table tbody tr td a:visited,
+html[data-theme="dark"] table.api-reference-table tbody tr td a:hover,
+html[data-theme="dark"] table.api-reference-table tbody tr td a:active {
+    color: #ffffff !important;
+}
+
+/* Make `<code>` inside a link inherit the link color (and drop its inline-code
+ * background/border/padding). Without this, the `td:not(:first-child) code`
+ * rule below paints the visible link text dark — which is what makes
+ * Function and Variable Name links (which live in column 2 and are wrapped
+ * `<a><code>name</code></a>`) appear "black" instead of blue. */
+table.api-reference-table tbody tr td a > code,
+table.api-reference-table tbody tr td a > code * {
+    color: inherit !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    font-size: inherit !important;
+}
+
+/* When description is empty, collapse the bottom margin on the title */
+table.api-reference-table tbody tr td:first-child:last-child,
+table.api-reference-table tbody tr:has(> td:not(:first-child):empty) td:first-child,
+table.api-reference-table tbody tr:has(> td:not(:first-child):has(> p:empty:only-child)) td:first-child {
+    margin-bottom: 0 !important;
+}
+
+/* --- Description cell ---------------------------------------------------- */
+table.api-reference-table tbody tr td:not(:first-child) {
+    color: var(--pst-color-text-muted, #656d76);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    background: transparent !important;
+}
+
+/* FIXED: Explicitly force inner paragraphs inside descriptions to drop background gray bands */
+table.api-reference-table tbody tr td:not(:first-child) p {
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) {
+    color: #8b949e;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr:hover td:not(:first-child) {
+    color: #ffffff !important;
+}
+
 table.api-reference-table tbody tr td:not(:first-child) code {
     color: var(--pst-color-text, #24292f);
     background: var(--pst-color-surface, transparent);
-    padding: 0 0.25rem;
+    padding: 0 0.2rem;
     border-radius: 3px;
     font-size: 0.88em;
 }
 
-/* Dark theme overrides — ensures flat backgrounds and proper text contrasts */
-html[data-theme="dark"] table.api-reference-table tbody tr {
-    background: transparent;
-    border: none;
-}
-html[data-theme="dark"] table.api-reference-table tbody tr td:first-child a {
-    color: #58a6ff;
-}
-html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) {
-    color: #8b949e;
-}
 html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) code {
     color: #c9d1d9;
     background: #2d333b;
 }
 
-/* Turn off horizontal scroll wrappers for card-list tables */
-.table-wrapper:has(> table.api-reference-table) {
+
+/* ===========================================================================
+ * Typedef table — single-line compact cards
+ * ===========================================================================
+*/
+table.api-typedef-table {
+    display: block !important;
+    width: 100%;
+    border: none;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 0.5rem 0 1rem;
+    padding: 8px !important;
+    background: #f0f2f5 !important; /* Outer container frame */
+    border-radius: 10px;
+}
+
+html[data-theme="dark"] table.api-typedef-table {
+    background: #111622 !important;
+}
+
+/* FIXED: Explicitly hide the headers that were breaking the layout grid */
+table.api-typedef-table thead {
+    display: none !important;
+}
+
+table.api-typedef-table tbody {
+    display: block !important;
+    width: 100% !important;
+}
+
+/* Converted into a clean, justified flex container row */
+table.api-typedef-table tbody tr,
+table.api-typedef-table tbody tr:nth-child(even),
+table.api-typedef-table tbody tr:nth-child(odd) {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important; /* Centers both columns relative to the card container */
+    gap: 32px !important;               /* Controls the distance between the two text items */
+    padding: 8px 12px !important;
+    margin-bottom: 4px !important;
+    background: #ffffff !important;
+    border: 1px solid var(--pst-color-border, #d0d7de) !important;
+    border-radius: 6px;
+    transition: border-color 100ms ease;
+}
+
+table.api-typedef-table tbody tr:last-child {
+    margin-bottom: 0 !important;
+}
+
+table.api-typedef-table tbody tr:hover {
+    border-color: var(--pst-color-link, #0969da) !important;
+}
+
+table.api-typedef-table tbody tr:hover td,
+table.api-typedef-table tbody tr:hover td * {
+    border-color: #58a6ff !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+}
+
+html[data-theme="dark"] table.api-typedef-table tbody tr,
+html[data-theme="dark"] table.api-typedef-table tbody tr:nth-child(even),
+html[data-theme="dark"] table.api-typedef-table tbody tr:nth-child(odd) {
+    background: #1a2234 !important;
+    border-color: #2d3748 !important;
+}
+
+html[data-theme="dark"] table.api-typedef-table tbody tr:hover {
+    border-color: #58a6ff !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+}
+
+table.api-typedef-table tbody tr td {
+    display: block !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    font-family: 'JetBrains Mono', var(--pst-font-family-monospace-system);
+    font-size: 0.9rem;
+    flex: 1 !important;
+    max-width: 45%;
+}
+
+/* FIXED: Target cells explicitly by index to prevent selector blending */
+
+/* Column 1: Type declaration (e.g., Vec<uchar, 2>) — Left side alignment */
+table.api-typedef-table tbody tr td:nth-child(1) {
+    color: var(--pst-color-text-muted, #656d76) !important;
+    font-weight: 400;
+    text-align: left  !important;
+}
+
+table.api-typedef-table tbody tr td:nth-child(1) * {
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(1) {
+    color: #8b949e !important;
+}
+
+/* Column 2: Alias Name (e.g., Vec2b) — Pushed to the right side.
+ * Normal weight (not bold) per user spec; the `<code>` wrapper that the
+ * MyST link emits (`[`cv::Vec2b`](…)` → `<a><code>cv::Vec2b</code></a>`)
+ * carries the theme's default code background + border, which would draw
+ * an unwanted pill around the title — strip both, and force the code to
+ * inherit the link color so the cv:: text stays a clean blue / white. */
+table.api-typedef-table tbody tr td:nth-child(2) {
+    color: var(--pst-color-link, #0969da) !important;
+    font-weight: 400 !important;
+    text-align: left  !important;
+}
+
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(2),
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(2) a,
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(2) a:link,
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(2) a:visited,
+html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(2) a:hover {
+    color: #ffffff !important;
+}
+
+table.api-typedef-table tbody tr td:nth-child(2) a,
+table.api-typedef-table tbody tr td:nth-child(2) a:link,
+table.api-typedef-table tbody tr td:nth-child(2) a:visited,
+table.api-typedef-table tbody tr td:nth-child(2) a:hover {
+    color: inherit !important;
+    text-decoration: none !important;
+    font-weight: 400 !important;
+}
+
+table.api-typedef-table tbody tr td:nth-child(2) a:hover {
+    text-decoration: underline !important;
+}
+
+/* Strip the inline-code pill from the Name cell — no border, no background,
+ * no padding. The cv::xyz title should read as a flat link, not a code chip. */
+table.api-typedef-table tbody tr td:nth-child(2) code,
+table.api-typedef-table tbody tr td:nth-child(2) code * {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    color: inherit !important;
+    font-weight: 400 !important;
+    font-size: inherit !important;
+}
+
+/* Column 3: Description cell — Drop completely if empty so it doesn't skew spacing */
+table.api-typedef-table tbody tr td:nth-child(3):empty,
+table.api-typedef-table tbody tr td:nth-child(3):has(> p:empty:only-child) {
+    display: none !important;
+}
+
+/* Disable overflow wrapper for card tables */
+.table-wrapper:has(> table.api-reference-table),
+.table-wrapper:has(> table.api-typedef-table) {
     overflow: visible;
 }
