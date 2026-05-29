@@ -1443,7 +1443,17 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
             lines.append(f"| {ic_kind} [`{short_name}`]({page}.md) |")
         lines.append("")
 
-    # Member summary tables.
+    # Member summary tables. Skip group-scoped members entirely — they're
+    # documented on their owning group's page (and that's also where their
+    # `#refid` anchor lives). Listing them here without a working anchor link
+    # is worse than omitting them, and emitting directives for them below is
+    # what was inflating Sphinx's cpp-domain `Symbol` tree to ~14M nodes
+    # (1+ GB environment.pickle). Group-scoped refids start with `group__`;
+    # namespace-original memberdefs use the `namespace*_1…` pattern.
+    ns_sections = {
+        section: [m for m in items if not (m.get("id") or "").startswith("group__")]
+        for section, items in ns_sections.items()
+    }
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = ns_sections.get(section_title, [])
         if not items:
