@@ -461,6 +461,14 @@ def _translate(text: str, docname: str | None = None) -> str:
         # 8e. Classes table rows: (i) append the template-parameter list
         #     (`< _Tp >`) to the class name, matching Doxygen; (ii) append a
         #     "More..." link to the description cell.
+        #     The "More..." link targets the class page's `#detailed-description`
+        #     section (the slug MyST gives the `## Detailed Description` heading,
+        #     `myst_heading_anchors=4`) — same destination the class-page header's
+        #     own "More..." uses — so it lands on the detailed description rather
+        #     than the page top / declaration. Emitted as a raw <a> (not a
+        #     markdown link) so the fragment is passed through verbatim and isn't
+        #     run through Sphinx's xref check (a class with no detailed block then
+        #     simply lands at the page top, with no "target not found" warning).
         def _rewrite_class_row(m: re.Match) -> str:
             kind = m.group("kind")
             name = m.group("name")       # 'cv::Mat_'
@@ -469,7 +477,8 @@ def _translate(text: str, docname: str | None = None) -> str:
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
             label = f"{kind} {name}{tparams}"
-            more = f"[More...]({page}.md)"
+            more = (f'<a class="opencv-class-more" '
+                    f'href="{page}.html#detailed-description">More...</a>')
             desc_out = f"{desc} {more}" if desc else more
             return f"| [`{label}`]({page}.md) | {desc_out} |"
         text = re.sub(
