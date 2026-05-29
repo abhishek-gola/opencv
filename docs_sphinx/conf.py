@@ -459,6 +459,147 @@ def _read_class_brief(refid: str, xml_dir: pathlib.Path,
     return brief
 
 
+def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
+    """Convert a Doxygen <detaileddescription> (or similar) element to Markdown."""
+    if el is None:
+        return ""
+
+    def _hl_text(hl_node) -> str:
+        """Extract text from a <highlight> element, treating <sp/> as a space."""
+        parts = []
+        if hl_node.text:
+            parts.append(hl_node.text)
+        for child in hl_node:
+            if child.tag == "sp":
+                parts.append(" ")
+            elif child.tag == "ref":
+                parts.append("".join(child.itertext()))
+            else:
+                parts.append("".join(child.itertext()))
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    def _programlisting(node) -> str:
+        lines = []
+        for codeline in node.findall("codeline"):
+            lines.append("".join(_hl_text(hl) for hl in codeline.findall("highlight")))
+        return "```cpp\n" + "\n".join(lines) + "\n```"
+
+    def _inline(node) -> str:
+        """Render inline content of a node (inline elements only)."""
+        parts = []
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            t = child.tag
+            if t in _BLOCK_TAGS:
+                break  # stop at block-level — caller handles separately
+            inner = "".join(child.itertext())
+            if t == "ulink":
+                url = child.get("url", "")
+                parts.append(f"[{inner}]({url})" if url else inner)
+            elif t in ("ref", "computeroutput"):
+                parts.append(f"`{inner}`" if inner else "")
+            elif t == "emphasis":
+                parts.append(f"*{inner}*" if inner else "")
+            elif t in ("bold", "strong"):
+                parts.append(f"**{inner}**" if inner else "")
+            elif t == "sp":
+                parts.append(" ")
+            elif t == "linebreak":
+                parts.append("\n")
+            else:
+                parts.append(inner)
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting"}
+
+    def _listitem_text(item) -> str:
+        parts = []
+        for child in item:
+            if child.tag == "para":
+                parts.append(_inline(child).strip())
+        return " ".join(p for p in parts if p)
+
+    def _emit_block(sub, result: list, level: int) -> None:
+        t = sub.tag
+        if t == "programlisting":
+            result.append(_programlisting(sub))
+        elif t == "orderedlist":
+            for i, item in enumerate(sub.findall("listitem"), 1):
+                result.append(f"{i}. {_listitem_text(item)}")
+        elif t == "itemizedlist":
+            for item in sub.findall("listitem"):
+                result.append(f"- {_listitem_text(item)}")
+
+    def _blocks(node, level: int) -> list[str]:
+        result = []
+        for child in node:
+            t = child.tag
+            if t == "title":
+                continue
+            elif t == "para":
+                # Walk para children; flush text before each block-level child.
+                pending: list[str] = []
+                if child.text:
+                    pending.append(child.text)
+                for sub in child:
+                    if sub.tag in _BLOCK_TAGS:
+                        text = "".join(pending).strip()
+                        if text:
+                            result.append(text)
+                        pending = []
+                        _emit_block(sub, result, level)
+                        if sub.tail and sub.tail.strip():
+                            pending.append(sub.tail)
+                    else:
+                        inner = "".join(sub.itertext())
+                        st = sub.tag
+                        if st == "ulink":
+                            url = sub.get("url", "")
+                            pending.append(f"[{inner}]({url})" if url else inner)
+                        elif st in ("ref", "computeroutput"):
+                            pending.append(f"`{inner}`" if inner else "")
+                        elif st == "emphasis":
+                            pending.append(f"*{inner}*" if inner else "")
+                        elif st in ("bold", "strong"):
+                            pending.append(f"**{inner}**" if inner else "")
+                        elif st == "sp":
+                            pending.append(" ")
+                        elif st == "linebreak":
+                            pending.append("\n")
+                        else:
+                            pending.append(inner)
+                        if sub.tail:
+                            pending.append(sub.tail)
+                text = "".join(pending).strip()
+                if text:
+                    result.append(text)
+            elif t in ("sect1", "sect2", "sect3"):
+                offset = {"sect1": 0, "sect2": 1, "sect3": 2}[t]
+                lv = level + offset
+                title_text = child.findtext("title") or ""
+                result.append(f"{'#' * lv} {title_text}")
+                result.extend(_blocks(child, lv + 1))
+            elif t in _BLOCK_TAGS:
+                _emit_block(child, result, level)
+            elif t == "simplesect":
+                kind = child.get("kind", "")
+                admon = {"note": "note", "warning": "warning",
+                         "attention": "warning", "remark": "note"}.get(kind)
+                body = "\n\n".join(_blocks(child, level))
+                if admon:
+                    result.append(f":::{{{admon}}}\n{body}\n:::")
+                elif body:
+                    result.append(body)
+        return result
+
+    return "\n\n".join(b for b in _blocks(el, h_level) if b.strip())
+
+
 def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
                          _seen: set | None = None) -> dict | None:
     """Walk a group XML's <innergroup> children recursively.
@@ -484,10 +625,7 @@ def _build_api_hierarchy(refid: str, xml_dir: pathlib.Path,
     # Detailed description (used on parent index pages; breathe handles it
     # on leaf pages, so we extract it for context-display only).
     detailed_el = cd.find("detaileddescription")
-    detailed = ""
-    if detailed_el is not None:
-        paras = [_itertext(p) for p in detailed_el.findall("para")]
-        detailed = "\n\n".join(p for p in paras if p)
+    detailed = _doxygen_desc_to_md(detailed_el, h_level=3)
     # Inner classes (public only). One read per class's XML for its brief.
     # `qualified` is what `{doxygenclass}` needs (e.g. cv::ocl::Context); the
     # innerclass element's text already carries that, but normalize spaces.
@@ -670,17 +808,17 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         # existing _subpage_list_to_toctree rule converts them to a real
         # toctree at translate time.
         lines = [f"# {title} {{#api_{name}}}", ""]
+        lines += ["## Topics", ""]
+        for child in node["children"]:
+            lines.append(f"- @subpage api_{child['name']}")
+        lines.append("")
         if node["detailed"]:
-            lines += [node["detailed"], ""]
+            lines += ["## Detailed Description", "", node["detailed"], ""]
         if ns_map and ns_map.get(name):
             lines += ["## Namespaces", ""]
             for _ns_name, anchor in ns_map[name]:
                 lines.append(f"- @subpage {anchor}")
             lines.append("")
-        lines += ["## Topics", ""]
-        for child in node["children"]:
-            lines.append(f"- @subpage api_{child['name']}")
-        # out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         _stub_write(out, "\n".join(lines) + "\n")
         for child in node["children"]:
             _write_api_stub(child, out_dir, classes_seen, ns_map)
@@ -688,6 +826,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
     # ---- Leaf page ----------------------------------------------------------
     lines = [f"# {title} {{#api_{name}}}", ""]
+    if node["detailed"]:
+        lines += ["## Detailed Description", "", node["detailed"], ""]
 
     if ns_map and ns_map.get(name):
         lines += ["## Namespaces", ""]
