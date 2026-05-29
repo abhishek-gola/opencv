@@ -24,15 +24,8 @@ set(_SPHINX_CONFDIR    "${CMAKE_CURRENT_SOURCE_DIR}")
 set(_SPHINX_OUTDIR     "${CMAKE_CURRENT_BINARY_DIR}/html")
 set(_SPHINX_INPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/docs_sphinx_input")
 
-# ---------------------------------------------------------------------------
-# Stage a merged input tree at ${CMAKE_BINARY_DIR}/docs_sphinx_input/.
-# Sphinx requires a single srcdir, but the wrapper needs to see both
-# opencv/doc/tutorials/ and (optionally) opencv_contrib/modules/<m>/tutorials/.
-# We symlink each main module subtree under tutorials/ and each enabled contrib
-# module subtree under tutorials_contrib/, then auto-generate the contrib root
-# page — the same pattern opencv/doc/CMakeLists.txt already uses for Doxygen.
-# Nothing under opencv/doc/ or opencv_contrib/modules/ is modified.
-# ---------------------------------------------------------------------------
+# Stage a single Sphinx srcdir at ${CMAKE_BINARY_DIR}/docs_sphinx_input/.
+# Symlinks tutorials and enabled contrib modules without modifying original trees.
 set(_SPHINX_INPUT_TUTORIALS "${_SPHINX_INPUT_ROOT}/tutorials")
 set(_SPHINX_INPUT_CONTRIB   "${_SPHINX_INPUT_ROOT}/tutorials_contrib")
 file(REMOVE_RECURSE "${_SPHINX_INPUT_ROOT}")
@@ -55,14 +48,8 @@ foreach(_d ${_main_tutorial_children})
   endif()
 endforeach()
 
-# Contrib tree: only when OPENCV_EXTRA_MODULES_PATH is set, matching the legacy
-# Doxygen contrib build's activation gate exactly. Stage every contrib module
-# that has a tutorials/ dir — the canonical "which modules to compile" list
-# lives in conf.py's CONTRIB_MODULES, exactly parallel to DOC_MODULES for main.
-# Staged-but-unselected modules have their @subpage entries silently dropped
-# by the toctree machinery (conf.py only populates _ANCHOR_TO_DOC for enabled
-# modules), so listing them all in contrib_root.markdown is safe and means
-# adding a new contrib module is a one-line conf.py edit (no reconfigure).
+# Stage contrib modules with a tutorials/ dir if OPENCV_EXTRA_MODULES_PATH is set.
+# Selection list lives in conf.py's CONTRIB_MODULES.
 if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
   file(MAKE_DIRECTORY "${_SPHINX_INPUT_CONTRIB}")
   set(_contrib_root_md "${_SPHINX_INPUT_CONTRIB}/contrib_root.markdown")
@@ -76,10 +63,7 @@ if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
     if(IS_DIRECTORY "${_tut_dir}")
       file(CREATE_LINK "${_tut_dir}" "${_SPHINX_INPUT_CONTRIB}/${_m}"
            SYMBOLIC COPY_ON_ERROR)
-      # Match every top-level *.markdown in <m>/tutorials/, the same shape the
-      # legacy Doxygen build uses (opencv/doc/CMakeLists.txt) — many contrib
-      # modules use names like alphamat_tutorial.markdown or fuzzy.markdown
-      # instead of the table_of_content_<m>.markdown convention.
+      # Match every top-level *.markdown in <m>/tutorials/ directly.
       file(GLOB _tocs RELATIVE "${_tut_dir}" "${_tut_dir}/*.markdown")
       foreach(_t ${_tocs})
         file(STRINGS "${_tut_dir}/${_t}" _id LIMIT_COUNT 1 REGEX ".*\\{#[^}]+\\}")
@@ -92,23 +76,87 @@ if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
   endforeach()
 endif()
 
-# Forward staging info to conf.py via env. OPENCV_CONTRIB_MODULES is NOT
-# forwarded — conf.py's default list wins unless the caller sets it in their
-# shell env (OPENCV_CONTRIB_MODULES=ml cmake --build ...) to override per-build.
+# API reference: Generate Doxygen XML by overriding legacy Doxyfile format flags.
+# The legacy Doxyfile exists because doc configures before docs_sphinx.
+set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
+set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
+if(EXISTS "${_LEGACY_DOXYFILE}")
+  set(_SPHINX_DOXYFILE "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile-xml")
+  file(WRITE "${_SPHINX_DOXYFILE}"
+    "@INCLUDE = ${_LEGACY_DOXYFILE}\n"
+    "GENERATE_HTML = NO\n"
+    "GENERATE_LATEX = NO\n"
+    "GENERATE_XML = YES\n"
+    "XML_OUTPUT = xml\n"
+    "XML_PROGRAMLISTING = NO\n"
+    # Force flat XML output for Breathe compatibility (disables CREATE_SUBDIRS).
+    "CREATE_SUBDIRS = NO\n"
+    # Exclude Objective-C headers to prevent Breathe crashes down the line.
+    "EXCLUDE_PATTERNS += cap_ios.h\n"
+    # Disable graph generation as we don't load sphinx.ext.graphviz.
+    "CLASS_GRAPH = NO\n"
+    "COLLABORATION_GRAPH = NO\n"
+    "GROUP_GRAPHS = NO\n"
+    "INCLUDE_GRAPH = NO\n"
+    "INCLUDED_BY_GRAPH = NO\n"
+    "DIRECTORY_GRAPH = NO\n"
+  )
+  find_program(DOXYGEN_EXE NAMES doxygen)
+  if(DOXYGEN_EXE)
+    # sphinx-xml target regenerates Doxygen XML; runs automatically with `sphinx`.
+    add_custom_target(sphinx-xml
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${_DOXYGEN_XML_DIR}
+      COMMAND ${DOXYGEN_EXE} ${_SPHINX_DOXYFILE}
+      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/doc
+      COMMENT "Doxygen XML (for Sphinx breathe) -> ${_DOXYGEN_XML_DIR}"
+      VERBATIM)
+    message(STATUS "docs_sphinx: sphinx-xml target enabled (doxygen: ${DOXYGEN_EXE})")
+  else()
+    message(STATUS "docs_sphinx: doxygen not found; `sphinx-xml` disabled")
+  endif()
+
+  # API stubs generation relies on parsing Doxygen XML.
+  # This is deferred to sphinx-build logic within conf.py.
+else()
+  message(STATUS "docs_sphinx: legacy Doxyfile not present at ${_LEGACY_DOXYFILE}; "
+                 "`sphinx-xml` disabled (re-run cmake after doc/ subdir configures)")
+endif()
+
+# Pass staging options via env. Override CONTRIB_MODULES at your shell manually.
 set(_SPHINX_ENV
   "OPENCV_SPHINX_INPUT_ROOT=${_SPHINX_INPUT_ROOT}"
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
+  "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
 )
 
+# Parallel knob. Sphinx supports `-j auto` (=nproc), `-j N`, or a literal
+# integer; override per-build with -DSPHINX_JOBS=8. `auto` is the sweet spot
+# on developer machines — using nproc workers takes the API-reference build
+# from minutes to seconds. conf.py declares `parallel_read_safe`/
+# `parallel_write_safe`, and breathe ≥ 4.30 is parallel-safe, so this is
+# unconditionally enabled. `--keep-going` keeps the build progressing past
+# non-fatal warnings (we still see them in the log).
+if(NOT SPHINX_JOBS)
+  set(SPHINX_JOBS "auto")
+endif()
+set(_SPHINX_WARNINGS "${CMAKE_CURRENT_BINARY_DIR}/sphinx-warnings.log")
 add_custom_target(sphinx
   COMMAND ${CMAKE_COMMAND} -E make_directory ${_SPHINX_OUTDIR}
   COMMAND ${CMAKE_COMMAND} -E env ${_SPHINX_ENV}
-          ${SPHINX_BUILD} -c ${_SPHINX_CONFDIR}
+          ${SPHINX_BUILD} -j ${SPHINX_JOBS}
+                          --keep-going
+                          -w ${_SPHINX_WARNINGS}
+                          -c ${_SPHINX_CONFDIR}
                           ${_SPHINX_INPUT_ROOT}
                           ${_SPHINX_OUTDIR}
   WORKING_DIRECTORY ${_SPHINX_CONFDIR}
-  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR}"
+  COMMENT "Building Sphinx HTML site -> ${_SPHINX_OUTDIR} (jobs=${SPHINX_JOBS})"
   VERBATIM)
+
+# Ensure breathe sees current XML on every `sphinx` build.
+if(TARGET sphinx-xml)
+  add_dependencies(sphinx sphinx-xml)
+endif()
 
 # Clean rebuild: `cmake --build <build> --target sphinx-clean`
 add_custom_target(sphinx-clean
