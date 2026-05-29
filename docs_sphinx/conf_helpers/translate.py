@@ -1087,6 +1087,10 @@ _FENCED_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 _INLINE_CODE_RE = re.compile(r"`+[^`\n]*?`+")
+# ATX heading line (`#`..`######` + space). Used to exempt headings from the
+# cv-symbol / bare-fn auto-linkifier so member-doc headings on API pages keep
+# their in-page anchor instead of becoming external docs.opencv.org links.
+_ATX_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]")
 
 
 def _apply_outside_code(src: str, transform) -> str:
@@ -1137,9 +1141,21 @@ def _linkify_cv_symbols(src: str) -> str:
             return m.group(0)
         return f'<a href="{url}">{sym}()</a>'
     def transform(chunk: str) -> str:
-        chunk = _CV_SYMBOL_RE.sub(repl_cv, chunk)
-        chunk = _BARE_FN_RE.sub(repl_bare, chunk)
-        return chunk
+        # Never linkify inside an ATX heading. On API reference pages each
+        # member-doc heading (`### trace()`, `### rawIn()`) is the symbol's
+        # *definition* — it owns the in-page `(id)=` anchor and feeds PyData's
+        # "On this page" sidebar. Auto-linking its text wraps the heading in an
+        # external docs.opencv.org `<a>`, so the heading and every sidebar
+        # entry for it jump off-site instead of to the local section.
+        out_lines = []
+        for line in chunk.split("\n"):
+            if _ATX_HEADING_RE.match(line):
+                out_lines.append(line)
+                continue
+            line = _CV_SYMBOL_RE.sub(repl_cv, line)
+            line = _BARE_FN_RE.sub(repl_bare, line)
+            out_lines.append(line)
+        return "\n".join(out_lines)
     return _apply_outside_code(src, transform)
 
 
