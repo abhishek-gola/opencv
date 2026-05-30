@@ -912,6 +912,11 @@ html[data-theme="dark"] table.api-typedef-table tbody tr td:nth-child(1) {
     color: #8b949e !important;
 }
 
+/* Light-mode: blue Type-cell links. */
+html:not([data-theme="dark"]) table.api-typedef-table tbody tr td:nth-child(1) a {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
 /* Column 2: alias name — strip the code pill and inherit the link colour. */
 table.api-typedef-table tbody tr td:nth-child(2) {
     color: var(--pst-color-link, #0969da) !important;

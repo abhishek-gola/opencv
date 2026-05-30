@@ -338,6 +338,8 @@ def _translate(text: str, docname: str | None = None) -> str:
             _shorter = (
                 "## Shorter aliases for the most popular specializations of "
                 "Vec<T,n>\n\n"
+                # Match the main Typedefs table styling.
+                "{.api-typedef-table}\n"
                 "| Type | Name | Description |\n"
                 "|---|---|---|\n"
                 + _vec_rows + "\n")
@@ -374,13 +376,12 @@ def _translate(text: str, docname: str | None = None) -> str:
             r" \| (?P<desc>[^\n|]*?) \|",
             _rewrite_class_row, text)
 
-        # 8a. Name-column typedef anchors -> cpp-domain v4 anchor.
+        # 8a. Name-column typedef anchors -> slugified detail-block id.
         text = re.sub(
             r"\[`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`\]"
-            r"\(#group__[a-z0-9_]+?_1[a-z0-9]+\)",
+            r"\(#(?P<ref>group__[a-z0-9_]+?_1[a-z0-9]+)\)",
             lambda m: (f"[`{m.group('name')}`]"
-                       f"(#_CPPv4N2cv{len(m.group('name'))}"
-                       f"{m.group('name')}E)"),
+                       f"(#{re.sub(r'_+', '-', m.group('ref'))})"),
             text)
 
         # 8i. Functions-table rows: split broken-anchor link into name link + params span.

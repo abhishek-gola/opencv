@@ -402,9 +402,19 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 name_link = _member_anchor_link(m, m["name"])
                 lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
+            # core_basic also links to detail.
+            _enum_more_link = (name == "core_basic")
             for m in items:
+                _more = ""
+                if _enum_more_link:
+                    _eid = _sphinx_cpp_v4_id(m["qualified"] or m["name"])
+                    _more = f" [View details](#{_eid})"
                 if m["brief"]:
-                    lines.append(_md_escape_cell(m["brief"]))
+                    # Link inline at end of brief.
+                    lines.append(_md_escape_cell(m["brief"]) + _more)
+                    lines.append("")
+                elif _more:
+                    lines.append(_more.strip())
                     lines.append("")
                 lines.append("```cpp")
                 lines.extend(_enum_synopsis_lines(m))
@@ -424,7 +434,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
-        if not items or kind_key == "enum":
+        if not items:
+            continue
+        # Enum detail blocks: core_basic only.
+        if kind_key == "enum" and name != "core_basic":
             continue
         # core_basic funcs: count overloads first for `[i/n]` headings.
         _core_basic_funcs = (name == "core_basic" and kind_key == "function")
@@ -450,6 +463,15 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 _slug_seen.add(slug)
                 blocks.append(_render_core_basic_func(
                     m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
+                continue
+            if kind_key == "enum":
+                # core_basic only; doxygenenum emits anchor.
+                blocks.append([
+                    f"```{{doxygenenum}} {m['qualified'] or m['name']}",
+                    ":project: opencv",
+                    "```",
+                    "",
+                ])
                 continue
             if kind_key == "define":
                 if m["name"] in seen_define_names:  # dedupe arity overloads
