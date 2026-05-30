@@ -729,7 +729,12 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                # ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_type = m["type"] or ""
+                # Strip CV_EXPORTS* macros and excess whitespace
+                ret_type = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
+                ret = _md_escape_cell(ret_type) or "&nbsp;"
                 if m["static"]:
                     ret = "static " + ret
                 sig = f"{m['name']}{_md_escape_cell(m['args'])}"

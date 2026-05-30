@@ -575,6 +575,15 @@ section[id$="-documentation"] > section > div[class*="highlight"] {
     margin: 0;
     padding: 0.35rem 1rem;
 }
+/* Bulleted / numbered lists in a card body: the shared row padding above sets
+   padding-left to 1rem, but `list-style-position: outside` draws the marker in
+   that left padding — at 1rem it lands in the gutter and gets clipped at the
+   card edge. Indent so the marker sits ~1rem inside the body and the item text
+   lines up past it (the "tab" space). */
+section[id$="-documentation"] > section > ul,
+section[id$="-documentation"] > section > ol {
+    padding-left: 2.5rem;
+}
 /* Signature line-height a touch looser so the clubbed template/declaration
    pair breathes. */
 section[id$="-documentation"] > section > p:has(> code) { line-height: 1.7; }
