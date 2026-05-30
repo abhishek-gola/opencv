@@ -164,6 +164,11 @@ html_theme_options = {
         {"url": _doxygen_url("examples.html"),    "name": "Examples"},
         {"url": DOXYGEN_BASE_URL + "javadoc/",    "name": "Java Documentation"},
     ],
+    # Doxygen search engine replaces the native one; render a single trigger in
+    # navbar_end (navbar_persistent renders twice → duplicate element IDs).
+    "navbar_persistent": [],
+    "navbar_end": ["search-button-field", "theme-switcher", "navbar-icon-links"],
+    "disable_search": True,
     "show_toc_level": 2,
     "navigation_with_keys": True,
     "show_prev_next": True,

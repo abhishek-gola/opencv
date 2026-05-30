@@ -91,6 +91,23 @@ def _strip_breathe_class_clutter(api_dir: pathlib.Path) -> None:
             h.write_text(new, encoding="utf-8")
 
 
+def _generate_search_map(out_dir: pathlib.Path) -> None:
+    """Write _static/search_map.js: stem→Sphinx-path for every built HTML page."""
+    import json
+    skip = {"_static", "_sources", "_images", "_sphinx_design_static"}
+    mapping = {}
+    for f in out_dir.rglob("*.html"):
+        rel = f.relative_to(out_dir)
+        if rel.parts[0] in skip:
+            continue
+        mapping[f.stem] = rel.as_posix()
+    lines = ["var sphinxPageMap = {"]
+    for k, v in sorted(mapping.items()):
+        lines.append(f"  {json.dumps(k)}: {json.dumps(v)},")
+    lines.append("};")
+    (out_dir / "_static" / "search_map.js").write_text("\n".join(lines), encoding="utf-8")
+
+
 def _inline_coll_graphs_on_finish(app, exception):
     """build-finished entry point."""
     if exception is not None:
@@ -98,3 +115,4 @@ def _inline_coll_graphs_on_finish(app, exception):
     out = pathlib.Path(app.outdir)
     _inline_collaboration_svgs(out / "api", out / "_images")
     _strip_breathe_class_clutter(out / "api")
+    _generate_search_map(out)

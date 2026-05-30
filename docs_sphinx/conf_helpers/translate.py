@@ -184,7 +184,33 @@ def _translate(text: str, docname: str | None = None) -> str:
         return '\n'.join(out)
     text = _demote_extra_h1s(text)
 
-    # 2. Doxygen LaTeX math markers
+    # 1b. @note / @see -> MyST admonitions; runs BEFORE math so \f[...\f] inside
+    # a note is still one token (no blank-line terminator cuts the body short).
+    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning",
+                   "sa": "seealso"}
+    def _admon_repl(m: re.Match) -> str:
+        kind = _ADMON_KIND[m.group("dir")]
+        raw = m.group("body")
+        lines = raw.split("\n")
+        min_ind = min(
+            (len(l) - len(l.lstrip()) for l in lines if l.strip()), default=0)
+        body = "\n".join(l[min_ind:] for l in lines).strip()
+        return f"\n:::{{{kind}}}\n{body}\n:::\n"
+    text = re.sub(
+        r"^[ \t]*@(?P<dir>note|see|warning|sa)[ \t]*\n?(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
+        _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
+
+    # 2. Doxygen LaTeX math markers; preserve indent so blocks inside list items stay in the list.
+    def _split_adj_math(m: re.Match) -> str:
+        indent = m.group("indent")
+        return m.group(0).replace("\\f]\\f[", f"\\f]\n{indent}\\f[")
+    text = re.sub(r"^(?P<indent>[ \t]*)[^\n]*\\f\]\\f\[",
+                  _split_adj_math, text, flags=re.MULTILINE)
+    def _fblock(m: re.Match) -> str:
+        ind = m.group("indent")
+        return f"\n{ind}$$\n{m.group('body').strip()}\n{ind}$$\n"
+    text = re.sub(r"^(?P<indent>[ \t]*)\\f\[(?P<body>.+?)\\f\]",
+                  _fblock, text, flags=re.DOTALL | re.MULTILINE)
     text = re.sub(r"\\f\[(.+?)\\f\]",
                   lambda m: f"\n$$\n{m.group(1).strip()}\n$$\n",
                   text, flags=re.DOTALL)
@@ -331,22 +357,13 @@ def _translate(text: str, docname: str | None = None) -> str:
         r"@link\s+(?P<target>[\w-]+)(?P<disp>.*?)@endlink",
         _link_repl, text, flags=re.DOTALL)
 
-
-    if docname == "api/core_basic":
-        # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
-        text = re.sub(
-            r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
-            "```{eval-rst}\n"
-            ".. cpp:namespace:: cv\n"
-            ".. cpp:type:: template<typename _Tp> Ptr = std::shared_ptr<_Tp>\n"
-            "```",
-            text)
-
-        # 8e. Classes table rows: append template params + "View details" link.
+    # 8e. Class summary rows (ALL API pages): append template params + a
+    # "View details" link to the class detail page, like the legacy docs.
+    if docname and docname.startswith("api/"):
         def _rewrite_class_row(m: re.Match) -> str:
             kind = m.group("kind")
-            name = m.group("name")       # 'cv::Mat_'
-            page = m.group("page")       # 'classcv_1_1Mat__'
+            name = m.group("name")       # 'cv::dnn::BackendNode'
+            page = m.group("page")       # 'classcv_1_1dnn_1_1BackendNode'
             desc = m.group("desc").strip()
             short = name.split("::")[-1]
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
@@ -360,6 +377,17 @@ def _translate(text: str, docname: str | None = None) -> str:
             r"\((?P<page>(?:class|struct)cv_1_1[A-Za-z0-9_]+)\.md\)"
             r" \| (?P<desc>[^\n|]*?) \|",
             _rewrite_class_row, text)
+
+
+    if docname == "api/core_basic":
+        # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
+        text = re.sub(
+            r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
+            "```{eval-rst}\n"
+            ".. cpp:namespace:: cv\n"
+            ".. cpp:type:: template<typename _Tp> Ptr = std::shared_ptr<_Tp>\n"
+            "```",
+            text)
 
         # 8a. Name-column typedef anchors -> slugified detail-block id.
         text = re.sub(
@@ -597,27 +625,7 @@ def _translate(text: str, docname: str | None = None) -> str:
         ),
         text, flags=re.MULTILINE)
 
-    # 8c. @note / @see / @warning -> MyST admonitions.
-    _ADMON_KIND = {"note": "note", "see": "seealso", "warning": "warning"}
-    def _admon_repl(m: re.Match) -> str:
-        kind = _ADMON_KIND[m.group("dir")]
-        indent = m.group("indent") or ""
-        body = m.group("body").rstrip()
-        # Re-indent body lines so MyST recognizes the nested block.
-        if indent:
-            re_indented = []
-            for line in body.split("\n"):
-                if not line.strip() or line.startswith(indent):
-                    re_indented.append(line)
-                else:
-                    re_indented.append(indent + line.lstrip(" \t"))
-            body = "\n".join(re_indented)
-        return f"\n{indent}:::{{{kind}}}\n{body}\n{indent}:::\n"
-    # `:?` also accepts the `@note: text` form.
-    text = re.sub(
-        r"^(?P<indent>[ \t]*)@(?P<dir>note|see|warning):?[ \t]*\n?"
-        r"(?P<body>.+?)(?=\n[ \t]*\n|\n[ \t]*@[A-Za-z]|\Z)",
-        _admon_repl, text, flags=re.DOTALL | re.MULTILINE)
+    # 8c. @note / @see / @warning handled at step 1b above.
 
     # 8d. Dedent indented descriptions after `- @subpage X`.
     def _dedent_subpage_descriptions(src: str) -> str:
