@@ -671,7 +671,8 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     `full_name` is the declaration name; `(id)=` keeps `#refid` links working."""
     short = m["name"]
     kind = m["kind"]
-    head = short + (m.get("args", "") if kind == "function" else "")
+    # Heading is just `name()` for functions; full signature is in the block below.
+    head = f"{short}()" if kind == "function" else short
     out = [f"({m['id']})=", f"### {head}".rstrip(), ""]
 
     # Declaration (template line, if any, then the C++ signature).
@@ -693,6 +694,23 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     inc = (m.get("include_file") or "").strip()
     if inc:
         out += ["{.opencv-api-include}", f"`#include <{inc}>`", ""]
+
+    # Python binding signature(s) from pyopencv_signatures.json (dormant until built).
+    if kind == "function":
+        py_entries = (_PY_SIGNATURES.get(full_name)
+                      or _PY_SIGNATURES.get(f"cv::{full_name}")
+                      or [])
+        if py_entries:
+            out += ["**Python:**", ""]
+            for e in py_entries:
+                py_name = e.get("name", "")
+                if not py_name:
+                    continue
+                py_sig = f"{py_name}({e.get('arg', '')})"
+                py_ret = e.get("ret", "")
+                if py_ret and py_ret not in ("None", ""):
+                    py_sig += f" -> {py_ret}"
+                out += ["```python", py_sig, "```", ""]
 
     if m.get("brief"):
         out += [m["brief"], ""]
