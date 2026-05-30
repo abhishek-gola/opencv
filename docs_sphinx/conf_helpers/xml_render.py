@@ -734,12 +734,59 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
     }
 
 
+# Filename -> path for every Doxygen `*graph.svg` (coll/call/caller). Built once
+# per html_root: a single tree walk replaces an rglob per class/function, which
+# matters now that thousands of function detail blocks each look up a graph.
+_GRAPH_SVG_INDEX: dict[str, pathlib.Path] | None = None
+_GRAPH_SVG_ROOT: pathlib.Path | None = None
+
+
+def _graph_svg_index(html_root: pathlib.Path) -> dict[str, pathlib.Path]:
+    global _GRAPH_SVG_INDEX, _GRAPH_SVG_ROOT
+    if _GRAPH_SVG_INDEX is None or _GRAPH_SVG_ROOT != html_root:
+        _GRAPH_SVG_ROOT = html_root
+        _GRAPH_SVG_INDEX = {}
+        if html_root and html_root.is_dir():
+            for p in html_root.rglob("*graph.svg"):
+                _GRAPH_SVG_INDEX.setdefault(p.name, p)
+    return _GRAPH_SVG_INDEX
+
+
 def _find_collaboration_svg(refid: str, html_root: pathlib.Path) -> pathlib.Path | None:
     """Locate the legacy Doxygen HTML collaboration SVG for a class."""
-    if not html_root.is_dir():
-        return None
-    matches = sorted(html_root.rglob(f"{refid}__coll__graph.svg"))
-    return matches[0] if matches else None
+    return _graph_svg_index(html_root).get(f"{refid}__coll__graph.svg")
+
+
+def _find_call_graph_svgs(
+        member: dict,
+        html_root: pathlib.Path) -> list[tuple[pathlib.Path, str, str]]:
+    """Legacy call/caller-graph SVGs for a function member, as (path, intro, alt).
+
+    Bridges the member's XML id to the HTML anchor via `_CALL_GRAPH_ANCHORS`
+    (the SVGs are named after the HTML anchor, not the XML memberdef id)."""
+    if member.get("kind") != "function":
+        return []
+    mid = member.get("id", "")
+    if "_1" not in mid:
+        return []
+    compound = mid.rsplit("_1", 1)[0]
+    name = member.get("name", "")
+    if not (compound and name):
+        return []
+    anchor = _CALL_GRAPH_ANCHORS.get(
+        (compound, name, _norm_args(member.get("args", ""))))
+    if not anchor:
+        return []
+    index = _graph_svg_index(html_root)
+    out: list[tuple[pathlib.Path, str, str]] = []
+    for suffix, intro, kind in (
+        ("cgraph", "Here is the call graph for this function:", "Call"),
+        ("icgraph", "Here is the caller graph for this function:", "Caller"),
+    ):
+        svg = index.get(f"{compound}_{anchor}_{suffix}.svg")
+        if svg is not None:
+            out.append((svg, intro, f"{kind} graph for {name}"))
+    return out
 
 
 def _svg_make_transparent(text: str) -> str:
@@ -980,6 +1027,7 @@ __all__ = [
     "_MEMBER_DIRECTIVE", "_MEMBER_DETAIL_SECTION", "_sphinx_cpp_v4_id",
     "_enum_synopsis_html", "_enum_synopsis_lines", "_function_signature",
     "_class_page_name", "_read_class_data", "_find_collaboration_svg",
+    "_find_call_graph_svgs",
     "_svg_make_transparent", "_svg_dark_variant",
     "_patch_namespace_xml_for_breathe",
     "_build_ns_group_map", "_namespaces_for_group",

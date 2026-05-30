@@ -215,6 +215,13 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     # the parser (the reason expansion was previously disabled wholesale).
     "MACRO_EXPANSION = YES\n"
     "EXPAND_ONLY_PREDEF = YES\n"
+    # Strip CUDA execution-space / inline qualifiers that the cudev module leaves
+    # on every function (e.g. `__device__ __forceinline__ schar abs_(schar)`).
+    # nvcc keywords, not C++: left in, they pollute signatures and break the
+    # Sphinx C++ parser, so breathe dumps the parse error into a Warning box.
+    # Mapping them to nothing here (like the CV_* macros above) yields clean,
+    # parseable declarations. `+=` appends to the @INCLUDE'd PREDEFINED list.
+    "PREDEFINED += __device__= __host__= __forceinline__= __global__= __constant__= __shared__= __restrict__=\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)

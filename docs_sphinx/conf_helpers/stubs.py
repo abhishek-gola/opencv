@@ -19,6 +19,60 @@ def _stub_write(path: pathlib.Path, content: str) -> None:
     _stub_written.add(path)
 
 
+# Set once per run by `_generate_api_stubs`; let the member renderers reach the
+# legacy Doxygen graph SVGs and the stub output dir without threading both
+# through every signature (mirrors the existing `_stub_written` global).
+_DOXY_HTML_ROOT: pathlib.Path | None = None
+_API_OUT_DIR: pathlib.Path | None = None
+
+
+def _diagram_svg_lines(svg_path: pathlib.Path, out_dir: pathlib.Path,
+                       alt: str, intro: str, extra_class: str = "") -> list[str]:
+    """Write theme-aware variants of a Doxygen graph SVG; return its MyST block.
+
+    `.opencv-coll-graph` is the class the build-finished step keys on to inline
+    the SVG, so call/caller graphs reuse it and add `extra_class` for styling.
+    Content-hashed filenames bust browser caches. Returns [] if unreadable."""
+    import hashlib as _hashlib
+    try:
+        raw = svg_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    light_txt = _svg_make_transparent(raw)
+    dark_txt = _svg_dark_variant(raw)
+    lh = _hashlib.md5(light_txt.encode("utf-8")).hexdigest()[:10]
+    dh = _hashlib.md5(dark_txt.encode("utf-8")).hexdigest()[:10]
+    light_name = f"{svg_path.stem}.{lh}.svg"
+    dark_name = f"{svg_path.stem}.{dh}.dark.svg"
+    try:
+        (out_dir / light_name).write_text(light_txt, encoding="utf-8")
+        (out_dir / dark_name).write_text(dark_txt, encoding="utf-8")
+    except OSError:
+        return []
+    _stub_written.add(out_dir / light_name)
+    _stub_written.add(out_dir / dark_name)
+    base = ["opencv-coll-graph"] + ([extra_class] if extra_class else [])
+
+    def _attr(variant: str) -> str:
+        return "{" + " ".join(f".{c}" for c in base + [variant]) + "}"
+    return [
+        intro, "",
+        f"![{alt}]({light_name}){_attr('only-light')}", "",
+        f"![{alt}]({dark_name}){_attr('only-dark')}", "",
+    ]
+
+
+def _call_graph_lines(member: dict) -> list[str]:
+    """Embedded call/caller graphs for a function member detail block (or [])."""
+    if _DOXY_HTML_ROOT is None or _API_OUT_DIR is None:
+        return []
+    out: list[str] = []
+    for svg, intro, alt in _find_call_graph_svgs(member, _DOXY_HTML_ROOT):
+        out += _diagram_svg_lines(svg, _API_OUT_DIR, alt, intro,
+                                  extra_class="opencv-call-graph")
+    return out
+
+
 def _group_by_section_header(items: list[dict]) -> list[tuple[str, list[dict]]]:
     """Split members into contiguous runs sharing a Doxygen `@name` header."""
     groups: list[tuple[str, list[dict]]] = []
@@ -413,68 +467,65 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 name_link = _member_anchor_link(m, m["name"])
                 out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
-            # core_basic: clickable HTML synopsis + detail link.
-            _enum_more_link = (name == "core_basic")
-            _clickable_synopsis = (name == "core_basic")
+            # Clickable HTML synopsis + on-page detail link, for every module
+            # (previously core_basic-only). Each enumerator links to the enum's
+            # detail block. Anchor: named enums use the detail heading slug;
+            # anonymous enums (no name) fall back to the stable Doxygen id so the
+            # link still resolves and never collides.
             import html as _html_mod
+            # Encode `::` so translate's cv-linkifier skips it.
+            def _safe(s: str) -> str:
+                return _html_mod.escape(s).replace("::", "&#58;&#58;")
             for m in members:
-                _more = ""
-                if _enum_more_link:
-                    # Target the detail block's heading slug.
-                    _more = f"[View details](#{m['name'].lower()})"
-                if _clickable_synopsis:
-                    _qual = m["qualified"] or m["name"]
-                    _is_strong = bool(m.get("strong"))
-                    _keyword = "enum struct" if _is_strong else "enum"
-                    # Enumerator name prefix (scope).
-                    if _is_strong:
-                        _val_prefix = _qual + "::"
-                    elif "::" in _qual:
-                        _val_prefix = _qual.rsplit("::", 1)[0] + "::"
-                    else:
-                        _val_prefix = ""
-                    _href = f"#{m['name'].lower()}"
-                    # Encode `::` so translate's cv-linkifier skips it.
-                    def _safe(s: str) -> str:
-                        return _html_mod.escape(s).replace("::", "&#58;&#58;")
-                    out.append(
-                        '<div class="highlight-cpp notranslate '
-                        'opencv-enum-clickable"><div class="highlight"><pre>'
-                    )
-                    out.append(
-                        f'<span class="k">{_html_mod.escape(_keyword)}</span> '
-                        f'<a class="reference internal" href="{_href}">'
-                        f'<span class="n">{_safe(_qual)}</span></a> '
-                        f'<span class="p">{{</span>'
-                    )
-                    _vals = m.get("enum_values") or []
-                    for _i, _v in enumerate(_vals):
-                        _comma = ('<span class="p">,</span>'
-                                  if _i < len(_vals) - 1 else '')
-                        _init = (' ' + _html_mod.escape(_v["initializer"])
-                                 if _v.get("initializer") else '')
-                        _full = _val_prefix + _v["name"]
-                        out.append(
-                            f'    <a class="reference internal" href="{_href}">'
-                            f'<span class="n">{_safe(_full)}</span></a>'
-                            f'{_init}{_comma}'
-                        )
-                    out.append('<span class="p">}</span></pre></div></div>')
-                    # Blank line closes the raw-HTML block (CommonMark rule 7).
-                    out.append("")
+                _anchor = (m.get("name") or "").lower() or m["id"]
+                _href = f"#{_anchor}"
+                _qual = m["qualified"] or m["name"]
+                _is_strong = bool(m.get("strong"))
+                _keyword = "enum struct" if _is_strong else "enum"
+                # Enumerator name prefix (scope).
+                if _is_strong:
+                    _val_prefix = _qual + "::"
+                elif "::" in _qual:
+                    _val_prefix = _qual.rsplit("::", 1)[0] + "::"
                 else:
-                    out.append("```cpp")
-                    out.extend(_enum_synopsis_lines(m))
-                    out.append("```")
+                    _val_prefix = ""
+                out.append(
+                    '<div class="highlight-cpp notranslate '
+                    'opencv-enum-clickable"><div class="highlight"><pre>'
+                )
+                # Anonymous enums have no name to link; emit a bare `enum {`.
+                _name_html = (
+                    f'<a class="reference internal" href="{_href}">'
+                    f'<span class="n">{_safe(_qual)}</span></a> ' if _qual else "")
+                out.append(
+                    f'<span class="k">{_html_mod.escape(_keyword)}</span> '
+                    f'{_name_html}<span class="p">{{</span>'
+                )
+                _vals = m.get("enum_values") or []
+                for _i, _v in enumerate(_vals):
+                    _comma = ('<span class="p">,</span>'
+                              if _i < len(_vals) - 1 else '')
+                    _init = (' ' + _html_mod.escape(_v["initializer"])
+                             if _v.get("initializer") else '')
+                    _full = _val_prefix + _v["name"]
+                    out.append(
+                        f'    <a class="reference internal" href="{_href}">'
+                        f'<span class="n">{_safe(_full)}</span></a>'
+                        f'{_init}{_comma}'
+                    )
+                out.append('<span class="p">}</span></pre></div></div>')
+                # Blank line closes the raw-HTML block (CommonMark rule 7).
+                out.append("")
+                # "View details" is a raw-HTML link (not markdown) so it resolves
+                # to both the heading slug (named) and the raw-HTML id (anonymous).
+                # Shown with or without a brief.
+                _details = (f'<a class="reference internal" '
+                            f'href="{_href}">View details</a>')
                 if m["brief"]:
-                    line = _md_escape_cell(m["brief"])
-                    if _more:
-                        line += f" {_more}"
-                    out.append(line)
-                    out.append("")
-                elif _more:
-                    out.append(_more)
-                    out.append("")
+                    out.append(f'{_md_escape_cell(m["brief"])} {_details}')
+                else:
+                    out.append(_details)
+                out.append("")
         else:  # Macros
             out += ["{.api-reference-table}", "| Name | Description |", "|---|---|"]
             for m in members:
@@ -515,9 +566,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         items = node["sections"].get(section_title, [])
         if not items:
             continue
-        # Enum detail: core_basic only.
-        if kind_key == "enum" and name != "core_basic":
-            continue
+        # Enum detail blocks render on every module page (targets of the
+        # clickable synopsis above), not just core_basic.
         # core_basic funcs: count overloads first for `[i/n]` headings.
         _core_basic_funcs = (name == "core_basic" and kind_key == "function")
         _ov_total: dict[str, int] = {}
@@ -548,23 +598,32 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             if kind_key == "enum":
                 # Hand-rolled (breathe's {doxygenenum} drops initializers/briefs).
                 _qual = m["qualified"] or m["name"]
-                _eid = _sphinx_cpp_v4_id(_qual)
                 _is_strong = bool(m.get("strong"))
                 _keyword = "enum class" if _is_strong else "enum"
-                _enum_href = f"#{m['name'].lower()}"
                 # Encode `::` so translate's cv-linkifier skips it (avoids a
                 # nested off-site anchor stealing the click).
                 _qual_safe = _qual.replace("::", "&#58;&#58;")
-                # Signature: full cv::Name as one clickable anchor.
-                blk: list[str] = [
-                    f"({_eid})=",
-                    f"### {m['name']}",
-                    "",
-                    f'<code class="docutils literal notranslate opencv-enum-sig">'
-                    f'{_keyword} <a class="reference internal" '
-                    f'href="{_enum_href}">{_qual_safe}</a></code>',
-                    "",
-                ]
+                if m.get("name"):
+                    # Named: markdown heading (its slug == the synopsis anchor,
+                    # also feeds the on-this-page TOC) + a C++ id label so
+                    # `cv::Name` cross-references resolve here. Signature line is
+                    # the full cv::Name as one clickable anchor.
+                    _enum_href = f"#{m['name'].lower()}"
+                    blk: list[str] = [
+                        f"({_sphinx_cpp_v4_id(_qual)})=",
+                        f"### {m['name']}",
+                        "",
+                        f'<code class="docutils literal notranslate opencv-enum-sig">'
+                        f'{_keyword} <a class="reference internal" '
+                        f'href="{_enum_href}">{_qual_safe}</a></code>',
+                        "",
+                    ]
+                else:
+                    # Anonymous enum: no name to slug, so carry the synopsis
+                    # anchor on a raw-HTML heading id (the stable Doxygen id).
+                    # No markdown heading (avoids an empty TOC entry) and no MyST
+                    # label (avoids colliding with the namespace page's label).
+                    blk = [f'<h3 id="{m["id"]}">{_keyword}</h3>', ""]
                 # #include line, linkified to the Doxygen file page.
                 if m.get("include_file"):
                     _ipath = m["include_file"]
@@ -723,6 +782,7 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
         out.append("")
     if m.get("returns"):
         out += ["**Returns**", "", m["returns"], ""]
+    out += _call_graph_lines(m)
     return out
 
 
@@ -759,6 +819,7 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
         out.append("")
     if m.get("returns"):
         out += [f"**Returns** — {m['returns']}", ""]
+    out += _call_graph_lines(m)
     return out
 
 
@@ -801,37 +862,11 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
 
     # Collaboration diagram: reuse legacy Doxygen HTML build's SVG.
     _svg = _find_collaboration_svg(cls["refid"], xml_dir.parent / "html")
-    _light_name = _dark_name = None
     if _svg is not None:
-        import hashlib as _hashlib
-        try:
-            _raw = _svg.read_text(encoding="utf-8")
-            # Light/dark variants; content-hashed names bust browser caches.
-            _light_txt = _svg_make_transparent(_raw)
-            _dark_txt = _svg_dark_variant(_raw)
-            _lh = _hashlib.md5(_light_txt.encode("utf-8")).hexdigest()[:10]
-            _dh = _hashlib.md5(_dark_txt.encode("utf-8")).hexdigest()[:10]
-            _light_name = f"{_svg.stem}.{_lh}.svg"
-            _dark_name = f"{_svg.stem}.{_dh}.dark.svg"
-            (out_dir / _light_name).write_text(_light_txt, encoding="utf-8")
-            (out_dir / _dark_name).write_text(_dark_txt, encoding="utf-8")
-            # Register so the stale-file sweep keeps them.
-            _stub_written.add(out_dir / _light_name)
-            _stub_written.add(out_dir / _dark_name)
-        except OSError:
-            _light_name = _dark_name = None
-    if _light_name is not None:
-        # only-light/only-dark: pydata theme-aware image classes.
-        lines += [
-            f"Collaboration diagram for {qualified}:",
-            "",
-            f"![Collaboration diagram for {qualified}]({_light_name})"
-            "{.opencv-coll-graph .only-light}",
-            "",
-            f"![Collaboration diagram for {qualified}]({_dark_name})"
-            "{.opencv-coll-graph .only-dark}",
-            "",
-        ]
+        lines += _diagram_svg_lines(
+            _svg, out_dir,
+            f"Collaboration diagram for {qualified}",
+            f"Collaboration diagram for {qualified}:")
 
     data = _read_class_data(cls["refid"], xml_dir)
     if data is None:  # missing XML
@@ -993,6 +1028,11 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
         return
     if not xml_dir.is_dir():
         return  # No XML yet; degrade silently.
+
+    # Where the member renderers find legacy graph SVGs / write their variants.
+    global _DOXY_HTML_ROOT, _API_OUT_DIR
+    _DOXY_HTML_ROOT = xml_dir.parent / "html"
+    _API_OUT_DIR = out_dir
 
     # Freshness guard: skip rebuild if tree newer than XML and has ns stubs.
     src_index = xml_dir / "index.xml"

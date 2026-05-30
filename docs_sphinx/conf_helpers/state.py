@@ -169,6 +169,16 @@ _TAG_FILE = pathlib.Path(_os.environ.get(
 _TAG_FILENAMES: dict[str, str] = {}
 # anchor -> title
 _TAG_TITLES: dict[str, str] = {}
+# (compound-stem, member-name, normalized-args) -> Doxygen HTML anchor.
+# Bridges our XML-driven members to the HTML anchors that name the call/caller
+# graph SVGs (XML memberdef ids and HTML anchors live in disjoint hash spaces).
+_CALL_GRAPH_ANCHORS: dict[tuple[str, str, str], str] = {}
+
+
+def _norm_args(arglist: str) -> str:
+    """Normalize a C++ arg-list so an XML `argsstring` matches a tag `arglist`."""
+    import html as _html
+    return re.sub(r"\s+", "", _html.unescape(arglist or ""))
 # cv-namespace short-name -> doxygen URL; used by step 7c
 _CV_SYMBOL_URL: dict[str, str] = {}
 # include-path -> Doxygen HTML file URL; linkifies enum `#include` lines.
@@ -179,6 +189,19 @@ if _TAG_FILE.is_file():
         _tag_root = _ET.parse(str(_TAG_FILE)).getroot()
         for _c in _tag_root.iter("compound"):
             _kind = _c.get("kind")
+            # Call/caller-graph anchors: every compound's function members,
+            # keyed by the page they're documented on (the SVG filename prefix).
+            for _fm in _c.findall("member"):
+                if _fm.get("kind") != "function":
+                    continue
+                _fn = _fm.findtext("name")
+                _faf = _fm.findtext("anchorfile") or ""
+                _fan = _fm.findtext("anchor") or ""
+                if not (_fn and _faf and _fan):
+                    continue
+                _fstem = pathlib.Path(_faf).stem
+                _CALL_GRAPH_ANCHORS.setdefault(
+                    (_fstem, _fn, _norm_args(_fm.findtext("arglist") or "")), _fan)
             if _kind == "page":
                 _n, _f = _c.findtext("name"), _c.findtext("filename")
                 _t = _c.findtext("title")
@@ -799,6 +822,7 @@ __all__ = [
     "HAVE_SPHINX_DESIGN", "HAVE_BREATHE",
     "DOXYGEN_BASE_URL", "_doxygen_url",
     "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_CV_SYMBOL_URL", "_FILE_URL",
+    "_CALL_GRAPH_ANCHORS", "_norm_args",
     "_LIVE_GROUP_URL", "_LIVE_CLASS_URL", "_LIVE_TYPEDEF_URL",
     "_LOCAL_CLASS_URL", "_LOCAL_TYPEDEF_URL", "_CLASS_TEMPLATE_DISPLAY",
     "_func_slug",
