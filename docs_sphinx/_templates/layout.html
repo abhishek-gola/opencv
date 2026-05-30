@@ -39,11 +39,20 @@
   }, true);
 
   document.addEventListener("DOMContentLoaded", function () {
-    // 1) Wire opening FIRST so the modal works even if Doxygen init throws.
-    var overlay = document.getElementById("opencvSearchOverlay");
+    // The theme renders navbar_end twice (desktop header + mobile drawer), so
+    // the search component appears twice → duplicate #opencvSearchTrigger /
+    // #opencvSearchOverlay IDs. Keep ONE overlay; wire EVERY trigger to it
+    // (the visible button may be the second copy — getElementById sees only the
+    // first, which is why clicking did nothing before).
+    var overlays = document.querySelectorAll("#opencvSearchOverlay");
+    for (var k = overlays.length - 1; k >= 1; k--) overlays[k].parentNode.removeChild(overlays[k]);
+    var overlay = overlays[0];
     if (overlay && overlay.parentNode !== document.body) document.body.appendChild(overlay);
-    var trigger = document.getElementById("opencvSearchTrigger");
-    if (trigger) trigger.addEventListener("click", function (e) { e.preventDefault(); opencvOpenSearch(); });
+
+    // 1) Wire opening FIRST so the modal works even if Doxygen init throws.
+    document.querySelectorAll("#opencvSearchTrigger").forEach(function (btn) {
+      btn.addEventListener("click", function (e) { e.preventDefault(); opencvOpenSearch(); });
+    });
     if (overlay) overlay.addEventListener("mousedown", function (e) { if (e.target === overlay) opencvCloseSearch(); });
     document.addEventListener("keydown", function (e) { if (/^Escape$/i.test(e.key)) opencvCloseSearch(); });
 

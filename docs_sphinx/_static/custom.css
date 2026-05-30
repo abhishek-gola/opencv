@@ -77,6 +77,11 @@ html:not([data-theme="dark"]) .bd-content .opencv-enum-clickable a span {
     color: var(--pst-color-link, #0969da) !important;
 }
 
+/* Typedef Documentation: blue clickable tokens in light mode. */
+html:not([data-theme="dark"]) .bd-content #typedef-documentation a {
+    color: var(--pst-color-link, #0969da) !important;
+}
+
 /* --- Front-matter table (.opencv-meta-table) --------------------------- */
 .opencv-meta-table,
 .opencv-meta-table .pst-scrollable-table-container { margin: 0 !important; padding: 0 !important; }

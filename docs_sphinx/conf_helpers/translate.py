@@ -452,14 +452,20 @@ def _translate(text: str, docname: str | None = None) -> str:
             def _token_url(tok: str) -> str | None:
                 # Tokens absent from the tagfile stay plain.
                 return _LOCAL_CLASS_URL.get(tok) or _LOCAL_TYPEDEF_URL.get(tok)
-            _tok_re = re.compile(r"\b_?[A-Za-z][A-Za-z0-9_]*\b")
+            # Match an optional `cv::` prefix so the anchor spans `cv::Name`.
+            _tok_re = re.compile(r"(?:cv::)?_?[A-Za-z][A-Za-z0-9_]*")
+            def _bare(tok: str) -> str:
+                return tok[4:] if tok.startswith("cv::") else tok
+            def _anchor_text(tok: str) -> str:
+                # Encode `::` so the later cv-linkifier doesn't nest a second anchor.
+                return tok.replace("::", "&#58;&#58;")
             def _linkify_html_segment(seg: str) -> str:
                 def _sub(m: re.Match) -> str:
-                    url = _token_url(m.group(0))
+                    url = _token_url(_bare(m.group(0)))
                     if not url:
                         return m.group(0)
                     return (f'<a class="reference internal" '
-                            f'href="{url}">{m.group(0)}</a>')
+                            f'href="{url}">{_anchor_text(m.group(0))}</a>')
                 return _tok_re.sub(_sub, seg)
             def _linkify_inside_code(m: re.Match) -> str:
                 inner = m.group("inner")
@@ -483,8 +489,10 @@ def _translate(text: str, docname: str | None = None) -> str:
 
             def _linkify_markdown_codespan(m: re.Match) -> str:
                 content = m.group("content")
+                # Prefix-aware: `cv::Name` is one hit so the anchor covers both.
                 hits = [(t.start(), t.end(), t.group(0)) for t in
-                        _tok_re.finditer(content) if _token_url(t.group(0))]
+                        _tok_re.finditer(content)
+                        if _token_url(_bare(t.group(0)))]
                 if not hits:
                     return m.group(0)
                 from html import escape as _esc
@@ -492,7 +500,8 @@ def _translate(text: str, docname: str | None = None) -> str:
                 for s, e, tok in hits:
                     parts.append(_esc(content[last:s]))
                     parts.append(f'<a class="reference internal" '
-                                 f'href="{_token_url(tok)}">{tok}</a>')
+                                 f'href="{_token_url(_bare(tok))}">'
+                                 f'{_anchor_text(tok)}</a>')
                     last = e
                 parts.append(_esc(content[last:]))
                 return (f'<code class="docutils literal notranslate">'

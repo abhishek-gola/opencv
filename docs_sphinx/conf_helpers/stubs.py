@@ -158,7 +158,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                                 enum_values.append({
                                     "name":        (ev.findtext("name") or "").strip(),
                                     "initializer": (ev.findtext("initializer") or "").strip(),
-                                    "brief":       _itertext(ev.find("briefdescription")),
+                                    "brief":       _enum_value_desc(ev),
                                 })
                         ns_sections.setdefault(section_title, []).append({
                             "id":          md.get("id", ""),
@@ -414,7 +414,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
     def _is_template_spec(m: dict) -> bool:
         # breathe's C++ parser rejects `<…>` names; skip detail block.
-        return "<" in (m.get("name") or "")
+        # But `operator<<` / `operator<` aren't template specs (the `<` is
+        # part of the name), so keep them in the detail section.
+        name = m.get("name") or ""
+        if name.startswith("operator"):
+            return False
+        return "<" in name
 
 
     # Class members lack an in-page anchor; link to the class page.
@@ -749,10 +754,22 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     _sig = ([f"`{tmpl}`"] if tmpl else []) + [f"`{decl}`"]
     out += ["\\\n".join(_sig), ""]
 
-    # `#include <…>` card row, like docs.opencv.org.
+    # `#include <…>` card row, like docs.opencv.org. For typedefs the path is
+    # a blue link to the Doxygen file page; other kinds keep the plain chip.
     inc = (m.get("include_file") or "").strip()
     if inc:
-        out += ["{.opencv-api-include}", f"`#include <{inc}>`", ""]
+        _ifile = _FILE_URL.get(inc) if kind == "typedef" else None
+        if _ifile:
+            _href = f"../../../doc/doxygen/html/{_ifile}"
+            out += [
+                "{.opencv-api-include}",
+                f'<code class="docutils literal notranslate">'
+                f'#include &lt;<a class="reference external '
+                f'opencv-include-link" href="{_href}">{inc}</a>&gt;</code>',
+                "",
+            ]
+        else:
+            out += ["{.opencv-api-include}", f"`#include <{inc}>`", ""]
 
     # Python binding signature(s) from pyopencv_signatures.json (dormant until built).
     if kind == "function":

@@ -218,11 +218,12 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
                         # Per-enumerator brief for the detail block.
-                        "brief":       _itertext(ev.find("briefdescription")).strip(),
+                        "brief":       _enum_value_desc(ev),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             _loc = md.find("location")
-            _include_file = (_loc.get("file") if _loc is not None else "") or ""
+            _include_file = _normalize_include(
+                (_loc.get("file") if _loc is not None else "") or "")
             member = {
                 "id":          md.get("id", ""),
                 "kind":        kind,
@@ -532,6 +533,43 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
     return "\n\n".join(merged)
 
 
+def _normalize_include(path: str) -> str:
+    """Reduce a header path to its canonical `opencv2/...` form.
+
+    Doxygen records ABSOLUTE paths for out-of-tree (contrib) modules — e.g.
+    `/…/opencv_contrib/modules/cnn_3dobj/include/opencv2/cnn_3dobj.hpp` — which
+    leak into the #include line / source-file footer and miss `_FILE_URL` (so no
+    link). Main-tree headers are already `opencv2/…`. Trim everything up to and
+    including the last `/include/` so both behave identically."""
+    p = (path or "").replace("\\", "/").strip()
+    marker = "/include/"
+    i = p.rfind(marker)
+    return p[i + len(marker):] if i >= 0 else p
+
+
+def _enum_value_desc(ev) -> str:
+    """Markdown description for one `<enumvalue>`, for the enumerator table cell.
+
+    Doxygen puts a single-sentence enumerator doc in `<briefdescription>` but a
+    multi-paragraph one (or one with `@note`/`@see`) in `<detaileddescription>`
+    — reading only the brief silently drops the latter (e.g. dnn's
+    `DNN_BACKEND_INFERENCE_ENGINE`). Render both, block-aware so links survive,
+    then flatten to one line (admonition fences -> inline `**Note:**`) since this
+    lands in a Markdown table cell, which can't hold block directives."""
+    if ev is None:
+        return ""
+    parts = [_doxygen_desc_to_md(ev.find(t)).strip()
+             for t in ("briefdescription", "detaileddescription")]
+    full = "\n\n".join(p for p in parts if p)
+    if not full:
+        return ""
+    full = re.sub(r':::\{note\}\s*', "**Note:** ", full)
+    full = re.sub(r':::\{warning\}\s*', "**Warning:** ", full)
+    full = full.replace(":::", " ")
+    full = re.sub(r"\s*\n+\s*", " ", full).strip()   # collapse to one cell line
+    return full.replace("|", "\\|")
+
+
 def _md_escape_cell(text: str) -> str:
     """Make `text` safe for a single Markdown table cell."""
     return (text or "").replace("\n", " ").replace("\r", " ") \
@@ -693,7 +731,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
-                        "brief":       _itertext(ev.find("briefdescription")).strip(),
+                        "brief":       _enum_value_desc(ev),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             items.append({
@@ -724,7 +762,7 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
     has_detailed = bool(detailed_el is not None and any(
         _itertext(p).strip() for p in detailed_el.findall("para")
     ))
-    include = (cd.findtext("includes") or "").strip()
+    include = _normalize_include(cd.findtext("includes") or "")
     return {
         "name":     (cd.findtext("compoundname") or "").strip(),
         "brief":    _itertext(cd.find("briefdescription")),
@@ -1022,6 +1060,7 @@ def _namespace_innerclasses(ns_name: str, xml_dir: pathlib.Path) -> list[tuple]:
 
 __all__ = [
     "_itertext", "_type_to_md", "_doxygen_desc_to_md",
+    "_enum_value_desc", "_normalize_include",
     "_MEMBERDEF_SECTIONS", "_read_class_brief",
     "_build_api_hierarchy", "_parse_member_sections", "_md_escape_cell",
     "_MEMBER_DIRECTIVE", "_MEMBER_DETAIL_SECTION", "_sphinx_cpp_v4_id",
