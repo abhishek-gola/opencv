@@ -25,6 +25,11 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.4; }
 .bd-content ol ol ol { list-style-type: lower-roman; }
 .bd-content ol > li > p:first-child > strong:first-child::after { content: ":"; }
 
+/* In-content toctree (API "Topics" list): bullets + breathing room. */
+.bd-content .toctree-wrapper > ul { list-style: disc; padding-left: 1.5rem; }
+.bd-content .toctree-wrapper li { list-style: disc; margin: 0.4rem 0; }
+.bd-content .toctree-wrapper { margin: 0.5rem 0 1.5rem; }
+
 /* --- Landing page (generated index.markdown — .ocv-landing wrapper) ------
  * The index page has no secondary "On this page" sidebar (emptied in
  * conf.py), so the content column is full-width. Cap the entry list's width

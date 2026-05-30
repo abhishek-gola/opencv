@@ -319,30 +319,20 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
     lines = [f"# {title} {{#api_{name}}}", ""]
 
+    # Subgroup index: emit the @subpage Topics list first (the
+    # `_subpage_list_to_toctree` rule turns it into a real toctree), then fall
+    # through to this group's OWN members below — a group can have both, which
+    # matches the live Doxygen group-page layout. Children are recursed at the end.
     if node["children"]:
-        # Navigation index page: intro prose, namespaces, then @subpage topics
-        # (_subpage_list_to_toctree converts them to a real toctree).
-        lines = [f"# {title} {{#api_{name}}}", ""]
-        if node["detailed"]:
-            lines += ["## Detailed Description", "", node["detailed"], ""]
-        else:
-            lines += ["## Detailed Description", ""]
-        if ns_map and ns_map.get(name):
-            lines += _namespaces_section(ns_map[name])
         lines += ["## Topics", ""]
         for child in node["children"]:
             lines.append(f"- @subpage api_{child['name']}")
-        _stub_write(out, "\n".join(lines) + "\n")
-        for child in node["children"]:
-            _write_api_stub(child, out_dir, classes_seen, ns_map)
-        return
+        lines.append("")
 
-    # ---- Leaf page ----------------------------------------------------------
-    lines = [f"# {title} {{#api_{name}}}", ""]
     # Detailed Description heading — shown even when empty (ayush's layout).
     if node["detailed"]:
         lines += ["## Detailed Description", "", node["detailed"], ""]
-    elif node["innerclasses"] or node["sections"]:
+    elif node["innerclasses"] or node["sections"] or node["children"]:
         lines += ["## Detailed Description", ""]
     if ns_map and ns_map.get(name):
         lines += _namespaces_section(ns_map[name])
@@ -540,6 +530,9 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines += ["```", ""]
 
     _stub_write(out, "\n".join(lines) + "\n")
+    # Subgroup pages: recurse (no-op for leaf groups).
+    for child in node["children"]:
+        _write_api_stub(child, out_dir, classes_seen, ns_map)
 
 
 # sectiondef kind → summary heading, in Doxygen order.

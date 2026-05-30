@@ -333,25 +333,6 @@ def _translate(text: str, docname: str | None = None) -> str:
 
 
     if docname == "api/core_basic":
-        _vec_rows_re = re.compile(
-            r"(?:^\| `Vec<[^`]*` \| [^\n]*\n)+", re.MULTILINE)
-        _vm = _vec_rows_re.search(text)
-        if _vm:
-            _vec_rows = _vm.group(0)
-            text = text[:_vm.start()] + text[_vm.end():]
-            _shorter = (
-                "## Shorter aliases for the most popular specializations of "
-                "Vec<T,n>\n\n"
-                # Match the main Typedefs table styling.
-                "{.api-typedef-table}\n"
-                "| Type | Name | Description |\n"
-                "|---|---|---|\n"
-                + _vec_rows + "\n")
-            text = text.replace(
-                "## Typedef Documentation",
-                _shorter + "## Typedef Documentation",
-                1)
-
         # 8c. `{doxygentypedef} cv::Ptr` -> hand-rolled cpp:type (breathe skips C++11 aliases).
         text = re.sub(
             r"```\{doxygentypedef\} cv::Ptr\s*\n:project: opencv\s*\n```",
