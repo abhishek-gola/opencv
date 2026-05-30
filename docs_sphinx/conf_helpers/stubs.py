@@ -552,6 +552,9 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 _is_strong = bool(m.get("strong"))
                 _keyword = "enum class" if _is_strong else "enum"
                 _enum_href = f"#{m['name'].lower()}"
+                # Encode `::` so translate's cv-linkifier skips it (avoids a
+                # nested off-site anchor stealing the click).
+                _qual_safe = _qual.replace("::", "&#58;&#58;")
                 # Signature: full cv::Name as one clickable anchor.
                 blk: list[str] = [
                     f"({_eid})=",
@@ -559,7 +562,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     "",
                     f'<code class="docutils literal notranslate opencv-enum-sig">'
                     f'{_keyword} <a class="reference internal" '
-                    f'href="{_enum_href}">{_qual}</a></code>',
+                    f'href="{_enum_href}">{_qual_safe}</a></code>',
                     "",
                 ]
                 # #include line, linkified to the Doxygen file page.
@@ -647,6 +650,21 @@ _CLASS_SUMMARY_SECTIONS = [
 ]
 
 
+def _param_item_lines(nm: str, desc: str) -> list[str]:
+    """Render one `**Parameters**` entry, indenting any multi-line / bulleted
+    description so it nests under the param bullet. Without this a description
+    carrying its own list (e.g. calibration `flags`) collapses into a run-on
+    blob or breaks out past the card boundary as a flat sibling list."""
+    if not desc:
+        return [f"- `{nm}`"]
+    lines = desc.split("\n")
+    out = [f"- `{nm}` — {lines[0]}"]
+    # Continuation lines align with the bullet's content column (2 spaces);
+    # blank lines stay empty so the nested list/paragraphs render loosely.
+    out += [f"  {ln}" if ln.strip() else "" for ln in lines[1:]]
+    return out
+
+
 def _render_member_detail(m: dict, full_name: str) -> list[str]:
     """Render one member's detail block from XML (no breathe; it chokes).
 
@@ -683,7 +701,7 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     if m.get("params"):
         out += ["**Parameters**", ""]
         for nm, desc in m["params"]:
-            out.append(f"- `{nm}` — {desc}" if desc else f"- `{nm}`")
+            out += _param_item_lines(nm, desc)
         out.append("")
     if m.get("returns"):
         out += ["**Returns**", "", m["returns"], ""]
@@ -719,7 +737,7 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
     if m.get("params"):
         out += ["**Parameters**", ""]
         for nm, desc in m["params"]:
-            out.append(f"- `{nm}` — {desc}" if desc else f"- `{nm}`")
+            out += _param_item_lines(nm, desc)
         out.append("")
     if m.get("returns"):
         out += [f"**Returns** — {m['returns']}", ""]

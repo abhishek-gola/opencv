@@ -77,6 +77,36 @@ for _m in CONTRIB_MODULES:
                                             f"contrib_modules/{_rel}")
 
 if API_MODULES:
+    # 0) Module API figures (e.g. modules/calib/doc/pics/pinhole_camera_model.png,
+    #    referenced by Doxygen `@image html …` in group docs) live OUTSIDE
+    #    DOC_ROOT, so the tutorial scan above never indexed or staged them.
+    #    Mirror them flat into `api_pics/` under the srcdir and index by
+    #    filename so the XML `<image>` converter resolves them as
+    #    `/api_pics/<name>`. (Doxygen's IMAGE_PATH is flat, so basenames are
+    #    effectively unique; first writer wins on the rare clash.)
+    _api_pics = SPHINX_INPUT_ROOT / "api_pics"
+    _stage_pics = SPHINX_INPUT_ROOT != DOC_ROOT
+    if _stage_pics:
+        _api_pics.mkdir(parents=True, exist_ok=True)
+    _modules_root = DOC_ROOT.parent / "modules"
+    if _modules_root.is_dir():
+        for _doc_dir in sorted(_modules_root.glob("*/doc")):
+            for _img in _doc_dir.rglob("*"):
+                if not (_img.is_file() and _img.suffix.lower() in _IMAGE_EXTS):
+                    continue
+                if _img.name in _IMAGE_INDEX:
+                    continue
+                _IMAGE_INDEX[_img.name] = f"api_pics/{_img.name}"
+                if _stage_pics:
+                    _link = _api_pics / _img.name
+                    if not _link.exists():
+                        try:
+                            _os.symlink(_img, _link)
+                        except (OSError, NotImplementedError):
+                            try:
+                                _shutil.copy2(_img, _link)
+                            except OSError:
+                                pass
     # 1) Build a patched XML tree breathe will read (inlines group-only
     #    <memberdef>s into namespace XML so name lookups succeed).
     if _API_XML_DIR.is_dir():

@@ -17,10 +17,55 @@ def _wrap_emphasis(inner: str, delim: str) -> str:
     return f"{lead}{delim}{stripped}{delim}{trail}"
 
 
+# AMS block environments MyST's `amsmath` extension renders on their own. A
+# `$$`-wrapped body containing `\\` makes Sphinx/docutils nest it inside
+# `\begin{split}`; for a full alignment environment that yields
+# `\[\begin{split}\begin{align*}…\end{align*}\end{split}\]`, which MathJax
+# rejects with "Erroneous nesting of equation structures". Emitting these bare
+# lets the amsmath extension handle them with no split wrapper.
+_AMS_BLOCK_ENVS = frozenset((
+    "align", "align*", "alignat", "alignat*", "flalign", "flalign*",
+    "gather", "gather*", "multline", "multline*",
+    "equation", "equation*", "eqnarray", "eqnarray*",
+))
+
+
+def _render_formula(raw: str) -> str:
+    """Doxygen <formula> -> MyST math. Display `\\[..\\]` -> `$$..$$`, except a
+    standalone AMS alignment environment, emitted bare for the amsmath
+    extension. Inline `$..$` (or anything else) passes through unchanged."""
+    s = (raw or "").strip()
+    if s.startswith("\\[") and s.endswith("\\]"):
+        inner = s[2:-2].strip()
+        m = re.match(r"^\\begin\{([a-zA-Z]+\*?)\}", inner)
+        if (m and m.group(1) in _AMS_BLOCK_ENVS
+                and inner.rstrip().endswith("\\end{%s}" % m.group(1))):
+            return f"\n\n{inner}\n\n"
+        return f"\n\n$$\n{inner}\n$$\n\n"
+    return s
+
+
+def _render_image(node) -> str:
+    """Render a Doxygen <image> as a Markdown image. Doxygen duplicates each
+    `@image` once per output format (html, latex, rtf, docbook, xml); we keep
+    only the html variant — emitting all five would repeat the caption (or a
+    blank embed) five times. Resolves the basename via `_IMAGE_INDEX`; returns
+    '' for non-html variants or unresolved files (so the caption never leaks
+    into the prose as bare text)."""
+    if node.get("type") != "html":
+        return ""
+    name = (node.get("name") or "").strip()
+    caption = "".join(node.itertext()).strip()
+    hit = _IMAGE_INDEX.get(name)
+    if not hit:
+        return ""
+    return f"![{caption}](/{hit})"
+
+
 def _itertext(el) -> str:
     """Flatten an XML element's inner text. None-safe.
     Converts Doxygen <formula> elements to MyST-compatible math syntax:
-      \\[...\\]  →  $$\\n...\\n$$   (display math)
+      \\[...\\]  →  $$\\n...\\n$$   (display math; AMS envs emitted bare)
       $...$      →  $...$           (inline math, unchanged)
     """
     if el is None:
@@ -29,14 +74,9 @@ def _itertext(el) -> str:
 
     def _walk(node) -> None:
         if node.tag == "formula":
-            text = (node.text or "").strip()
-            if text.startswith("\\[") and text.endswith("\\]"):
-                # Display math: wrap in $$ ... $$ on its own lines.
-                inner = text[2:-2].strip()
-                parts.append(f"\n\n$$\n{inner}\n$$\n\n")
-            else:
-                # Inline math ($...$) or unknown — pass through unchanged.
-                parts.append(text)
+            parts.append(_render_formula(node.text or ""))
+        elif node.tag == "image":
+            parts.append(_render_image(node))   # caption text not recursed
         else:
             if node.text:
                 parts.append(node.text)
@@ -113,7 +153,10 @@ def _member_detail_parts(md):
                     nm = ", ".join(
                         t for t in (_itertext(n) for n in
                                     it.findall(".//parametername")) if t)
-                    d = _itertext(it.find("parameterdescription"))
+                    # Block-aware: a description carrying an <itemizedlist>
+                    # (e.g. calibration `flags`) keeps its bullets as real
+                    # Markdown instead of collapsing into a run-on paragraph.
+                    d = _doxygen_desc_to_md(it.find("parameterdescription"))
                     if nm:
                         params.append((nm, d))
         for ss in para.findall("simplesect"):
@@ -311,12 +354,7 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             url = f"{DOXYGEN_BASE_URL}{refid}.html"
         return f"[`{text}`]({url})"
 
-    def _formula_md(raw: str) -> str:
-        """Doxygen <formula> -> MyST math. Display \\[..\\] -> $$..$$; inline kept."""
-        s = (raw or "").strip()
-        if s.startswith(r"\[") and s.endswith(r"\]"):
-            return f"\n\n$$\n{s[2:-2].strip()}\n$$\n\n"
-        return s
+    _formula_md = _render_formula
 
     _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting", "simplesect", "table"}
 
@@ -376,6 +414,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             if t == "ulink":
                 url = child.get("url", "")
                 parts.append(f"[{inner}]({url})" if url else inner)
+            elif t == "image":
+                parts.append(_render_image(child))
             elif t == "ref":
                 parts.append(_ref_link(child.get("refid", ""), inner))
             elif t == "computeroutput":
@@ -441,6 +481,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                         if st == "ulink":
                             url = sub.get("url", "")
                             pending.append(f"[{inner}]({url})" if url else inner)
+                        elif st == "image":
+                            pending.append(_render_image(sub))
                         elif st == "ref":
                             pending.append(_ref_link(sub.get("refid", ""), inner))
                         elif st == "computeroutput":
