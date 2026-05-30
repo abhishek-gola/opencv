@@ -4,6 +4,18 @@ import pathlib, re, os as _os, shutil as _shutil, textwrap as _textwrap
 from .state import *
 
 
+def _wrap_emphasis(inner: str, delim: str) -> str:
+    """Wrap `inner` in a `*`/`**` run, hoisting any leading/trailing whitespace
+    outside the markers. CommonMark needs the delimiters to hug the text
+    (`**x**`, not `** x **`), but Doxygen keeps the spaces inside `<b> … </b>`."""
+    stripped = inner.strip()
+    if not stripped:
+        return inner
+    lead = inner[:len(inner) - len(inner.lstrip())]
+    trail = inner[len(inner.rstrip()):]
+    return f"{lead}{delim}{stripped}{delim}{trail}"
+
+
 def _itertext(el) -> str:
     """Flatten an XML element's inner text. None-safe.
     Converts Doxygen <formula> elements to MyST-compatible math syntax:
@@ -357,9 +369,9 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             elif t == "computeroutput":
                 parts.append(f"`{inner}`" if inner else "")
             elif t == "emphasis":
-                parts.append(f"*{inner}*" if inner else "")
+                parts.append(_wrap_emphasis(inner, "*") if inner else "")
             elif t in ("bold", "strong"):
-                parts.append(f"**{inner}**" if inner else "")
+                parts.append(_wrap_emphasis(inner, "**") if inner else "")
             elif t == "formula":
                 parts.append(_formula_md(inner))
             elif t == "sp":
@@ -422,9 +434,9 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                         elif st == "computeroutput":
                             pending.append(f"`{inner}`" if inner else "")
                         elif st == "emphasis":
-                            pending.append(f"*{inner}*" if inner else "")
+                            pending.append(_wrap_emphasis(inner, "*") if inner else "")
                         elif st in ("bold", "strong"):
-                            pending.append(f"**{inner}**" if inner else "")
+                            pending.append(_wrap_emphasis(inner, "**") if inner else "")
                         elif st == "formula":
                             pending.append(_formula_md(inner))
                         elif st == "sp":
