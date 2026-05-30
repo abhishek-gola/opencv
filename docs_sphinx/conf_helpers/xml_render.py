@@ -5,8 +5,35 @@ from .state import *
 
 
 def _itertext(el) -> str:
-    """Flatten an XML element's inner text."""
-    return "".join(el.itertext()).strip() if el is not None else ""
+    """Flatten an XML element's inner text. None-safe.
+    Converts Doxygen <formula> elements to MyST-compatible math syntax:
+      \\[...\\]  →  $$\\n...\\n$$   (display math)
+      $...$      →  $...$           (inline math, unchanged)
+    """
+    if el is None:
+        return ""
+    parts: list[str] = []
+
+    def _walk(node) -> None:
+        if node.tag == "formula":
+            text = (node.text or "").strip()
+            if text.startswith("\\[") and text.endswith("\\]"):
+                # Display math: wrap in $$ ... $$ on its own lines.
+                inner = text[2:-2].strip()
+                parts.append(f"\n\n$$\n{inner}\n$$\n\n")
+            else:
+                # Inline math ($...$) or unknown — pass through unchanged.
+                parts.append(text)
+        else:
+            if node.text:
+                parts.append(node.text)
+            for child in node:
+                _walk(child)
+                if child.tail:
+                    parts.append(child.tail)
+
+    _walk(el)
+    return "".join(parts).strip()
 
 
 # memberdef@kind -> section title; order mirrors Doxygen group page.
