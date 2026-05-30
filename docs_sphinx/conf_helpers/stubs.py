@@ -1,6 +1,6 @@
 """API-reference stub writers. Entry point: ``_generate_api_stubs``."""
 from __future__ import annotations
-import pathlib, re, os as _os, shutil as _shutil, textwrap as _textwrap
+import pathlib, os as _os, shutil as _shutil, textwrap as _textwrap
 from .state import *
 from .xml_render import *
 from .examples import (
@@ -389,8 +389,6 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 sig_link = _member_anchor_link(m, label)
                 if _rich_return:
-                    # Hide the Doxygen-visible CV_EXPORTS* macro (live docs do).
-                    ret_type = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "", ret_type)
                     storage = "static " if m.get("static") else ""
                     if m.get("template"):
                         ret = f"`{m['template']}`<br>`{storage}{ret_type}`"
@@ -415,24 +413,68 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 name_link = _member_anchor_link(m, m["name"])
                 out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
-            # Code-style synopsis (Doxygen layout) instead of name/desc table.
-            # core_basic links inline to the enum detail block.
+            # core_basic: clickable HTML synopsis + detail link.
             _enum_more_link = (name == "core_basic")
+            _clickable_synopsis = (name == "core_basic")
+            import html as _html_mod
             for m in members:
                 _more = ""
                 if _enum_more_link:
-                    _eid = _sphinx_cpp_v4_id(m["qualified"] or m["name"])
-                    _more = f" [View details](#{_eid})"
+                    # Target the detail block's heading slug.
+                    _more = f"[View details](#{m['name'].lower()})"
+                if _clickable_synopsis:
+                    _qual = m["qualified"] or m["name"]
+                    _is_strong = bool(m.get("strong"))
+                    _keyword = "enum struct" if _is_strong else "enum"
+                    # Enumerator name prefix (scope).
+                    if _is_strong:
+                        _val_prefix = _qual + "::"
+                    elif "::" in _qual:
+                        _val_prefix = _qual.rsplit("::", 1)[0] + "::"
+                    else:
+                        _val_prefix = ""
+                    _href = f"#{m['name'].lower()}"
+                    # Encode `::` so translate's cv-linkifier skips it.
+                    def _safe(s: str) -> str:
+                        return _html_mod.escape(s).replace("::", "&#58;&#58;")
+                    out.append(
+                        '<div class="highlight-cpp notranslate '
+                        'opencv-enum-clickable"><div class="highlight"><pre>'
+                    )
+                    out.append(
+                        f'<span class="k">{_html_mod.escape(_keyword)}</span> '
+                        f'<a class="reference internal" href="{_href}">'
+                        f'<span class="n">{_safe(_qual)}</span></a> '
+                        f'<span class="p">{{</span>'
+                    )
+                    _vals = m.get("enum_values") or []
+                    for _i, _v in enumerate(_vals):
+                        _comma = ('<span class="p">,</span>'
+                                  if _i < len(_vals) - 1 else '')
+                        _init = (' ' + _html_mod.escape(_v["initializer"])
+                                 if _v.get("initializer") else '')
+                        _full = _val_prefix + _v["name"]
+                        out.append(
+                            f'    <a class="reference internal" href="{_href}">'
+                            f'<span class="n">{_safe(_full)}</span></a>'
+                            f'{_init}{_comma}'
+                        )
+                    out.append('<span class="p">}</span></pre></div></div>')
+                    # Blank line closes the raw-HTML block (CommonMark rule 7).
+                    out.append("")
+                else:
+                    out.append("```cpp")
+                    out.extend(_enum_synopsis_lines(m))
+                    out.append("```")
                 if m["brief"]:
-                    out.append(_md_escape_cell(m["brief"]) + _more)
+                    line = _md_escape_cell(m["brief"])
+                    if _more:
+                        line += f" {_more}"
+                    out.append(line)
                     out.append("")
                 elif _more:
-                    out.append(_more.strip())
+                    out.append(_more)
                     out.append("")
-                out.append("```cpp")
-                out.extend(_enum_synopsis_lines(m))
-                out.append("```")
-                out.append("")
         else:  # Macros
             out += ["{.api-reference-table}", "| Name | Description |", "|---|---|"]
             for m in members:
@@ -467,11 +509,14 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines.append("")
 
     # Detail blocks via `_render_member_detail` (breathe chokes); macros keep
-    # `{doxygendefine}`; enums/class-members/template-specs skipped.
+    # `{doxygendefine}`; enum detail is hand-rolled (core_basic only).
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
-        if not items or kind_key == "enum":
+        if not items:
+            continue
+        # Enum detail: core_basic only.
+        if kind_key == "enum" and name != "core_basic":
             continue
         # core_basic funcs: count overloads first for `[i/n]` headings.
         _core_basic_funcs = (name == "core_basic" and kind_key == "function")
@@ -499,6 +544,57 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 _slug_seen.add(slug)
                 blocks.append(_render_core_basic_func(
                     m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
+                continue
+            if kind_key == "enum":
+                # Hand-rolled (breathe's {doxygenenum} drops initializers/briefs).
+                _qual = m["qualified"] or m["name"]
+                _eid = _sphinx_cpp_v4_id(_qual)
+                _is_strong = bool(m.get("strong"))
+                _keyword = "enum class" if _is_strong else "enum"
+                _enum_href = f"#{m['name'].lower()}"
+                # Signature: full cv::Name as one clickable anchor.
+                blk: list[str] = [
+                    f"({_eid})=",
+                    f"### {m['name']}",
+                    "",
+                    f'<code class="docutils literal notranslate opencv-enum-sig">'
+                    f'{_keyword} <a class="reference internal" '
+                    f'href="{_enum_href}">{_qual}</a></code>',
+                    "",
+                ]
+                # #include line, linkified to the Doxygen file page.
+                if m.get("include_file"):
+                    _ipath = m["include_file"]
+                    _ifile = _FILE_URL.get(_ipath)
+                    if _ifile:
+                        _href = f"../../../doc/doxygen/html/{_ifile}"
+                        blk += [
+                            f'<code class="docutils literal notranslate">'
+                            f'#include &lt;<a class="reference external '
+                            f'opencv-include-link" '
+                            f'href="{_href}">{_ipath}</a>&gt;</code>',
+                            "",
+                        ]
+                    else:
+                        blk += [f"`#include <{_ipath}>`", ""]
+                if m.get("brief"):
+                    blk += [m["brief"], ""]
+                if m.get("detailed"):
+                    blk += [m["detailed"], ""]
+                _vals = m.get("enum_values") or []
+                if _vals:
+                    blk += ["**Enumerator:**", "", "| | |", "|---|---|"]
+                    for _v in _vals:
+                        _nm = _v["name"]
+                        _vbrief = (_v.get("brief") or "").replace("|", "\\|").replace("\n", " ")
+                        # Name chip + Python binding (initializer omitted as noise).
+                        _cell = f"`{_nm}`"
+                        _py = _python_enum_name(_qual, _nm, _is_strong)
+                        if _py:
+                            _cell = f"{_cell}<br>Python: `{_py}`"
+                        blk.append(f"| {_cell} | {_vbrief} |")
+                    blk.append("")
+                blocks.append(blk)
                 continue
             if kind_key == "define":
                 # Macros aren't namespaced; dedupe arity-overloaded ones.
@@ -606,7 +702,7 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
     head = f"### {short}(){suffix}"
     out = [f"{head} {{#{slug}}}" if emit_anchor else head, ""]
     # Template clause + signature as inline code (keeps token-linkifier active).
-    ret = re.sub(r"^CV_EXPORTS(?:_[A-Z]+)?\s+", "", m.get("type") or "")
+    ret = m.get("type") or ""
     storage = ("static " if m.get("static") else "") \
         + ("inline " if m.get("inline") else "")
     qname = m["qualified"] or m["name"]
@@ -729,12 +825,7 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
-                # ret = _md_escape_cell(m["type"]) or "&nbsp;"
-                ret_type = m["type"] or ""
-                # Strip CV_EXPORTS* macros and excess whitespace
-                ret_type = __import__("re").sub(
-                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
-                ret = _md_escape_cell(ret_type) or "&nbsp;"
+                ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 if m["static"]:
                     ret = "static " + ret
                 sig = f"{m['name']}{_md_escape_cell(m['args'])}"

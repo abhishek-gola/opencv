@@ -174,6 +174,8 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                     enum_values.append({
                         "name":        (ev.findtext("name") or "").strip(),
                         "initializer": (ev.findtext("initializer") or "").strip(),
+                        # Per-enumerator brief for the detail block.
+                        "brief":       _itertext(ev.find("briefdescription")).strip(),
                     })
             _dtl, _params, _returns = _member_detail_parts(md)
             _loc = md.find("location")

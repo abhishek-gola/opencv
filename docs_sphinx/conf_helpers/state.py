@@ -166,6 +166,8 @@ _TAG_FILENAMES: dict[str, str] = {}
 _TAG_TITLES: dict[str, str] = {}
 # cv-namespace short-name -> doxygen URL; used by step 7c
 _CV_SYMBOL_URL: dict[str, str] = {}
+# include-path -> Doxygen HTML file URL; linkifies enum `#include` lines.
+_FILE_URL: dict[str, str] = {}
 if _TAG_FILE.is_file():
     try:
         import xml.etree.ElementTree as _ET
@@ -205,6 +207,15 @@ if _TAG_FILE.is_file():
                     _TAG_FILENAMES[_n] = _f if _f.endswith(".html") else _f + ".html"
                 if _n and _t:
                     _TAG_TITLES[_n] = _t
+            elif _kind == "file":
+                # Header file -> Doxygen page; key by include path.
+                _n = _c.findtext("name") or ""
+                _p = _c.findtext("path") or ""
+                _f = _c.findtext("filename") or ""
+                if _n and _f and not _p.startswith("/"):
+                    _key = (_p + _n) if _p.endswith("/") or not _p else f"{_p}/{_n}"
+                    _FILE_URL.setdefault(
+                        _key, _f if _f.endswith(".html") else _f + ".html")
             else:
                 # CV_* macros (kind="define") re-exported as cv.CV_*
                 for _m in _c.findall("member"):
@@ -782,7 +793,7 @@ __all__ = [
     "_PY_SIGNATURES", "_python_enum_name",
     "HAVE_SPHINX_DESIGN", "HAVE_BREATHE",
     "DOXYGEN_BASE_URL", "_doxygen_url",
-    "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_CV_SYMBOL_URL",
+    "_TAG_FILE", "_TAG_FILENAMES", "_TAG_TITLES", "_CV_SYMBOL_URL", "_FILE_URL",
     "_LIVE_GROUP_URL", "_LIVE_CLASS_URL", "_LIVE_TYPEDEF_URL",
     "_LOCAL_CLASS_URL", "_LOCAL_TYPEDEF_URL", "_CLASS_TEMPLATE_DISPLAY",
     "_func_slug",
