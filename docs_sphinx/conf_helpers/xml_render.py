@@ -287,6 +287,13 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
             url = f"{DOXYGEN_BASE_URL}{refid}.html"
         return f"[`{text}`]({url})"
 
+    def _formula_md(raw: str) -> str:
+        """Doxygen <formula> -> MyST math. Display \\[..\\] -> $$..$$; inline kept."""
+        s = (raw or "").strip()
+        if s.startswith(r"\[") and s.endswith(r"\]"):
+            return f"\n\n$$\n{s[2:-2].strip()}\n$$\n\n"
+        return s
+
     _BLOCK_TAGS = {"orderedlist", "itemizedlist", "programlisting", "simplesect", "table"}
 
     def _emit_block(sub, result: list, level: int) -> None:
@@ -353,6 +360,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                 parts.append(f"*{inner}*" if inner else "")
             elif t in ("bold", "strong"):
                 parts.append(f"**{inner}**" if inner else "")
+            elif t == "formula":
+                parts.append(_formula_md(inner))
             elif t == "sp":
                 parts.append(" ")
             elif t == "linebreak":
@@ -416,6 +425,8 @@ def _doxygen_desc_to_md(el, h_level: int = 3) -> str:
                             pending.append(f"*{inner}*" if inner else "")
                         elif st in ("bold", "strong"):
                             pending.append(f"**{inner}**" if inner else "")
+                        elif st == "formula":
+                            pending.append(_formula_md(inner))
                         elif st == "sp":
                             pending.append(" ")
                         elif st == "linebreak":

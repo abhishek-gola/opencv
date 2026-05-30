@@ -510,15 +510,15 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
     # No `{#refid}` anchor; `_generate_api_stubs` seeds `_ANCHOR_TO_DOC` instead.
     lines = [f"# {title}", ""]
 
-    # Class-page header: brief + `More...` + `#include` line.
+    # Class-page header: brief + `View details` + `#include` line.
     _header_data = _read_class_data(cls["refid"], xml_dir)
     if _header_data is not None:
         import html as _html_pkg
         _brief = (_header_data.get("brief") or "").strip()
         if _brief:
-            # `More...` only when there's a detailed description to jump to.
+            # Link only when there's a detailed description to jump to.
             _more = (
-                ' <a class="opencv-class-more" href="#detailed-description">More...</a>'
+                ' <a class="opencv-class-more" href="#detailed-description">View details</a>'
                 if _header_data.get("detailed") else ""
             )
             lines.append(

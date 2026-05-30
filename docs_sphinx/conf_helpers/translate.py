@@ -361,7 +361,7 @@ def _translate(text: str, docname: str | None = None) -> str:
             "```",
             text)
 
-        # 8e. Classes table rows: append template params + "More..." link.
+        # 8e. Classes table rows: append template params + "View details" link.
         def _rewrite_class_row(m: re.Match) -> str:
             kind = m.group("kind")
             name = m.group("name")       # 'cv::Mat_'
@@ -371,7 +371,7 @@ def _translate(text: str, docname: str | None = None) -> str:
             tparams = _CLASS_TEMPLATE_DISPLAY.get(short, "")
             label = f"{kind} {name}{tparams}"
             more = (f'<a class="opencv-class-more" '
-                    f'href="{page}.html#detailed-description">More...</a>')
+                    f'href="{page}.html#detailed-description">View details</a>')
             desc_out = f"{desc} {more}" if desc else more
             return f"| [`{label}`]({page}.md) | {desc_out} |"
         text = re.sub(
