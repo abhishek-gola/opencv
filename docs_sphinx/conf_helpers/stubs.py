@@ -1019,6 +1019,32 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         for m in _dedupe(var_items):
             lines += _render_member_detail(m, f"{qualified}::{m['name']}")
 
+    # Footer: source header, mirroring Doxygen's "generated from the following
+    # file" line. The basename links to the legacy Doxygen file page via the
+    # same _FILE_URL scheme the member #include lines use.
+    _src_inc = (_header_data.get("include") or "").strip() if _header_data else ""
+    if _src_inc:
+        import html as _html_pkg2
+        _kind_word = "struct" if cls["kind"] == "struct" else "class"
+        _dir = _src_inc.rsplit("/", 1)[0] + "/" if "/" in _src_inc else ""
+        _base = _src_inc.rsplit("/", 1)[-1]
+        _ifile = _FILE_URL.get(_src_inc)
+        if _ifile:
+            _flink = (f'{_html_pkg2.escape(_dir)}<a class="reference external '
+                      f'opencv-include-link" '
+                      f'href="../../../doc/doxygen/html/{_ifile}">'
+                      f'{_html_pkg2.escape(_base)}</a>')
+        else:
+            _flink = _html_pkg2.escape(_src_inc)
+        lines += [
+            "",
+            f"The documentation for this {_kind_word} was generated from the "
+            "following file:",
+            "",
+            f"- {_flink}",
+            "",
+        ]
+
     _stub_write(out, "\n".join(lines))
 
 
