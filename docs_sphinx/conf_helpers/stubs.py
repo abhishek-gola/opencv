@@ -116,7 +116,7 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 t = _md_escape_cell(m["type"]) or "&nbsp;"
                 qname = f"{ns['name']}::{m['name']}"
                 out.append(
-                    f"| typedef {t} | [`{qname}`](#{m['id']}) | "
+                    f"| `{t}` | [`{qname}`](#{m['id']}) | "
                     f"{_md_escape_cell(m['brief'])} |")
         elif section_title == "Variables":
             out += ["{.api-reference-table}",
@@ -267,16 +267,13 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     ret = f"`{ret_type}`"
                 out.append(f"| {ret} | {sig_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Typedefs":
-            # Typedef summary: two-column card (`.api-typedef-table`). The Type
-            # cell leads with the literal `typedef ` keyword (no backticks — the
-            # td is already monospace via CSS) and the Name cell shows the
-            # fully-qualified `cv::<alias>` (e.g. `typedef Matx<…>` | `cv::Matx33f`).
+            # Type cell as a code span so steps 8b/8g linkify its tokens.
             out += ["{.api-typedef-table}",
                     "| Type | Name | Description |", "|---|---|---|"]
             for m in members:
                 t = _md_escape_cell(m["type"]) or "&nbsp;"
                 name_link = _member_anchor_link(m, f"cv::{m['name']}")
-                out.append(f"| typedef {t} | {name_link} | {_md_escape_cell(m['brief'])} |")
+                out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Variables":
             out += ["{.api-reference-table}",
                     "| Type | Name | Description |", "|---|---|---|"]
