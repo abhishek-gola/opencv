@@ -50,16 +50,21 @@ CONTRIB_MODULES = ([m.strip() for m in _contrib_env.split(",") if m.strip()]
 
 # SCOPE — env OPENCV_API_MODULES (comma/semicolon); empty disables API pages
 def _discover_api_modules() -> list[str]:
-    """Every main module whose umbrella header declares `@defgroup`."""
+    """Main + contrib modules whose umbrella header declares `@defgroup`."""
     found = []
-    for _hdr in (OPENCV_ROOT / "modules").glob("*/include/opencv2/*.hpp"):
-        if _hdr.stem != _hdr.parents[2].name:   # only the umbrella header
-            continue
-        try:
-            if "@defgroup" in _hdr.read_text(encoding="utf-8", errors="ignore"):
-                found.append(_hdr.stem)
-        except OSError:
-            pass
+    # Scan both the main tree and opencv_contrib/modules.
+    _roots = [OPENCV_ROOT / "modules"]
+    if CONTRIB_ROOT.is_dir():
+        _roots.append(CONTRIB_ROOT)
+    for _root in _roots:
+        for _hdr in _root.glob("*/include/opencv2/*.hpp"):
+            if _hdr.stem != _hdr.parents[2].name:   # only the umbrella header
+                continue
+            try:
+                if "@defgroup" in _hdr.read_text(encoding="utf-8", errors="ignore"):
+                    found.append(_hdr.stem)
+            except OSError:
+                pass
     return sorted(found)
 
 

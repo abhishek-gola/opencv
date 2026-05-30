@@ -148,14 +148,19 @@ set(_LEGACY_DOXYFILE "${CMAKE_BINARY_DIR}/doc/Doxyfile")
 set(_DOXYGEN_XML_DIR "${CMAKE_BINARY_DIR}/doc/doxygen/xml")
 
 # Modules to process with Doxygen — must match OPENCV_API_MODULES used at
-# sphinx-build time. Default = every main module whose umbrella header
-# (modules/<m>/include/opencv2/<m>.hpp) declares `@defgroup`, discovered the
+# sphinx-build time. Default = every main AND contrib module whose umbrella
+# header (<m>/include/opencv2/<m>.hpp) declares `@defgroup`, discovered the
 # same way conf.py's _discover_api_modules() does so the two stay in sync and
 # new modules are picked up automatically.
 # Override: cmake -DSPHINX_API_MODULES="core;photo;imgproc;objdetect;3d"
 if(NOT DEFINED SPHINX_API_MODULES)
   set(SPHINX_API_MODULES "")
   file(GLOB _umbrella_headers "${CMAKE_SOURCE_DIR}/modules/*/include/opencv2/*.hpp")
+  # Also scan opencv_contrib modules when present.
+  if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}")
+    file(GLOB _contrib_umbrellas "${OPENCV_EXTRA_MODULES_PATH}/*/include/opencv2/*.hpp")
+    list(APPEND _umbrella_headers ${_contrib_umbrellas})
+  endif()
   foreach(_hdr ${_umbrella_headers})
     get_filename_component(_stem "${_hdr}" NAME_WE)
     # Only the umbrella header modules/<m>/include/opencv2/<m>.hpp.
