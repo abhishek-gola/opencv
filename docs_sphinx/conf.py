@@ -16,7 +16,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from conf_helpers.state import (
     DOC_ROOT, CONTRIB_ROOT, SPHINX_INPUT_ROOT,
     DOC_MODULES, JS_DOC_MODULES, PY_DOC_MODULES, CONTRIB_MODULES, API_MODULES,
-    DOXYGEN_BASE_URL, _doxygen_url, _PATCHED_XML_DIR, HAVE_BREATHE,
+    DOXYGEN_BASE_URL, _PATCHED_XML_DIR, HAVE_BREATHE,
     USE_INDEX_LANDING,
 )
 import conf_helpers.build      # noqa: F401  bib staging, scans, API stubs, indexes.
@@ -151,19 +151,22 @@ html_css_files = [
 ]
 html_theme_options = {
     "logo": {"text": f"OpenCV {release}"},
-    # Show all 7 nav links inline (no "More" dropdown).
-    "header_links_before_dropdown": 7,
-    # Doxygen-style top nav. Uses the `external_links` slot as the data hook, but
-    # navbar-nav.html rewrites each DOXYGEN_BASE_URL target to a local relative
-    # path, so these stay on-site (see html_context).
+    # Show all nav links inline (no "More" dropdown).
+    "header_links_before_dropdown": 5,
+    # Header nav. Uses the theme's `external_links` slot as the data hook, but
+    # navbar-nav.html resolves every entry ON-SITE against the Sphinx tree:
+    #   * `docname` entries -> depth-correct relative link via `pathto`
+    #     (the Sphinx-rendered pages — landing, tutorials, module roots);
+    #   * a `url` entry marked `external` -> rendered verbatim, new tab
+    #     (javadoc has no Sphinx equivalent).
+    # The tutorial module tree stays in the left sidebar, not the header.
     "external_links": [
-        {"url": _doxygen_url("index.html"),       "name": "Main Page"},
-        {"url": _doxygen_url("pages.html"),       "name": "Related Pages"},
-        {"url": _doxygen_url("namespaces.html"),  "name": "Namespaces"},
-        {"url": _doxygen_url("annotated.html"),   "name": "Classes"},
-        {"url": _doxygen_url("files.html"),       "name": "Files"},
-        {"url": _doxygen_url("examples.html"),    "name": "Examples"},
-        {"url": DOXYGEN_BASE_URL + "javadoc/",    "name": "Java Documentation"},
+        {"docname": master_doc,                "name": "Main Page"},
+        {"docname": "tutorials/tutorials",     "name": "Tutorials"},
+        {"docname": "main_modules/api_root",   "name": "Main modules"},
+        {"docname": "extra_modules/api_root",  "name": "Extra modules"},
+        {"url": DOXYGEN_BASE_URL + "javadoc/", "name": "Java Documentation",
+         "external": True},
     ],
     # Doxygen search engine replaces the native one; render a single trigger in
     # navbar_end (navbar_persistent renders twice → duplicate element IDs).
@@ -185,9 +188,6 @@ html_theme_options = {
                     "url": "https://github.com/opencv/opencv",
                     "icon": "fa-brands fa-github"}],
 }
-
-# Lets navbar-nav.html rewrite DOXYGEN_BASE_URL nav links to local relative paths.
-html_context = {"doxygen_base_url": DOXYGEN_BASE_URL}
 
 # Publish each contrib module via a build-dir symlink + html_extra_path (URLs
 # /contrib_modules/<m>/..., nothing duplicated in srcdir). Skipped for ad-hoc
