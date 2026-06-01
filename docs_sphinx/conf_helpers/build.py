@@ -199,7 +199,88 @@ def _write_root_index() -> None:
         pass
 
 
+def _write_related_pages_index() -> None:
+    """Generate `related_pages.markdown` — the local analog of Doxygen's
+    pages.html (the header "Related Pages" target).
+
+    Lists every standalone documentation page (\\page) that has a *local*
+    Sphinx docname, so nothing points off-site. Titles and the canonical set
+    come from the Doxygen tag page index (`_DOC_PAGE_TITLES`); a page is
+    emitted only when its name resolves through `_ANCHOR_TO_DOC`, so the list
+    contains exactly what this build actually rendered and grows automatically
+    as more modules are enabled. Marked `orphan` — reached via the header link,
+    not the sidebar toctree (intro/faq/citelist already live in the index toc).
+    """
+    if SPHINX_INPUT_ROOT == DOC_ROOT:
+        return
+    rows: list[tuple[str, str]] = []        # (title, docname)
+    seen: set[str] = set()
+
+    def add(anchor: str) -> None:
+        doc = _ANCHOR_TO_DOC.get(anchor)
+        if doc and anchor not in seen:
+            title = (_DOC_PAGE_TITLES.get(anchor)
+                     or _ANCHOR_TO_TITLE.get(anchor) or anchor)
+            rows.append((title, doc))
+            seen.add(anchor)
+
+    # Core standalone pages first, in a stable, friendly order.
+    for _a in ("intro", "faq", "citelist"):
+        add(_a)
+    # Then every other \page that resolves locally, alphabetical by title.
+    for _name in sorted(_DOC_PAGE_TITLES,
+                        key=lambda n: (_DOC_PAGE_TITLES.get(n) or n).lower()):
+        add(_name)
+
+    items = "\n".join(f'<li><a href="{_d}.html">{_t}</a></li>' for _t, _d in rows)
+    text = (
+        "---\norphan: true\n---\n"
+        "# Related Pages\n\n"
+        "All standalone documentation pages available in this build.\n\n"
+        f'<ul class="ocv-related-pages">\n{items}\n</ul>\n'
+    )
+    try:
+        (SPHINX_INPUT_ROOT / "related_pages.markdown").write_text(
+            text, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _write_examples_index() -> None:
+    """Generate `examples/examples_root.markdown` — the local analog of
+    Doxygen's examples.html (the header "Examples" target).
+
+    The per-sample example pages are orphan pages reached from class "Examples"
+    blocks; this index links them all in one place. Sourced from
+    `_EXAMPLE_PAGES_NEEDED` (populated during API-stub generation), so it lists
+    exactly the samples this build emitted. Also `orphan` (header-only entry).
+    """
+    if SPHINX_INPUT_ROOT == DOC_ROOT:
+        return
+    from .examples import _EXAMPLE_PAGES_NEEDED, _example_pagename
+    if not _EXAMPLE_PAGES_NEEDED:
+        return
+    items = "\n".join(
+        f'<li><a href="{_example_pagename(_d)}.html">{_d}</a></li>'
+        for _d in sorted(_EXAMPLE_PAGES_NEEDED))
+    text = (
+        "---\norphan: true\n---\n"
+        "# Examples\n\n"
+        "All example programs referenced in the API documentation.\n\n"
+        f'<ul class="ocv-examples-index">\n{items}\n</ul>\n'
+    )
+    try:
+        (SPHINX_INPUT_ROOT / "examples").mkdir(parents=True, exist_ok=True)
+        (SPHINX_INPUT_ROOT / "examples" / "examples_root.markdown").write_text(
+            text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 _write_root_index()
+_write_related_pages_index()
+if API_MODULES:
+    _write_examples_index()
 
 # External scan: every OTHER main module's top-level table_of_content_*.markdown.
 # Sources live under DOC_ROOT (the staged tree only contains *enabled* main
