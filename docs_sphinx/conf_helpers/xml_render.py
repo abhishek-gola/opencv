@@ -548,26 +548,21 @@ def _normalize_include(path: str) -> str:
 
 
 def _enum_value_desc(ev) -> str:
-    """Markdown description for one `<enumvalue>`, for the enumerator table cell.
+    """Block Markdown for one `<enumvalue>` (brief + detailed).
 
     Doxygen puts a single-sentence enumerator doc in `<briefdescription>` but a
     multi-paragraph one (or one with `@note`/`@see`) in `<detaileddescription>`
     — reading only the brief silently drops the latter (e.g. dnn's
-    `DNN_BACKEND_INFERENCE_ENGINE`). Render both, block-aware so links survive,
-    then flatten to one line (admonition fences -> inline `**Note:**`) since this
-    lands in a Markdown table cell, which can't hold block directives."""
+    `DNN_BACKEND_INFERENCE_ENGINE`). Render BOTH with the generic block converter
+    so `@note` becomes a real admonition, lists stay lists, and refs become
+    links — exactly like every other description. The enumerator detail is laid
+    out with a `{list-table}` (not a pipe table) so cells can hold this block
+    content; see `_enumerator_list_table`."""
     if ev is None:
         return ""
     parts = [_doxygen_desc_to_md(ev.find(t)).strip()
              for t in ("briefdescription", "detaileddescription")]
-    full = "\n\n".join(p for p in parts if p)
-    if not full:
-        return ""
-    full = re.sub(r':::\{note\}\s*', "**Note:** ", full)
-    full = re.sub(r':::\{warning\}\s*', "**Warning:** ", full)
-    full = full.replace(":::", " ")
-    full = re.sub(r"\s*\n+\s*", " ", full).strip()   # collapse to one cell line
-    return full.replace("|", "\\|")
+    return "\n\n".join(p for p in parts if p)
 
 
 def _md_escape_cell(text: str) -> str:

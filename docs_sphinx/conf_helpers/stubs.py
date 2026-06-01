@@ -310,24 +310,8 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                         lines += [_md_escape_cell(m["brief"]), ""]
                     vals = m.get("enum_values") or []
                     if vals:
-                        has_desc = any(v.get("brief") for v in vals)
-                        if has_desc:
-                            lines += ["| Enumerator | Description |", "|---|---|"]
-                        else:
-                            lines += ["| Enumerator |", "|---|"]
-                        for v in vals:
-                            scope = qualified if m.get("strong") else ns["name"]
-                            cpp_key = f"{scope}::{v['name']}"
-                            py_entries = _PY_SIGNATURES.get(cpp_key, [])
-                            py_name = py_entries[0]["name"] if py_entries else None
-                            cell = f"`{v['name']}`"
-                            if py_name:
-                                cell += f"<br>Python: `{py_name}`"
-                            if has_desc:
-                                lines.append(f"| {cell} | {_md_escape_cell(v.get('brief') or '')} |")
-                            else:
-                                lines.append(f"| {cell} |")
-                        lines.append("")
+                        lines += _enumerator_list_table(
+                            vals, qualified, bool(m.get("strong")))
             continue
         directive = _MEMBER_DIRECTIVE.get(kind_key)
         if not directive:
@@ -650,17 +634,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     blk += [m["detailed"], ""]
                 _vals = m.get("enum_values") or []
                 if _vals:
-                    blk += ["**Enumerator:**", "", "| | |", "|---|---|"]
-                    for _v in _vals:
-                        _nm = _v["name"]
-                        _vbrief = (_v.get("brief") or "").replace("|", "\\|").replace("\n", " ")
-                        # Name chip + Python binding (initializer omitted as noise).
-                        _cell = f"`{_nm}`"
-                        _py = _python_enum_name(_qual, _nm, _is_strong)
-                        if _py:
-                            _cell = f"{_cell}<br>Python: `{_py}`"
-                        blk.append(f"| {_cell} | {_vbrief} |")
-                    blk.append("")
+                    blk += ["**Enumerator:**", ""]
+                    blk += _enumerator_list_table(_vals, _qual, _is_strong)
                 blocks.append(blk)
                 continue
             if kind_key == "define":
@@ -726,6 +701,44 @@ def _param_item_lines(nm: str, desc: str) -> list[str]:
     # Continuation lines align with the bullet's content column (2 spaces);
     # blank lines stay empty so the nested list/paragraphs render loosely.
     out += [f"  {ln}" if ln.strip() else "" for ln in lines[1:]]
+    return out
+
+
+def _enumerator_list_table(values: list[dict], enum_qualified: str,
+                           is_strong: bool, with_anchors: bool = False) -> list[str]:
+    """Render an enum's values as a MyST `{list-table}`.
+
+    Unlike a Markdown pipe table, list-table cells hold block content, so a
+    value's description keeps its `@note` admonition, lists and links instead of
+    being flattened (see `_enum_value_desc`). `with_anchors` adds a per-value
+    `<span id>` so the clickable class-synopsis links resolve to each row."""
+    if not values:
+        return []
+    has_desc = any((v.get("brief") or "").strip() for v in values)
+    out = ["```{list-table}", ":header-rows: 0",
+           f":widths: {'30 70' if has_desc else '100'}",
+           ":class: opencv-enum-table", ""]
+    for v in values:
+        nm = v["name"]
+        cell = ""
+        if with_anchors:
+            cell = f'<span id="{_sphinx_cpp_v4_id(f"{enum_qualified}::{nm}")}"></span>'
+        cell += f"`{nm}`"
+        py = _python_enum_name(enum_qualified, nm, is_strong)
+        if py:
+            cell += f"<br>Python: `{py}`"
+        out.append(f"* - {cell}")
+        if has_desc:
+            desc = (v.get("brief") or "").strip()
+            if desc:
+                _dl = desc.split("\n")
+                out.append(f"  - {_dl[0]}")
+                # Continuation lines indent to the cell's content column (4 sp);
+                # blank lines stay empty so nested blocks render loosely.
+                out += [("    " + ln) if ln.strip() else "" for ln in _dl[1:]]
+            else:
+                out.append("  -")
+    out += ["```", ""]
     return out
 
 
@@ -990,26 +1003,12 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             )
             if m["brief"]:
                 lines.append(f"<p>{_html.escape(_md_escape_cell(m['brief']))}</p>")
-            # Each `<dt>` carries its own id for per-value linking.
-            lines.append('<dl class="opencv-enum-detail">')
-            for _v in (m.get("enum_values") or []):
-                val_id = _sphinx_cpp_v4_id(f"{enum_qualified}::{_v['name']}")
-                init = _html.escape(_v["initializer"]) if _v["initializer"] else ""
-                init_html = f' <span class="opencv-enum-init">{init}</span>' if init else ""
-                _py = _python_enum_name(enum_qualified, _v["name"],
-                                        bool(m.get("strong")))
-                py_html = (f' <span class="opencv-enum-pyname">Python: '
-                           f'<code>{_html.escape(_py)}</code></span>') if _py else ""
-                lines.append(
-                    f'  <dt id="{val_id}">'
-                    f'<span class="opencv-enum-name">{_html.escape(_v["name"])}</span>'
-                    f'{init_html}{py_html}</dt>'
-                )
-                brief = (_v.get("brief") or "").strip()
-                if brief:
-                    lines.append(f'  <dd>{_html.escape(brief)}</dd>')
-            lines.append('</dl>')
-            lines.append("")
+            # `{list-table}` (with per-value `<span id>` anchors) so each
+            # enumerator's description keeps block content — @note admonitions,
+            # lists, links — instead of being flattened into a raw-HTML `<dd>`.
+            lines += _enumerator_list_table(
+                m.get("enum_values") or [], enum_qualified,
+                bool(m.get("strong")), with_anchors=True)
 
     # Dedupe by refid (a memberdef can span sectiondefs).
     def _dedupe(items: list[dict]) -> list[dict]:
@@ -1088,11 +1087,18 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
     _DOXY_HTML_ROOT = xml_dir.parent / "html"
     _API_OUT_DIR = out_dir
 
-    # Freshness guard: skip rebuild if tree newer than XML and has ns stubs.
+    # Freshness guard: skip rebuild only if the tree is newer than BOTH the XML
+    # and the generator code. Without the code check, editing these modules
+    # never invalidates the cache (the XML is unchanged), so `make sphinx`
+    # silently keeps stale stubs and edits appear to have no effect.
     src_index = xml_dir / "index.xml"
     root_md = out_dir / "api_root.markdown"
+    _code_mtime = max(
+        (p.stat().st_mtime for p in pathlib.Path(__file__).parent.glob("*.py")),
+        default=0.0)
     if (src_index.is_file() and root_md.is_file()
             and root_md.stat().st_mtime >= src_index.stat().st_mtime
+            and root_md.stat().st_mtime >= _code_mtime
             and any(p.name.startswith("namespace_") and p.suffix == ".md"
                     for p in out_dir.iterdir())):
         for stub in out_dir.iterdir():
