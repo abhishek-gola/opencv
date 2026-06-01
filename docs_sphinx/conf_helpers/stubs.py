@@ -170,6 +170,14 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                             "static":      md.get("static") == "yes",
                             "args":        (md.findtext("argsstring") or "").strip(),
                             "param_types": [_pt(p) for p in md.findall("param")],
+                            # (type, name, default) per param — feeds the
+                            # multi-line `_func_sig_md` signature in the table
+                            # (mirrors _parse_member_sections; without it the
+                            # namespace page would drop every function's args).
+                            "params_sig":  [(_pt(p),
+                                             (p.findtext("declname") or "").strip(),
+                                             _itertext(p.find("defval")))
+                                            for p in md.findall("param")],
                             "brief":       _itertext(md.find("briefdescription")),
                             "enum_values": enum_values,
                             "strong":      md.get("strong", "no") == "yes",
@@ -248,15 +256,17 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["| Return | Name |", "|---|---|"]
+            lines += ["{.api-function-table}", "| Return | Name |", "|---|---|"]
             for m in items:
                 ret_md = _type_to_md(m.get("type_elem"))
                 if not ret_md:
-                    ret_md = _md_escape_cell(m["type"]) or "&nbsp;"
+                    ret_md = _md_escape_cell(m["type"]) or "\u00a0"
                 if m.get("static"):
                     ret_md = "static " + ret_md
-                label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                lines.append(f"| {ret_md} | [`{label}`](#{m['id']}) |")
+                # Multi-line, one-param-per-line signature (matching the detail
+                # block); return type stays in its own cell, so head = name.
+                label = _func_sig_md(m["name"], m.get("params_sig"))
+                lines.append(f"| {ret_md} | [{label}](#{m['id']}) |")
         elif section_title in ("Typedefs", "Variables"):
             for m in items:
                 lines.append("```cpp")
@@ -407,14 +417,17 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
 
     # Class members lack an in-page anchor; link to the class page.
-    def _member_anchor_link(m: dict, label: str) -> str:
+    # `raw=True` treats `label` as pre-formatted link text (already wrapped in
+    # code spans, e.g. a multi-line signature) instead of backticking it whole.
+    def _member_anchor_link(m: dict, label: str, raw: bool = False) -> str:
+        text = label if raw else f"`{label}`"
         if _is_class_member(m):
             q = m["qualified"]
             parent_qualified = q.rsplit("::", 1)[0]
             for c in classes_seen.values():
                 if c.get("qualified") == parent_qualified:
-                    return f"[`{label}`]({_class_page_name(c['refid'])}.md)"
-        return f"[`{label}`](#{m['id']})"
+                    return f"[{text}]({_class_page_name(c['refid'])}.md)"
+        return f"[{text}](#{m['id']})"
 
     # Renders the summary table (or enum synopsis) for one member kind given a
     # list of members — used both for the standard per-kind sections and for
@@ -428,10 +441,14 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             out += ["{.api-reference-table .api-function-table}",
                     "| Return | Name | Description |", "|---|---|---|"]
             for m in members:
-                ret_type = _md_escape_cell(m["type"]) or "&nbsp;"
-                label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                sig_link = _member_anchor_link(m, label)
-                if _rich_return:
+                ret_type = _md_escape_cell(m["type"])
+                # Multi-line, one-param-per-line signature (matching the detail
+                # block); return type stays in its own cell, so head = name.
+                label = _func_sig_md(m["name"], m.get("params_sig"))
+                sig_link = _member_anchor_link(m, label, raw=True)
+                if not ret_type:
+                    ret = "\u00a0"  # ctor/dtor: blank cell, never backticked
+                elif _rich_return:
                     storage = "static " if m.get("static") else ""
                     if m.get("template"):
                         ret = f"`{m['template']}`<br>`{storage}{ret_type}`"
@@ -445,16 +462,18 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             out += ["{.api-typedef-table}",
                     "| Type | Name | Description |", "|---|---|---|"]
             for m in members:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                t = _md_escape_cell(m["type"])
+                t_cell = f"`{t}`" if t else "\u00a0"
                 name_link = _member_anchor_link(m, f"cv::{m['name']}")
-                out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
+                out.append(f"| {t_cell} | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Variables":
             out += ["{.api-reference-table}",
                     "| Type | Name | Description |", "|---|---|---|"]
             for m in members:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                t = _md_escape_cell(m["type"])
+                t_cell = f"`{t}`" if t else "\u00a0"
                 name_link = _member_anchor_link(m, m["name"])
-                out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
+                out.append(f"| {t_cell} | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
             # Clickable HTML synopsis + on-page detail link, for every module
             # (previously core_basic-only). Each enumerator links to the enum's
@@ -615,19 +634,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     blk = [f'<h3 id="{m["id"]}">{_keyword}</h3>', ""]
                 # #include line, linkified to the Doxygen file page.
                 if m.get("include_file"):
-                    _ipath = m["include_file"]
-                    _ifile = _FILE_URL.get(_ipath)
-                    if _ifile:
-                        _href = f"../../../doc/doxygen/html/{_ifile}"
-                        blk += [
-                            f'<code class="docutils literal notranslate">'
-                            f'#include &lt;<a class="reference external '
-                            f'opencv-include-link" '
-                            f'href="{_href}">{_ipath}</a>&gt;</code>',
-                            "",
-                        ]
-                    else:
-                        blk += [f"`#include <{_ipath}>`", ""]
+                    blk += ["{.opencv-api-include}",
+                            f"`#include <{m['include_file']}>`", ""]
                 if m.get("brief"):
                     blk += [m["brief"], ""]
                 if m.get("detailed"):
@@ -643,16 +651,11 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                 if m["name"] in seen_define_names:
                     continue
                 seen_define_names.add(m["name"])
-                # No `(id)=`: {doxygendefine} already registers the target.
-                blocks.append([
-                    f"```{{doxygendefine}} {m['name']}",
-                    ":project: opencv",
-                    "```",
-                    "",
-                ])
-            else:
-                blocks.append(
-                    _render_member_detail(m, m["qualified"] or m["name"]))
+            # Hand-rolled block (breathe's {doxygendefine} drops the #include and
+            # the macro's Value); `_render_member_detail` keeps `#define NAME(…)`,
+            # the include row and the Value, and emits the `(id)=` cross-ref anchor.
+            blocks.append(
+                _render_member_detail(m, m["qualified"] or m["name"]))
         if not blocks:
             continue
         lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
@@ -742,6 +745,42 @@ def _enumerator_list_table(values: list[dict], enum_qualified: str,
     return out
 
 
+def _signature_lines(head: str, params_sig: list) -> list[str]:
+    """Doxygen-style declaration split across lines, one parameter per line with
+    a padded type column so names line up (à la docs.opencv.org's memproto).
+
+    `head` is everything up to the `(` (e.g. ``double cv::calibrateCamera``).
+    Returns plain strings; the caller wraps each as inline code. A 0/1-param
+    declaration stays on one line — the wrapping only helps long lists."""
+    if not params_sig:
+        return [f"{head}()"]
+    def _decl(nm: str, dv: str) -> str:
+        return (nm + (f" = {dv}" if dv else "")).strip()
+    if len(params_sig) == 1:
+        t, nm, dv = params_sig[0]
+        inner = f"{t} {_decl(nm, dv)}".strip()
+        return [f"{head}({inner})"]
+    width = max(len(t) for t, _, _ in params_sig)
+    lines = [f"{head}("]
+    last = len(params_sig) - 1
+    for i, (t, nm, dv) in enumerate(params_sig):
+        tail = " )" if i == last else ","
+        lines.append(f"    {t.ljust(width)}  {_decl(nm, dv)}{tail}".rstrip())
+    return lines
+
+
+def _func_sig_md(name: str, params_sig: list) -> str:
+    """Multi-line signature for a summary-table cell, matching the detail block.
+
+    Each line from `_signature_lines` becomes its own inline-code span joined
+    by `<br>`, so the padded type column survives (CSS gives these spans
+    `white-space: pre-wrap`) and the whole signature stays one clickable link.
+    Pipes are escaped per line so an `A|B` default can't break the table cell."""
+    return "<br>".join(
+        f"`{ln.replace('|', chr(0x5c) + '|')}`"
+        for ln in _signature_lines(name, params_sig or []))
+
+
 def _render_member_detail(m: dict, full_name: str) -> list[str]:
     """Render one member's detail block from XML (no breathe; it chokes).
 
@@ -756,16 +795,25 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     tmpl = m.get("template") or ""
     prefix = "static " if m.get("static") else ""
     typ = (m.get("type") or "").strip()
-    if kind == "typedef":
-        decl = f"typedef {typ} {full_name}".strip()
-    elif kind == "function":
-        decl = (f"{prefix}{typ + ' ' if typ else ''}"
-                f"{full_name}{m.get('args', '')}").strip()
-    else:  # variable / attribute
+    if kind == "function":
+        # One parameter per line, type column padded so names align.
+        head = f"{prefix}{typ + ' ' if typ else ''}{full_name}"
+        sig_lines = _signature_lines(head, m.get("params_sig") or [])
+    elif kind == "define":
+        # `#define NAME(args)` — macro params carry only a name, no type.
+        mp = m.get("macro_params") or []
+        params = f"({', '.join(mp)})" if mp else ""
+        sig_lines = [f"#define {short}{params}"]
+    elif kind == "typedef":
+        sig_lines = [f"typedef {typ} {full_name}".strip()]
+    else:  # variable / attribute — append the `= value` initializer if present.
         decl = f"{prefix}{typ + ' ' if typ else ''}{full_name}".strip()
-    # Template clause + declaration as inline code (keeps token-linkifier active).
-    _sig = ([f"`{tmpl}`"] if tmpl else []) + [f"`{decl}`"]
-    out += ["\\\n".join(_sig), ""]
+        init = (m.get("initializer") or "").strip()
+        sig_lines = [f"{decl} {init}".strip() if init else decl]
+    # Template clause + declaration as inline code (keeps token-linkifier
+    # active); `{.opencv-api-sig}` lets the CSS preserve the alignment spaces.
+    _sig = ([f"`{tmpl}`"] if tmpl else []) + [f"`{ln}`" for ln in sig_lines]
+    out += ["{.opencv-api-sig}", "\\\n".join(_sig), ""]
 
     # `#include <…>` card row, like docs.opencv.org. For typedefs the path is
     # a blue link to the Doxygen file page; other kinds keep the plain chip.
@@ -783,6 +831,12 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
             ]
         else:
             out += ["{.opencv-api-include}", f"`#include <{inc}>`", ""]
+
+    # Macro body, shown as docs.opencv.org's "Value:" row.
+    if kind == "define":
+        val = (m.get("initializer") or "").strip()
+        if val:
+            out += ["**Value:**", "", "```cpp", val, "```", ""]
 
     # Python binding signature(s) from pyopencv_signatures.json (dormant until built).
     if kind == "function":
@@ -832,9 +886,11 @@ def _render_core_basic_func(m: dict, idx: int, total: int,
     storage = ("static " if m.get("static") else "") \
         + ("inline " if m.get("inline") else "")
     qname = m["qualified"] or m["name"]
+    head = f"{storage}{ret} {qname}".strip()
+    sig_lines = _signature_lines(head, m.get("params_sig") or [])
     _sig = ([f"`{m['template']}`"] if m.get("template") else []) + \
-        [f"`{storage}{ret} {qname}{m['args']}`"]
-    out += ["\\\n".join(_sig), ""]
+        [f"`{ln}`" for ln in sig_lines]
+    out += ["{.opencv-api-sig}", "\\\n".join(_sig), ""]
     if m.get("include_file"):
         out += ["{.opencv-api-include}",
                 f"`#include <{m['include_file']}>`", ""]
@@ -923,16 +979,26 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         non_enum_items = [m for m in items if m["kind"] != "enum"]
         enum_items = [m for m in items if m["kind"] == "enum"]
         if non_enum_items:
-            lines += ["{.api-reference-table}",
+            lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
-                if m["static"]:
+                ret = _md_escape_cell(m["type"])
+                if ret and m["static"]:
                     ret = "static " + ret
-                sig = f"{m['name']}{_md_escape_cell(m['args'])}"
-                sig_link = f"[`{sig}`](#{m['id']})"
+                # ctors/dtors have no return type: blank cell. Use a literal
+                # NBSP char, NOT a backticked "&nbsp;" (which renders as that
+                # literal text inside a code span) and not the bare entity
+                # (MyST may not decode it in a table cell).
+                ret_cell = f"`{ret}`" if ret else "\u00a0"
+                # Functions get the multi-line, one-param-per-line signature
+                # (matching the detail block); attributes stay single-line.
+                if m["kind"] == "function":
+                    sig_link = f"[{_func_sig_md(m['name'], m.get('params_sig'))}](#{m['id']})"
+                else:
+                    sig = f"{m['name']}{_md_escape_cell(m['args'])}"
+                    sig_link = f"[`{sig}`](#{m['id']})"
                 lines.append(
-                    f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
+                    f"| {ret_cell} | {sig_link} | {_md_escape_cell(m['brief'])} |")
             lines.append("")
         for m in enum_items:
             if m["brief"]:

@@ -507,11 +507,14 @@ def _translate(text: str, docname: str | None = None) -> str:
                 return (f'<code class="docutils literal notranslate">'
                         f'{"".join(parts)}</code>')
             # Mask markdown links first (interior backticks confuse codespan pairing).
+            # The `(?:…|<br>)+` form also covers multi-line signature links whose
+            # text is several code spans joined by `<br>`, so their inner type
+            # tokens aren't linkified into anchors nested in the outer link.
             _masked: list[str] = []
             def _mask(m: re.Match) -> str:
                 _masked.append(m.group(0))
                 return f"\x00MDLINK{len(_masked)-1}\x00"
-            text = re.sub(r"\[`[^`\n]+`\]\([^)\n]+\)", _mask, text)
+            text = re.sub(r"\[(?:`[^`\n]+`|<br>)+\]\([^)\n]+\)", _mask, text)
             text = re.sub(r"`(?P<content>[^`\n]+?)`",
                           _linkify_markdown_codespan, text)
             text = re.sub(r"\x00MDLINK(\d+)\x00",

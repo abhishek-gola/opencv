@@ -210,6 +210,19 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                 arr = (p.findtext("array") or "").strip()
                 return (t + arr) if arr else t
             param_types = [_param_type(p) for p in md.findall("param")]
+            # (type, name, default) per parameter — drives the multi-line,
+            # column-aligned function signature in the detail card.
+            def _param_sig(p) -> tuple:
+                return (_param_type(p),
+                        (p.findtext("declname") or "").strip(),
+                        _itertext(p.find("defval")))
+            params_sig = [_param_sig(p) for p in md.findall("param")]
+            # Function-like macro params carry only a <defname> (no type/declname).
+            macro_params = ([(p.findtext("defname") or "").strip()
+                             for p in md.findall("param")] if kind == "define"
+                            else [])
+            # `= value` for a variable; the macro body for a define.
+            initializer = _itertext(md.find("initializer"))
             enum_values = []
             is_strong = md.get("strong", "no") == "yes"
             if kind == "enum":
@@ -232,6 +245,9 @@ def _parse_member_sections(cd) -> dict[str, list[dict]]:
                 "type":        _itertext(md.find("type")),
                 "args":        (md.findtext("argsstring") or "").strip(),
                 "param_types": param_types,
+                "params_sig":  params_sig,
+                "macro_params": macro_params,
+                "initializer": initializer,
                 "brief":       _itertext(md.find("briefdescription")),
                 "enum_values": enum_values,
                 "strong":      is_strong,
@@ -737,6 +753,14 @@ def _read_class_data(refid: str, xml_dir: pathlib.Path) -> dict | None:
                 "type":        _itertext(md.find("type")),
                 "args":        (md.findtext("argsstring") or "").strip(),
                 "param_types": [_param_type(p) for p in md.findall("param")],
+                "params_sig":  [(_param_type(p),
+                                 (p.findtext("declname") or "").strip(),
+                                 _itertext(p.find("defval")))
+                                for p in md.findall("param")],
+                "macro_params": ([(p.findtext("defname") or "").strip()
+                                   for p in md.findall("param")]
+                                  if mkind == "define" else []),
+                "initializer": _itertext(md.find("initializer")),
                 "brief":       _itertext(md.find("briefdescription")),
                 "static":      md.get("static") == "yes",
                 "virt":        md.get("virt", "non-virtual"),
@@ -853,6 +877,80 @@ def _svg_dark_variant(text: str) -> str:
     return text
 
 
+# Sentence-initial phrases whose subject is the function itself, never a single
+# parameter ("This function returns…", "The function internally…"). When one of
+# these runs on inside a @param description — because the source Doxygen comment
+# omitted the blank line that ends the parameter — the text from the marker
+# onward (and any list it introduces) actually belongs to the function body.
+_SPILLED_PROSE_RE = re.compile(r"\b(?:This|The)\s+(?:function|method)\b")
+
+
+def _hoist_spilled_param_prose(cd) -> bool:
+    """Move function-level prose that ran on into a @param back out into the
+    function's detailed description (authoring fix done at the XML layer so it
+    applies to both breathe and the custom renderer, without touching headers).
+
+    Conservative by design — only fires when ALL of these hold, so a parameter
+    that legitimately contains prose or a bullet list is left untouched:
+      * inside a `<parameterdescription>`, on its first `<para>`;
+      * the marker (`_SPILLED_PROSE_RE`) sits in the para's leading text, so
+        every child element is unambiguously part of the spilled tail;
+      * a real parameter sentence precedes the marker (marker not at offset 0);
+      * the parameter is NOT itself a callback / function pointer, and the kept
+        sentence doesn't describe one — otherwise "This function …" refers to
+        the callback (e.g. createTrackbar's onChange), not the documented one.
+    Returns True if anything changed."""
+    import xml.etree.ElementTree as _ET
+    changed = False
+    for md in cd.iter("memberdef"):
+        if md.get("kind") != "function":
+            continue
+        de = md.find("detaileddescription")
+        if de is None:
+            continue
+        # param name -> declared type, to spot callback / function-pointer params.
+        ptypes: dict = {}
+        for p in md.findall("param"):
+            dn = (p.findtext("declname") or "").strip()
+            te = p.find("type")
+            if dn:
+                ptypes[dn] = "".join(te.itertext()) if te is not None else ""
+        hoisted: list = []
+        for it in de.iter("parameteritem"):
+            pd = it.find("parameterdescription")
+            para = pd.find("para") if pd is not None else None
+            if para is None:
+                continue
+            ptype = " ".join(ptypes.get("".join(n.itertext()).strip(), "")
+                             for n in it.findall(".//parametername"))
+            if "Callback" in ptype or "(*" in ptype or "function<" in ptype:
+                continue
+            text = para.text or ""
+            m = _SPILLED_PROSE_RE.search(text)
+            if m is None or m.start() == 0:
+                continue
+            keep = text[:m.start()].rstrip()
+            if not keep or re.search(r"\b(?:function|callback)\b", keep, re.I):
+                continue
+            spill = _ET.Element("para")
+            spill.text = text[m.start():]
+            for child in list(para):      # all children follow the leading text
+                para.remove(child)
+                spill.append(child)
+            para.text = keep
+            hoisted.append(spill)
+            changed = True
+        if hoisted:
+            # Insert ahead of the <para> carrying the <parameterlist>, so the
+            # prose reads as body text before the parameter table.
+            kids = list(de)
+            at = next((i for i, p in enumerate(kids)
+                       if p.find("parameterlist") is not None), len(kids))
+            for off, sp in enumerate(hoisted):
+                de.insert(at + off, sp)
+    return changed
+
+
 def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
                                      out_dir: pathlib.Path) -> None:
     """Mirror `xml_dir` symlinks into `out_dir`, inlining group-only memberdefs.
@@ -939,6 +1037,24 @@ def _patch_namespace_xml_for_breathe(xml_dir: pathlib.Path,
             if out_file.is_symlink() or out_file.is_file():
                 out_file.unlink()
             tree.write(out_file, encoding="utf-8", xml_declaration=True)
+
+    # 3b) Hoist function-level prose that ran on into a @param description back
+    #     into the function body. Runs over every mirrored compound (groups
+    #     included) so the fix shows wherever breathe resolves the function.
+    for compound_file in list(out_dir.glob("*.xml")):
+        if compound_file.name == "index.xml":
+            continue
+        try:
+            tree = _ET.parse(compound_file)
+        except _ET.ParseError:
+            continue
+        cd = tree.getroot().find("compounddef")
+        if cd is None:
+            continue
+        if _hoist_spilled_param_prose(cd):
+            if compound_file.is_symlink() or compound_file.is_file():
+                compound_file.unlink()
+            tree.write(compound_file, encoding="utf-8", xml_declaration=True)
 
     # 4) Record completion.
     stamp.touch()

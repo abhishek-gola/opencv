@@ -613,6 +613,13 @@ section[id$="-documentation"] > section > p > code {
     padding: 0;
     font-size: 0.875rem;
 }
+/* Multi-line function signatures align parameter names against a padded type
+   column built from spaces. Inline <code> collapses runs of spaces by default,
+   which would destroy that alignment — preserve them (and keep wrapping so a
+   long parameter list never overflows the card). */
+section[id$="-documentation"] > section > p.opencv-api-sig > code {
+    white-space: pre-wrap;
+}
 /* Dark mode: the global `html[data-theme="dark"] code { background-color:
    #2d333b !important }` rule otherwise paints a slate pill behind every
    signature / #include code span inside a card. Force them transparent (the
@@ -991,14 +998,45 @@ html[data-theme="dark"] table.api-reference-table tbody tr td a:active {
     color: #ffffff !important;
 }
 
-/* `<code>` inside a link inherits the link colour (else col-2 name links render black). */
-table.api-reference-table tbody tr td a > code,
-table.api-reference-table tbody tr td a > code * {
+/* Function-name links (the Name column) are emitted with markdown backticks, so
+   they render as a boxed, dark code chip instead of a plain link. Class members
+   add an extra `<span class="std std-ref">` wrapper (`a > span > code`), so the
+   old direct-child `a > code` selector missed them and they stayed boxed/bold.
+   Use a descendant combinator to reach through the span, and `:not(:first-child)`
+   to outrank the description-code rule below — so they read as blue, non-boxed,
+   clickable function links (matching inline @ref references). */
+table.api-reference-table tbody tr td a code,
+table.api-reference-table tbody tr td a code *,
+table.api-reference-table tbody tr td:not(:first-child) a code,
+table.api-reference-table tbody tr td:not(:first-child) a code * {
     color: inherit !important;
     background: transparent !important;
+    background-color: transparent !important;
     border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
     padding: 0 !important;
+    font-weight: 500 !important;
     font-size: inherit !important;
+}
+
+html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) a code,
+html[data-theme="dark"] table.api-reference-table tbody tr td:not(:first-child) a code * {
+    color: inherit !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+}
+
+/* Functions summary cards: the signature is split one parameter per line, each
+   line its own <code> span joined by <br>, with a padded type column built from
+   spaces (à la `_signature_lines`). Inline <code> collapses runs of spaces,
+   which would wreck that alignment — preserve them and keep wrapping for long
+   lists, so the card signature reads like the detail-block declaration. */
+table.api-function-table tbody tr td:not(:first-child) a code,
+table.api-function-table tbody tr td:not(:first-child) code {
+    white-space: pre-wrap;
 }
 
 /* No description -> collapse the title's bottom margin. */
