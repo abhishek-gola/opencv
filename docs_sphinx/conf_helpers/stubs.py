@@ -587,7 +587,8 @@ def _namespaces_section(entries: list) -> list[str]:
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                           xml_dir: pathlib.Path,
                           ns_group_map: dict | None = None,
-                          group_info: dict | None = None) -> tuple[str, str]:
+                          group_info: dict | None = None,
+                          classes_seen: dict | None = None) -> tuple[str, str]:
     """Write namespace_<slug>.md under out_dir. Returns (anchor, fname)."""
     import xml.etree.ElementTree as _ET
     slug = ns["name"].replace("::", "__")
@@ -2404,7 +2405,8 @@ def _generate_api_stubs(modules, xml_dir, out_dir,
                 anchor = f"api_ns_{ns['name'].replace('::', '__')}"
                 if ns["name"] not in written_ns:
                     _write_namespace_stub(ns, out_dir, xml_dir,
-                                          global_ns_group_map, global_group_info)
+                                          global_ns_group_map, global_group_info,
+                                          classes_seen)
                     written_ns.add(ns["name"])
                     _ALL_NAMESPACES[ns["name"]] = {
                         "refid": ns.get("refid", ""),
