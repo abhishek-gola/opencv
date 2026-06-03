@@ -587,7 +587,8 @@ def _namespaces_section(entries: list) -> list[str]:
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                           xml_dir: pathlib.Path,
                           ns_group_map: dict | None = None,
-                          group_info: dict | None = None) -> tuple[str, str]:
+                          group_info: dict | None = None,
+                          classes_seen: dict | None = None) -> tuple[str, str]:
     """Write namespace_<slug>.md under out_dir. Returns (anchor, fname)."""
     import xml.etree.ElementTree as _ET
     slug = ns["name"].replace("::", "__")
@@ -1190,7 +1191,7 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     # (`### AccessFlag` → `#accessflag`). Same target
                     # the clickable synopsis tokens use, and a literal
                     # match on the actual element id on the page.
-                    _more = f"[More...](#{m['name'].lower()})"
+                    _more = f"[View details](#{m['name'].lower()})"
                 if _clickable_synopsis:
                     _qual = m["qualified"] or m["name"]
                     _is_strong = bool(m.get("strong"))
@@ -1224,13 +1225,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                         _init = (' ' + _html_mod.escape(_v["initializer"])
                                  if _v.get("initializer") else '')
                         _full = _val_prefix + _v["name"]
-                        # Per-value anchor: each enumerator scrolls to its own
-                        # row in the detail table (which emits the matching
-                        # `<span id="_CPPv4…">` per row).
-                        _v_href = (f"#{_sphinx_cpp_v4_id(_qual + '::' + _v['name'])}"
-                                   if _qual else _href)
+                        # All enumerators link to the enum's detail section via
+                        # its `#<name>` heading anchor (which exists on the
+                        # page). Per-value `_CPPv4…` ids are NOT emitted in the
+                        # detail block, so a per-value href would dead-link.
                         out.append(
-                            f'    <a class="reference internal opencv-enum-link" href="{_v_href}">'
+                            f'    <a class="reference internal opencv-enum-link" href="{_href}">'
                             f'<span class="n">{_safe(_full)}</span></a>'
                             f'{_init}{_comma}'
                         )
@@ -1756,13 +1756,10 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         import html as _html_pkg
         _brief = (_header_data.get("brief") or "").strip()
         if _brief:
-            # A Detailed Description section now always exists when there's any
-            # description (detailed, or the brief shown there as a fallback), so
-            # link to it in either case.
+            # Link only when there's a detailed description to jump to.
             _more = (
-                ' <a class="opencv-class-more" href="#detailed-description">More...</a>'
-                if (_header_data.get("detailed")
-                    or (_header_data.get("brief") or "").strip()) else ""
+                ' <a class="opencv-class-more" href="#detailed-description">View details</a>'
+                if _header_data.get("detailed") else ""
             )
             lines.append(
                 f'<p class="opencv-class-brief">'
@@ -2404,7 +2401,8 @@ def _generate_api_stubs(modules, xml_dir, out_dir,
                 anchor = f"api_ns_{ns['name'].replace('::', '__')}"
                 if ns["name"] not in written_ns:
                     _write_namespace_stub(ns, out_dir, xml_dir,
-                                          global_ns_group_map, global_group_info)
+                                          global_ns_group_map, global_group_info,
+                                          classes_seen)
                     written_ns.add(ns["name"])
                     _ALL_NAMESPACES[ns["name"]] = {
                         "refid": ns.get("refid", ""),
