@@ -1513,7 +1513,13 @@ def _enumerator_list_table(values: list[dict], enum_qualified: str,
     if not values:
         return []
     has_desc = any((v.get("brief") or "").strip() for v in values)
-    out = ["```{list-table}", ":header-rows: 0",
+    # Lead with a blank line: the class-member enum path emits a raw `<h3>` (and
+    # optional `<p>` brief) immediately before this table. Without the separator
+    # CommonMark folds the `​```{list-table}` opener and its `:option:` lines into
+    # that HTML block (HTML blocks run until a blank line), leaving the closing
+    # ``` orphaned — it then opens a stray code block that swallows the rest of
+    # the page (Member Function docs, etc.) as literal text.
+    out = ["", "```{list-table}", ":header-rows: 0",
            f":widths: {'30 70' if has_desc else '100'}",
            ":class: opencv-enum-table", ""]
     for v in values:
@@ -2102,6 +2108,20 @@ _FALLBACK_MODULE_DATA: dict = {
             "interface.",
         "classes": [
             ("class", "cv::quality::QualityBase", ""),
+            ("class", "cv::quality::QualityBRISQUE",
+             "BRISQUE (Blind/Referenceless Image Spatial Quality Evaluator) is "
+             "a No Reference Image Quality Assessment (NR-IQA) algorithm."),
+            ("class", "cv::quality::QualityGMSD",
+             "Full reference GMSD algorithm"),
+            ("class", "cv::quality::QualityMSE",
+             "Full reference mean square error algorithm  "
+             "https://en.wikipedia.org/wiki/Mean_squared_error"),
+            ("class", "cv::quality::QualityPSNR",
+             "Full reference peak signal to noise ratio (PSNR) algorithm  "
+             "https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio"),
+            ("class", "cv::quality::QualitySSIM",
+             "Full reference structural similarity algorithm  "
+             "https://en.wikipedia.org/wiki/Structural_similarity"),
         ],
         "functions": [],
     },
