@@ -754,17 +754,40 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["{.api-function-table}", "| Return | Name |", "|---|---|"]
+            lines += ["{.api-reference-table .api-function-table}",
+                      "| Return | Name |", "|---|---|"]
+            from html import escape as _esc_html_ns
+            def _ns_func_row(m: dict) -> str:
+                target = f"#{m['id']}"
+                qual = (m.get("qualified") or m["name"])
+                name_text = qual.replace("::", "&#58;&#58;")
+                name_html = (f'<a class="reference internal" '
+                             f'href="{target}">{name_text}</a>')
+                params_sig = m.get("params_sig") or []
+                def _esc(s: str) -> str:
+                    return _esc_html_ns(s).replace("|", "&#124;")
+                if not params_sig:
+                    inner = f"{name_html}()"
+                elif len(params_sig) == 1:
+                    t, nm, dv = params_sig[0]
+                    decl = nm + (f" = {dv}" if dv else "")
+                    inner = f"{name_html}({_esc(t)} {_esc(decl)})"
+                else:
+                    last_i = len(params_sig) - 1
+                    parts = [f"{name_html}("]
+                    for i, (t, nm, dv) in enumerate(params_sig):
+                        tail = " )" if i == last_i else ","
+                        decl = nm + (f" = {dv}" if dv else "")
+                        parts.append(f"    {_esc(t)} {_esc(decl)}{tail}")
+                    inner = "<br>".join(parts)
+                return f'<code class="docutils literal notranslate">{inner}</code>'
             for m in items:
                 ret_md = _type_to_md(m.get("type_elem"))
                 if not ret_md:
                     ret_md = _md_escape_cell(m["type"]) or "\u00a0"
                 if m.get("static"):
                     ret_md = "static " + ret_md
-                # Multi-line, one-param-per-line signature (matching the detail
-                # block); return type stays in its own cell, so head = name.
-                label = _func_sig_md(m["name"], m.get("params_sig"))
-                lines.append(f"| {ret_md} | [{label}](#{m['id']}) |")
+                lines.append(f"| {ret_md} | {_ns_func_row(m)} |")
         elif section_title in ("Typedefs", "Variables"):
             for m in items:
                 lines.append("```cpp")
@@ -1171,14 +1194,14 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             # pointing to that enum's detail block in the "Enumeration
             # Type Documentation" section emitted by the detail loop
             # below.
-            _enum_more_link = _is_core_page
+            _enum_more_link = True
             # On every Core-functionality page the synopsis is emitted
             # as raw HTML (NOT a ```cpp code fence) so every `cv::…`
             # token becomes its own `<a>` linking to the enum's detail
             # block. We hand-roll Pygments-style spans (`k`, `n`, `p`)
             # so the existing `.highlight pre` styling kicks in and the
             # synopsis still looks like a code block.
-            _clickable_synopsis = _is_core_page
+            _clickable_synopsis = True
             import html as _html_mod
             # Encode `::` so translate's cv-linkifier skips it.
             def _safe(s: str) -> str:
@@ -1285,15 +1308,6 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         items = node["sections"].get(section_title, [])
         if not items:
             continue
-        # Enum detail blocks are emitted on every Core-functionality
-        # group page — the clickable summary synopsis and "More..." link
-        # both target these `#enumname` anchors. Non-core pages keep the
-        # summary-only treatment.
-        if kind_key == "enum" and not _is_core_page:
-            continue
-        # Hand-rolled function detail blocks (with [i/n] overload index
-        # in the heading) for every core_* group. Same renderer as the
-        # original core_basic-only path.
         _core_basic_funcs = (_is_core_page and kind_key == "function")
         _ov_total: dict[str, int] = {}
         _ov_idx: dict[str, int] = {}
