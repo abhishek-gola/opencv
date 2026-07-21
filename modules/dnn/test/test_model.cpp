@@ -825,7 +825,28 @@ TEST_P(Reproducibility_ViT_ONNX, Accuracy)
     ASSERT_TRUE(!input.empty());
 
     net.setInput(input);
-    Mat out = net.forward();
+
+    const int warmup = 3, nruns = 30;
+    for (int i = 0; i < warmup; i++)
+        net.forward();
+
+    Mat out;
+    std::vector<double> times;
+    times.reserve(nruns);
+    for (int i = 0; i < nruns; i++) {
+        TickMeter tm;
+        tm.start();
+        out = net.forward();
+        tm.stop();
+        times.push_back(tm.getTimeMilli());
+    }
+    double t_min = *std::min_element(times.begin(), times.end());
+    double t_max = *std::max_element(times.begin(), times.end());
+    double t_sum = 0.0; for (double t : times) t_sum += t;
+    double t_avg = t_sum / nruns;
+    std::cout << "[ ViT_Base_Patch16_224 ] forward over " << nruns << " runs (after "
+              << warmup << " warmup): avg=" << t_avg << " ms, min=" << t_min
+              << " ms, max=" << t_max << " ms" << std::endl;
 
     const int K = 5;
     std::vector<std::pair<int, float> > res;
