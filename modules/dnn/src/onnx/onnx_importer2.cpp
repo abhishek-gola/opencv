@@ -210,6 +210,7 @@ protected:
     void parseClip                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConcat               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseLoop                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseScan                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseIf                   (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConstant             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseConstantOfShape      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -752,19 +753,26 @@ Net ONNXImporter2::parseModel()
 bool ONNXImporter2::parseValueInfo(const opencv_onnx::ValueInfoProto& valueInfoProto, ArgData& data)
 {
     CV_Assert(valueInfoProto.has_name());
-    CV_Assert(valueInfoProto.has_type());
+    // Subgraph (e.g. Scan/Loop body) value-infos may omit type and/or shape; those are
+    // inferred at runtime, so leave the arg's type/shape unset rather than failing.
+    if (!valueInfoProto.has_type())
+        return true;
     const opencv_onnx::TypeProto& typeProto = valueInfoProto.type();
-    CV_Assert(typeProto.has_tensor_type());
+    if (!typeProto.has_tensor_type())
+        return true;
     const opencv_onnx::TypeProto::Tensor& tensor = typeProto.tensor_type();
-    CV_Assert(tensor.has_shape());
-    const opencv_onnx::TensorShapeProto& tensorShape = tensor.shape();
-    auto elem_type = tensor.elem_type();
 
-    data.type = dataType2cv(elem_type);
-    if (data.type < 0) {
-        CV_Error(Error::StsNotImplemented, format("unsupported datatype '%s'", dataType2str(elem_type).c_str()));
+    if (tensor.has_elem_type()) {
+        auto elem_type = tensor.elem_type();
+        data.type = dataType2cv(elem_type);
+        if (data.type < 0) {
+            CV_Error(Error::StsNotImplemented, format("unsupported datatype '%s'", dataType2str(elem_type).c_str()));
+        }
     }
 
+    if (!tensor.has_shape())
+        return true;
+    const opencv_onnx::TensorShapeProto& tensorShape = tensor.shape();
     int dim_size = tensorShape.dim_size();
     CV_CheckGE(dim_size, 0, "");
     MatShape shape(dim_size);
@@ -1731,6 +1739,31 @@ void ONNXImporter2::parseLoop(LayerParams& layerParams,
 
     Ptr<Layer>& loopLayer = curr_prog.back();
     *loopLayer->subgraphs() = subgraphs;
+}
+
+void ONNXImporter2::parseScan(LayerParams& layerParams,
+                              const opencv_onnx::NodeProto& node_proto)
+{
+    // ONNX Scan: inputs = [state..., scan...] (opset-8 also prefixes an optional
+    // sequence_lens); attribute "body" is a GraphProto iterated over the scan axis.
+    CV_Assert(layerParams.has("num_scan_inputs"));
+    layerParams.type = "Scan";
+    addLayer(layerParams, node_proto);
+
+    std::vector<Ptr<Graph> > subgraphs(1);
+    for (int i = 0; i < node_proto.attribute_size(); ++i)
+    {
+        const auto& attr = node_proto.attribute(i);
+        if (attr.name() == "body")
+        {
+            opencv_onnx::GraphProto body = attr.g();
+            subgraphs[0] = parseGraph(&body, false);
+        }
+    }
+    CV_Assert(!subgraphs[0].empty());
+
+    Ptr<Layer>& scanLayer = curr_prog.back();
+    *scanLayer->subgraphs() = subgraphs;
 }
 
 void ONNXImporter2::parseIf(LayerParams& layerParams,
@@ -2824,6 +2857,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     dispatch["GatherElements"] = &ONNXImporter2::parseGatherElements;
     dispatch["Concat"] = &ONNXImporter2::parseConcat;
     dispatch["Loop"] = &ONNXImporter2::parseLoop;
+    dispatch["Scan"] = &ONNXImporter2::parseScan;
     dispatch["If"] = &ONNXImporter2::parseIf;
     dispatch["Resize"] = &ONNXImporter2::parseResize2;
     dispatch["Size"] = &ONNXImporter2::parseSize;

@@ -858,6 +858,24 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<LoopLayer> create(const LayerParams& params);
     };
 
+    class CV_EXPORTS ScanLayer : public Layer
+    {
+    public:
+        /** Number of trailing inputs that are scanned (the rest are loop-carried state). */
+        virtual int numScanInputs() const = 0;
+        /** Per-scan-input axis to iterate over (empty => 0 for all). */
+        virtual const std::vector<int>& scanInputAxes() const = 0;
+        /** Per-scan-output axis to stack along (empty => 0 for all). */
+        virtual const std::vector<int>& scanOutputAxes() const = 0;
+        /** Per-scan-input direction, 1 = reverse (empty => forward for all). */
+        virtual const std::vector<int>& scanInputDirections() const = 0;
+        /** Per-scan-output direction, 1 = reverse (empty => forward for all). */
+        virtual const std::vector<int>& scanOutputDirections() const = 0;
+
+        /** Factory: creates a ScanLayer implementation. */
+        static Ptr<ScanLayer> create(const LayerParams& params);
+    };
+
     class CV_EXPORTS ConcatLayer : public Layer
     {
     public:

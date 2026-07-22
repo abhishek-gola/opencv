@@ -2066,7 +2066,7 @@ TEST_P(Test_ONNX_conformance, Layer_Test)
             default_lInf = std::max(default_lInf, 1e-3);
         }
         // fp16 LinearAttention retains fp16 output precision (~4e-5 L1, ~5e-4 Inf) on fp32 targets.
-        if (name == "test_linear_attention_fp16") {
+        if (name == "test_linear_attention_fp16" || name == "test_linear_attention_fp16_expanded") {
             default_l1 = std::max(default_l1, 2e-4);
             default_lInf = std::max(default_lInf, 1e-3);
         }

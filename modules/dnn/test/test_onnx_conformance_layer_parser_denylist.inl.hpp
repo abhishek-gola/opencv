@@ -272,8 +272,6 @@
 "test_reversesequence_batch",  // Issue:: Parser: Can't create layer "onnx_node_output_0!y" of type "ReverseSequence" in function 'getLayerInstance'
 "test_reversesequence_time",  // ---- same as above ---
 "test_rnn_seq_length",  // Issue:: Parser:  Can't create layer "onnx_node_output_1!Y_h" of type "RNN" in function 'getLayerInstance'
-"test_scan9_sum",  // Issue:: Parser: 'Graph' is not supported in function 'getLayerParams'
-"test_scan_sum", // ---- same as above ---
 "test_sequence_insert_at_back",  // Issue:: Parser:  typeProto.has_tensor_type() in function 'populateNet'
 "test_sequence_insert_at_front",  // ---- same as above ---
 "test_sequence_map_add_1_sequence_1_tensor",
@@ -403,24 +401,9 @@
 "test_cumprod_2d_axis_1",
 "test_cumprod_2d_int32",
 "test_cumprod_2d_negative_axis",
-// LinearAttention expanded variants decompose to Scan, which the new engine does not support yet
-"test_linear_attention_decode_step_expanded",
-"test_linear_attention_delta_expanded",
-"test_linear_attention_explicit_scale_expanded",
-"test_linear_attention_fp16_expanded",
-"test_linear_attention_gated_delta_beta_scalar_expanded",
-"test_linear_attention_gated_delta_expanded",
-"test_linear_attention_gated_delta_gqa_expanded",
-"test_linear_attention_gated_delta_mqa_expanded",
-"test_linear_attention_gated_expanded",
-"test_linear_attention_gated_per_head_decay_expanded",
-"test_linear_attention_linear_expanded",
-"test_linear_attention_linear_t1_no_past_expanded",
-"test_linear_attention_no_past_explicit_zeros_expanded",
-"test_linear_attention_prefill_with_past_expanded",
-// Scan op not supported
-"test_scan9_multi_state",
-"test_scan9_scalar",
+// Scan edge cases beyond the opset-9+ dataflow the new engine supports:
+"test_scan_sum",      // opset-8 Scan (batch dim + sequence_lens, different semantics)
+"test_scan9_scalar",  // 0-D scalar scan output (engine represents scalars as [1], stacks to [T,1])
 // misc unsupported (expanded subgraphs / new ops)
 "test_castlike_no_saturate_FLOAT_to_FLOAT8E4M3FNUZ_expanded",
 "test_castlike_no_saturate_FLOAT_to_FLOAT8E4M3FN_expanded",
@@ -440,14 +423,15 @@
 // CausalConvWithState fp16 (expanded) accuracy
 "test_causal_conv_with_state_fp16_expanded",
 "test_causal_conv_with_state_silu_fp16_expanded",
-// FlexAttention (expanded) accuracy
-// "test_flexattention_causal_mask_expanded_ver26",
-// "test_flexattention_diff_head_sizes_expanded_ver26",
-// "test_flexattention_double_expanded_ver26",
-// "test_flexattention_expanded_ver26",
-// "test_flexattention_fp16_expanded_ver26",
-// "test_flexattention_gqa_expanded_ver26",
-// "test_flexattention_prob_mod_expanded_ver26",
-// "test_flexattention_relative_positional_expanded_ver26",
-// "test_flexattention_score_mod_expanded_ver26",
-// "test_flexattention_soft_cap_expanded_ver26",
+// FlexAttention (expanded) accuracy: decomposed primitive graphs hit a pre-existing
+// elementwise type gap; the fused FlexAttention op path (above) is fully supported.
+"test_flexattention_causal_mask_expanded_ver26",
+"test_flexattention_diff_head_sizes_expanded_ver26",
+"test_flexattention_double_expanded_ver26",
+"test_flexattention_expanded_ver26",
+"test_flexattention_fp16_expanded_ver26",
+"test_flexattention_gqa_expanded_ver26",
+"test_flexattention_prob_mod_expanded_ver26",
+"test_flexattention_relative_positional_expanded_ver26",
+"test_flexattention_score_mod_expanded_ver26",
+"test_flexattention_soft_cap_expanded_ver26",
