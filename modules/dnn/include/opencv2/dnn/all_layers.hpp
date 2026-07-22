@@ -1948,6 +1948,11 @@ CV__DNN_INLINE_NS_BEGIN
         static Ptr<FlexAttentionLayer> create(const LayerParams &params);
     };
 
+    class CV_EXPORTS BitCastLayer : public Layer {
+     public:
+        static Ptr<BitCastLayer> create(const LayerParams &params);
+    };
+
     class CV_EXPORTS GroupNormLayer : public Layer {
     public:
         static Ptr<GroupNormLayer> create(const LayerParams &params);
