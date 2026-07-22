@@ -366,16 +366,6 @@
 "test_dequantizelinear_uint2",
 "test_quantizelinear_int2",
 "test_quantizelinear_uint2",
-// CumProd op not supported
-"test_cumprod_1d",
-"test_cumprod_1d_exclusive",
-"test_cumprod_1d_int32_exclusive",
-"test_cumprod_1d_reverse",
-"test_cumprod_1d_reverse_exclusive",
-"test_cumprod_2d_axis_0",
-"test_cumprod_2d_axis_1",
-"test_cumprod_2d_int32",
-"test_cumprod_2d_negative_axis",
 // Scan edge cases beyond the opset-9+ dataflow the new engine supports:
 "test_scan_sum",      // opset-8 Scan (batch dim + sequence_lens, different semantics)
 "test_scan9_scalar",  // 0-D scalar scan output (engine represents scalars as [1], stacks to [T,1])
