@@ -296,6 +296,7 @@ protected:
     void parseAttention            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseAttentionOnnxAi      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseLinearAttention      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+    void parseCausalConvWithState  (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseFlexAttention        (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseSDPA                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
     void parseDequantizeLinear     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
@@ -2693,6 +2694,11 @@ void ONNXImporter2::parseLinearAttention(LayerParams& params, const opencv_onnx:
     addLayer(params, node_proto);
 }
 
+void ONNXImporter2::parseCausalConvWithState(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
+    params.type = "CausalConvWithState";
+    addLayer(params, node_proto);
+}
+
 void ONNXImporter2::parseFlexAttention(LayerParams& params, const opencv_onnx::NodeProto& node_proto) {
     const opencv_onnx::GraphProto* scoreMod = nullptr;
     const opencv_onnx::GraphProto* probMod = nullptr;
@@ -2946,6 +2952,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
     //               operator cannot be parsed if only added in buildDispatchMap_COM_MICROSOFT
     dispatch["Attention"] = &ONNXImporter2::parseAttentionOnnxAi;
     dispatch["LinearAttention"] = &ONNXImporter2::parseLinearAttention;
+    dispatch["CausalConvWithState"] = &ONNXImporter2::parseCausalConvWithState;
 
     domain_dispatch_map[str_domain_ai_onnx] = dispatch;
 }
