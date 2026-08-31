@@ -1605,9 +1605,7 @@ CV__DNN_INLINE_NS_BEGIN
 
          /** @brief Set the image padding mode used when resizing the frame to the network input size.
           *  @param[in] mode Padding mode, @see ImagePaddingMode. Defaults to DNN_PMODE_NULL.
-          *  @note Setting this to DNN_PMODE_LETTERBOX takes priority over setInputCrop(true); it is
-          *  the mode expected by most modern detection/segmentation/pose networks (e.g. YOLOv8-family
-          *  exports), which are trained with aspect-ratio-preserving letterbox preprocessing.
+          *  @note DNN_PMODE_LETTERBOX takes priority over setInputCrop(true); needed for YOLOv8-family exports.
          */
          CV_WRAP Model& setPaddingMode(ImagePaddingMode mode);
 

@@ -108,11 +108,7 @@ public:
         paddingMode = paddingMode_;
     }
 
-    // The padding mode actually used to build the blob: setPaddingMode() takes priority,
-    // otherwise it falls back to the legacy crop flag. Output decoders that need to map
-    // blob-space coordinates back to frame space (via Image2BlobParams) must use this
-    // instead of reading the raw `paddingMode`/`crop` fields directly, so they can never
-    // diverge from what processFrame() actually did.
+    // setPaddingMode() wins; else falls back to the legacy crop flag.
     ImagePaddingMode getEffectivePaddingMode() const
     {
         if (paddingMode != DNN_PMODE_NULL)
@@ -365,12 +361,7 @@ void ClassificationModel::classify(InputArray frame, int& classId, float& conf)
 
 namespace {
 
-// Layout of an anchor-free detection/segmentation/pose head output: a single tensor
-// shaped either [1, C, N] (channel-first, e.g. a raw YOLOv8-family PyTorch export) or
-// [1, N, C] (anchor-first, e.g. YOLOv5/RT-DETR-via-Ultralytics export), where C is
-// whichever of the two non-batch dimensions is smaller. The first 4 channels are always
-// box (cx, cy, w, h) in blob-pixel space; what follows depends on the head (plain class
-// scores, class scores + mask coefficients, or a single class score + keypoints).
+// Anchor-free head output: [1, C, N] or [1, N, C]; first 4 channels are box (cx, cy, w, h).
 struct AnchorFreeLayout
 {
     int N = 0;               // number of anchors
@@ -389,8 +380,7 @@ struct AnchorFreeLayout
         return layout;
     }
 
-    // Copies the C channel values for anchor i into buf and returns a pointer to them,
-    // contiguous regardless of the underlying layout.
+    // Returns anchor i's C values contiguously, copying into buf if transposed.
     const float* anchor(const Mat& out, int i, std::vector<float>& buf) const
     {
         if (!transposed)
@@ -411,10 +401,7 @@ struct AnchorDetection
     int anchorIndex;
 };
 
-// Decodes box + best-class-score for every anchor whose best score clears confThreshold.
-// Only the numClasses channels right after the box (channels [4, 4+numClasses)) are
-// treated as class scores; any further channels (mask coefficients, keypoints) are left
-// for the caller to pull out via layout.anchor(out, anchorIndex, ...) afterwards.
+// Decodes box + best class per anchor; channels after 4+numClasses are left for the caller.
 void decodeAnchorFreeBoxes(const Mat& out, const AnchorFreeLayout& layout, int numClasses,
                             float confThreshold, std::vector<AnchorDetection>& detections)
 {
@@ -447,8 +434,7 @@ void decodeAnchorFreeBoxes(const Mat& out, const AnchorFreeLayout& layout, int n
     }
 }
 
-// Applies NMS over the decoded anchors and returns the surviving indices into `detections`.
-// nmsThreshold <= 0 disables NMS, matching the contract of the existing Region-layer branch.
+// nmsThreshold <= 0 disables NMS, matching the existing Region-layer branch.
 void nmsAnchorDetections(const std::vector<AnchorDetection>& detections,
                           float confThreshold, float nmsThreshold, bool acrossClasses,
                           std::vector<int>& keep)
@@ -988,16 +974,7 @@ void DetectionModel::detect(InputArray frame, CV_OUT std::vector<int>& classIds,
     }
     else if (detections.size() == 1 && detections[0].dims == 3 && detections[0].size[0] == 1)
     {
-        // Anchor-free head (YOLOv8/v9/v10/v11 detect head, and RT-DETR exported through
-        // the same Ultralytics contract): a single tensor with no separate objectness
-        // channel, so numClasses = C - 4. Box coordinates are already in blob-pixel
-        // space, and class scores are already passed through sigmoid.
-        // Not covered: YOLOv5-style heads with an extra objectness channel (shape alone
-        // can't distinguish "objectness" from "one more class"), and the original
-        // two-tensor DETR/RT-DETR contract (separate pred_boxes/pred_logits, raw logits).
-        // Running a YOLOv8-seg or -pose model's raw output through this path will
-        // misinterpret its mask-coefficient/keypoint channels as extra classes -- use
-        // SegmentationModel::segmentInstances()/KeypointsModel::estimatePoses() instead.
+        // Anchor-free head: no objectness channel, so numClasses = C - 4.
         const Mat& out = detections[0];
         AnchorFreeLayout layout = AnchorFreeLayout::from(out);
         int numClasses = layout.C - 4;

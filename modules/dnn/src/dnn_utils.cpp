@@ -552,10 +552,7 @@ void imagesFromBlob(const cv::Mat& blob_, OutputArrayOfArrays images_)
     }
 }
 
-// Computes the blob-to-image mapping for CROP_CENTER/LETTERBOX as a single shared
-// resizeFactor plus per-axis offset, such that imageCoord = (blobCoord - offset) / resizeFactor.
-// Callers handle DNN_PMODE_NULL separately since it uses independent per-axis scale
-// factors rather than one shared factor plus an offset.
+// CROP_CENTER/LETTERBOX only: imageCoord = (blobCoord - offset) / resizeFactor.
 static void getBlobToImageMapping(ImagePaddingMode paddingmode, const Size& size, const Size& imgSize,
                                    float& resizeFactor, float& offsetX, float& offsetY)
 {
@@ -570,8 +567,8 @@ static void getBlobToImageMapping(ImagePaddingMode paddingmode, const Size& size
     case DNN_PMODE_LETTERBOX:
         resizeFactor = std::min(size.width / (float)imgSize.width,
                                  size.height / (float)imgSize.height);
-        offsetX = (float)(size.width - int(imgSize.width * resizeFactor)) / 2.f;
-        offsetY = (float)(size.height - int(imgSize.height * resizeFactor)) / 2.f;
+        offsetX = (float)((size.width - int(imgSize.width * resizeFactor)) / 2);
+        offsetY = (float)((size.height - int(imgSize.height * resizeFactor)) / 2);
         break;
     default:
         CV_Error(cv::Error::StsBadArg, "Unknown padding mode");

@@ -1196,10 +1196,8 @@ INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_YOLOv8n_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
 
-// Same model/image as Reproducibility_YOLOv8n_ONNX above, but going through the
-// DetectionModel high-level API's anchor-free decode branch instead of a hand-rolled
-// postprocessing helper -- dog416.png is square, so the default DNN_PMODE_NULL resize
-// used here is geometrically equivalent to that test's plain blobFromImage() resize.
+// Same model/image as Reproducibility_YOLOv8n_ONNX, via DetectionModel's high-level API.
+// dog416.png is square, so default DNN_PMODE_NULL resize matches that test's plain resize.
 typedef testing::TestWithParam<Target> Test_DetectionModel_YOLOv8;
 TEST_P(Test_DetectionModel_YOLOv8, Accuracy)
 {
@@ -1212,6 +1210,8 @@ TEST_P(Test_DetectionModel_YOLOv8, Accuracy)
 
     DetectionModel model(net);
     model.setInputSize(640, 640).setInputScale(1.0 / 255.0).setInputSwapRB(true);
+    // Reference values below were generated with across-class NMS.
+    model.setNmsAcrossClasses(true);
     model.setPreferableBackend(DNN_BACKEND_OPENCV);
     model.setPreferableTarget(targetId);
     if (targetId == DNN_TARGET_CPU_FP16)
