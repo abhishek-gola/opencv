@@ -174,6 +174,8 @@ cvAccelStatus CV_API_CALL cu_get_device_info(int device, cvAccelDeviceInfo* info
                  CV_ACCEL_CAP_PEER_ACCESS | CV_ACCEL_CAP_STREAMS_THREAD_SAFE;
     if (p.prop.integrated)
         info->caps |= CV_ACCEL_CAP_SHARED;
+    if (!p.concurrentManagedAccess)
+        info->caps |= CV_ACCEL_CAP_DEVICE_IDLE_MEMORY;  // managed memory faults on the CPU while a kernel runs
     if (p.hostRegisterSupported)
     {
         info->caps |= CV_ACCEL_CAP_IMPORT_HOST_PTR;

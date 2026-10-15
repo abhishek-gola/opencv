@@ -229,7 +229,10 @@ see the same DRAM:
 5. **Device-idle memory.** On parts where touching managed memory during any kernel faults,
    the CPU announces itself on the device's gate, waits until no submission is in
    progress, drains the device, and while it holds the memory every new operation on that
-   device runs on the CPU. A handshake on two counters avoids lock-order deadlocks.
+   device runs on the CPU. A handshake on two counters avoids lock-order deadlocks. The
+   gate is on from enumeration (`CV_ACCEL_CAP_DEVICE_IDLE_MEMORY`), and a `DeviceAccess`
+   counts as a submission for as long as it exists, since the caller's own work may run at
+   any time.
 6. **Bounds.** Before every EXECUTE call, core checks that each view lies inside its
    allocation (overflow-safe). On SoCs where the NPU has no IOMMU, a wrong stride is not an
    error but memory corruption.

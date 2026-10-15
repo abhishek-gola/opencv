@@ -348,6 +348,8 @@ void Backend::enumerate()
             memset(&info, 0, sizeof(info));
         }
         info.name[sizeof(info.name) - 1] = 0;
+        if (info.caps & CV_ACCEL_CAP_DEVICE_IDLE_MEMORY)
+            idleGates_[i]->used = true;     // before any submission, so none can slip past the gate
         CV_LOG_INFO(NULL, "accel(" << name_ << "): device " << i << ": " << info.name);
     }
 }
@@ -1029,9 +1031,39 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
 
 struct DeviceAccess::Impl
 {
-    Impl() : acq(true) {}
+    Impl() : gate(0), acq(true) {}
+    ~Impl()
+    {
+        if (gate)
+        {
+            std::lock_guard<std::mutex> lk(gate->mutex);
+            std::vector<std::thread::id>::iterator it = std::find(gate->holders.begin(), gate->holders.end(), holder);
+            if (it != gate->holders.end())
+                gate->holders.erase(it);
+        }
+    }
+    /** The caller may run device work at any time while the access exists: like an operation,
+        it keeps the CPU out of device-idle memory of the device (see IdleGate). */
+    void enterGate()
+    {
+        IdleGate& g = s->backend->idleGate(s->device);
+        window.reset(new SubmitWindow(g));
+        if (window->blocked())
+            CV_Error(Error::StsError, "accel: DeviceAccess: the CPU holds device-idle memory of this device "
+                                      "(a Mat view of it is open)");
+        if (g.used.load())
+        {
+            std::lock_guard<std::mutex> lk(g.mutex);
+            holder = std::this_thread::get_id();
+            g.holders.push_back(holder);
+            gate = &g;
+        }
+    }
     UMat m;
     StreamPtr s;
+    std::unique_ptr<SubmitWindow> window;   //!< open for the whole access, closed last
+    IdleGate* gate;                         //!< set while registered in gate->holders
+    std::thread::id holder;
     DeviceAcquisition acq;  //!< a long hold: released when the DeviceAccess goes away
 };
 
@@ -1042,6 +1074,7 @@ DeviceAccess::DeviceAccess(const UMat& m, const Stream& stream, AccessFlag acces
     std::unique_ptr<Impl> impl_(new Impl());
     impl_->m = m;
     impl_->s = stream.impl->s;
+    impl_->enterGate();
     int mode = ((access & ACCESS_READ) ? DEV_READ : 0) | ((access & ACCESS_WRITE) ? DEV_WRITE : 0);
     impl_->acq.add(m.u, mode ? mode : DEV_READ);
     std::vector<FenceRef> waits;

@@ -113,6 +113,7 @@ struct IdleGate
     std::atomic<int> submitting;
     std::mutex mutex;
     std::condition_variable cond;   //!< signalled when submitting drops to zero
+    std::vector<std::thread::id> holders;   //!< threads with an open DeviceAccess here (under mutex)
 };
 
 /** Submission window of one operation on a device (see IdleGate). */

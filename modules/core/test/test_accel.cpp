@@ -473,6 +473,42 @@ TEST(Core_Accel, device_idle_memory_holds_back_device_work)
 }
 
 #ifndef _WIN32
+TEST(Core_Accel, mat_view_chain_ends_its_mapping)
+{
+    // the CPU may touch this memory only while the device is idle: an open mapping keeps
+    // device work away, so it has to end when the last view goes
+    accel::Device d = emulator(MANAGED);
+    Mat src(8, 8, CV_8UC1);
+    randu(src, 0, 255);
+    UMat u = makeOn(d, src);
+    {
+        Mat m = u.getMat(ACCESS_READ);
+        UMat t = m.getUMat(ACCESS_READ);
+        m.release();
+    }   // the last view of the mapping goes with t
+    accel::resetTransferStats();
+    UMat out;
+    cv::flip(u, out, 1);
+    EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
+}
+
+TEST(Core_Accel, device_access_keeps_the_cpu_out_of_device_idle_memory)
+{
+    accel::Device d = emulator(MANAGED);
+    UMat a = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(1)));
+    UMat b = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(2)));
+    accel::Stream s = accel::Stream::getDefault(d);
+    {
+        Mat view = a.getMat(ACCESS_READ);  // the CPU is inside device-idle memory...
+        EXPECT_THROW({ accel::DeviceAccess acc(b, s, ACCESS_RW); }, cv::Exception);   // ...so no device work
+    }
+    {
+        accel::DeviceAccess acc(b, s, ACCESS_RW);  // the caller's kernels may run at any time now
+        EXPECT_THROW(a.getMat(ACCESS_READ), cv::Exception);   // an error, not a wait for itself
+    }
+    EXPECT_EQ(1, a.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
 TEST(Core_Accel, cpu_waits_for_queued_device_work)
 {
     accel::Device d = emulator(DISCRETE);

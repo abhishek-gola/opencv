@@ -371,6 +371,14 @@ public:
         gate_ = &st->backend->idleGate(st->device);
         gate_->cpuMappings++;
         std::unique_lock<std::mutex> lk(gate_->mutex);
+        if (std::find(gate_->holders.begin(), gate_->holders.end(), std::this_thread::get_id()) != gate_->holders.end())
+        {
+            // waiting would mean waiting for ourselves
+            gate_->cpuMappings--;
+            gate_ = 0;
+            CV_Error(Error::StsError, "accel: a DeviceAccess open on this thread may run device work at any time, "
+                                      "so the CPU cannot touch device-idle memory of that device until it is destroyed");
+        }
         gate_->cond.wait(lk, [this]{ return gate_->submitting.load() == 0; });
     }
     ~IdleCpuGuard()
@@ -486,6 +494,7 @@ void endHostAccessLocked(BufferState* st, UMatData* u)
     }
     st->hostMapped = false;
     st->hostAccess = 0;
+    u->mapcount = 0;
 }
 
 void checkHostAccessAllowed(const BufferState* st, int access)
@@ -574,6 +583,7 @@ Mat getHostView(const UMat& m, AccessFlag accessFlags)
             else
                 upgradeHostAccessLocked(st, u);
             st->hostMapped = true;
+            u->mapcount = 1;    // UMatData::~UMatData unmaps chained views (getMat().getUMat()) only then
             if (first && idle.active())
             {
                 st->idleGateHeld = true;    // the mapping holds the gate until it ends
@@ -1080,6 +1090,12 @@ void DeviceAllocator::deallocate(UMatData* u) const
     CV_Assert(st);
 
     // From here on errors are logged, not thrown: this runs from ~UMat.
+    if (st->hostMapped)
+    {
+        // the last view went without an unmap: flush its CPU writes, release the device gate
+        std::lock_guard<std::mutex> lk(st->mutex);
+        endHostAccessLocked(st, u);
+    }
     if (st->fromMat)
     {
         // the memory or the content belongs to a Mat: finish everything, then hand it back

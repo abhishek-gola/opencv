@@ -293,7 +293,7 @@ cvAccelStatus CV_API_CALL emu_get_device_info(int device, cvAccelDeviceInfo* inf
     if (device == EMU_COHERENT || device == EMU_NONCOHERENT)
         info->caps |= CV_ACCEL_CAP_SHARED;
     if (device == EMU_MANAGED)
-        info->caps |= CV_ACCEL_CAP_MANAGED;
+        info->caps |= CV_ACCEL_CAP_MANAGED | CV_ACCEL_CAP_DEVICE_IDLE_MEMORY;
     if (device == EMU_COHERENT)
     {
         info->caps |= CV_ACCEL_CAP_IMPORT_HOST_PTR;

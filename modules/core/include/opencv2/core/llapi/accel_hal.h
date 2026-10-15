@@ -291,7 +291,10 @@ enum
     CV_ACCEL_CAP_EXPORT_DMABUF = 1 << 6,
     CV_ACCEL_CAP_EXTERNAL_FENCE = 1 << 7,   //!< fence_export / stream_wait_external
     CV_ACCEL_CAP_PEER_ACCESS = 1 << 8,      //!< kernels can read other devices of the same backend
-    CV_ACCEL_CAP_STREAMS_THREAD_SAFE = 1 << 9 //!< one stream may be used from several threads at once
+    CV_ACCEL_CAP_STREAMS_THREAD_SAFE = 1 << 9, //!< one stream may be used from several threads at once
+    /** may hand out memory that the CPU may touch only while the device is idle
+        (CV_ACCEL_HOST_ACCESS_DEVICE_IDLE); core then gates every submission from the start */
+    CV_ACCEL_CAP_DEVICE_IDLE_MEMORY = 1 << 10
 };
 
 typedef struct cvAccelDeviceInfo
