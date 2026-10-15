@@ -456,14 +456,17 @@ cvAccelStatus CV_API_CALL cu_copy(int device, cvAccelStream stream, const cvAcce
                          r->dims, r->size, ((CudaStream*)stream)->s);
 }
 
-cvAccelStatus CV_API_CALL cu_stream_create(int device, uint32_t /*flags*/, cvAccelStream* out) CV_ACCEL_NOEXCEPT
+cvAccelStatus CV_API_CALL cu_stream_create(int device, uint32_t flags, cvAccelStream* out) CV_ACCEL_NOEXCEPT
 {
     DeviceGuard guard(device);
     CudaStream* s = new (std::nothrow) CudaStream();
     if (!s)
         return CV_ACCEL_OUT_OF_MEMORY;
     s->device = device;
-    cudaError_t e = cudaStreamCreateWithFlags(&s->s, cudaStreamNonBlocking);
+    // a blocking stream is ordered with the legacy default stream, which most CUDA code (and
+    // cv::cuda::Stream::Null()) uses to hand buffers over without events
+    const unsigned cudaFlags = (flags & CV_ACCEL_STREAM_NON_BLOCKING) ? cudaStreamNonBlocking : cudaStreamDefault;
+    cudaError_t e = cudaStreamCreateWithFlags(&s->s, cudaFlags);
     if (e != cudaSuccess)
     {
         delete s;

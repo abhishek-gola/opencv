@@ -86,6 +86,12 @@ extern "C" {
 //! timeout value meaning "wait forever"
 #define CV_ACCEL_INFINITE ((uint64_t)-1)
 
+/** @brief Flags of stream_create. */
+typedef enum cvAccelStreamFlags
+{
+    CV_ACCEL_STREAM_NON_BLOCKING = 1 << 0  //!< no implicit ordering with the device API's default stream
+} cvAccelStreamFlags;
+
 typedef enum cvAccelStatus
 {
     CV_ACCEL_OK = 0,
@@ -357,6 +363,10 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
 
     //! @name Streams and fences
     //! @{
+    /** Creates an in-order queue. Unless @p flags hold CV_ACCEL_STREAM_NON_BLOCKING, its work
+        is ordered with the device API's default stream (the CUDA/HIP legacy stream), so that
+        a kernel the caller launches there after UMat::handle() runs before OpenCV's next use
+        of the buffer, as with an OpenCL queue that both share. */
     cvAccelStatus (CV_API_CALL *stream_create)(int device, uint32_t flags, cvAccelStream* out) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *stream_destroy)(cvAccelStream stream) CV_ACCEL_NOEXCEPT;
     //! new fence (reference count 1) that completes when all work enqueued so far completes
