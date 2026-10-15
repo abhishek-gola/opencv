@@ -237,21 +237,35 @@ void ensureShadow(BufferState* st)
     if (st->shadow)
         return;
     Backend* b = st->backend;
-    if (b->deviceInfo(st->device).caps & CV_ACCEL_CAP_HOST_PINNED)
+    if ((b->deviceInfo(st->device).caps & CV_ACCEL_CAP_HOST_PINNED) && b->pinnedShadowAllowed(st->device))
     {
         cvAccelAllocation a;
         memset(&a, 0, sizeof(a));
         if (b->takePinned(st->device, st->alloc.size, a) ||
             b->fn().allocate(st->device, st->alloc.size, CV_ACCEL_MEM_HOST_PINNED, 0, &a) == CV_ACCEL_OK)
         {
-            a.desc.backend_id = (uint32_t)b->id();
-            st->shadowAlloc = a;
-            st->shadow = (uchar*)(uintptr_t)a.handle;
-            st->shadowFromBackend = true;
-            return;
+            if (a.desc.host_access == CV_ACCEL_HOST_ACCESS_COHERENT && a.desc.handle_kind == CV_ACCEL_HANDLE_HOST_POINTER)
+            {
+                a.desc.backend_id = (uint32_t)b->id();
+                st->shadowAlloc = a;
+                st->shadow = (uchar*)(uintptr_t)a.handle;
+                st->shadowFromBackend = true;
+                return;
+            }
+            // The CPU works in the host copy: memory it reaches uncached (pinned memory on
+            // Jetson before Xavier), write-combined or without coherence would slow every
+            // access down or need cache maintenance. Pageable memory from now on.
+            CV_LOG_INFO(NULL, "accel(" << b->name() << "): pinned memory of device " << st->device
+                        << " is not CPU-cached; host copies use pageable memory");
+            b->disallowPinnedShadow(st->device);
+            if (b->fn().deallocate(&a) != CV_ACCEL_OK)
+                CV_LOG_ERROR(NULL, "accel(" << b->name() << "): failed to free pinned memory: " << b->fn().get_last_error());
         }
-        // pinned memory is a limited resource: fall back to pageable memory
-        CV_LOG_DEBUG(NULL, "accel(" << b->name() << "): no pinned memory for a host copy, using pageable memory");
+        else
+        {
+            // pinned memory is a limited resource: fall back to pageable memory
+            CV_LOG_DEBUG(NULL, "accel(" << b->name() << "): no pinned memory for a host copy, using pageable memory");
+        }
     }
     st->shadow = (uchar*)fastMalloc((size_t)st->alloc.size);
     st->shadowFromBackend = false;
