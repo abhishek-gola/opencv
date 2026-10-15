@@ -187,6 +187,46 @@ cvAccelStatus CV_API_CALL cu_get_device_info(int device, cvAccelDeviceInfo* info
     return CV_ACCEL_OK;
 }
 
+//! what memory of @p kind on @p device is; one answer for allocate and describe_allocation
+uint32_t describeKind(const DeviceProps& p, int device, uint32_t kind, cvAccelMemoryDesc& d)
+{
+    memset(&d, 0, sizeof(d));
+    d.device_index = (uint32_t)device;
+    d.base_alignment = 256;
+    if (kind == CV_ACCEL_MEM_SHARED && !p.prop.integrated)
+        kind = CV_ACCEL_MEM_MANAGED;    // no physically shared memory on a discrete GPU
+    switch (kind)
+    {
+    case CV_ACCEL_MEM_HOST_PINNED:
+    case CV_ACCEL_MEM_SHARED:
+        d.kind = kind;
+        d.host_access = p.sharedHostAccess;
+        d.handle_kind = kind == CV_ACCEL_MEM_HOST_PINNED ? CV_ACCEL_HANDLE_HOST_POINTER : CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    case CV_ACCEL_MEM_MANAGED:
+        d.kind = CV_ACCEL_MEM_MANAGED;
+        // without concurrent access the CPU faults on managed memory while any kernel runs
+        d.host_access = p.concurrentManagedAccess ? CV_ACCEL_HOST_ACCESS_COHERENT : CV_ACCEL_HOST_ACCESS_DEVICE_IDLE;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    default:
+        d.kind = CV_ACCEL_MEM_DEVICE;
+        d.host_access = CV_ACCEL_HOST_ACCESS_COPY;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    }
+    return d.kind;
+}
+
+cvAccelStatus CV_API_CALL cu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t /*flags*/,
+                                                 cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT
+{
+    if (device < 0 || device >= (int)devices().size() || !desc)
+        return CV_ACCEL_INVALID_ARGUMENT;
+    describeKind(devices()[device], device, kind, *desc);
+    return CV_ACCEL_OK;
+}
+
 cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, uint32_t /*flags*/,
                                       cvAccelAllocation* out) CV_ACCEL_NOEXCEPT
 {
@@ -202,11 +242,8 @@ cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, 
     a->device = device;
     a->owned = true;
     cvAccelMemoryDesc& d = out->desc;
-    d.device_index = (uint32_t)device;
-    d.base_alignment = 256;
+    kind = describeKind(p, device, kind, d);
     cudaError_t e = cudaSuccess;
-    if (kind == CV_ACCEL_MEM_SHARED && !p.prop.integrated)
-        kind = CV_ACCEL_MEM_MANAGED;    // no physically shared memory on a discrete GPU
     switch (kind)
     {
     case CV_ACCEL_MEM_HOST_PINNED:
@@ -214,25 +251,15 @@ cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, 
         e = cudaHostAlloc(&a->hostPtr, size, cudaHostAllocPortable | cudaHostAllocMapped);
         if (e == cudaSuccess)
             e = cudaHostGetDevicePointer(&a->devPtr, a->hostPtr, 0);
-        d.kind = kind;
-        d.host_access = p.sharedHostAccess;
-        d.handle_kind = kind == CV_ACCEL_MEM_HOST_PINNED ? CV_ACCEL_HANDLE_HOST_POINTER : CV_ACCEL_HANDLE_DEVICE_POINTER;
         out->handle = (uint64_t)(uintptr_t)(kind == CV_ACCEL_MEM_HOST_PINNED ? a->hostPtr : a->devPtr);
         break;
     case CV_ACCEL_MEM_MANAGED:
         e = cudaMallocManaged(&a->devPtr, size, cudaMemAttachGlobal);
         a->hostPtr = a->devPtr;
-        d.kind = CV_ACCEL_MEM_MANAGED;
-        // without concurrent access the CPU faults on managed memory while any kernel runs
-        d.host_access = p.concurrentManagedAccess ? CV_ACCEL_HOST_ACCESS_COHERENT : CV_ACCEL_HOST_ACCESS_DEVICE_IDLE;
-        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
         out->handle = (uint64_t)(uintptr_t)a->devPtr;
         break;
     default:
         e = cudaMalloc(&a->devPtr, size);
-        d.kind = CV_ACCEL_MEM_DEVICE;
-        d.host_access = CV_ACCEL_HOST_ACCESS_COPY;
-        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
         out->handle = (uint64_t)(uintptr_t)a->devPtr;
         break;
     }
@@ -572,7 +599,8 @@ const OpenCV_Core_Accel_API g_cudaApi = {
         NULL,               // stream_wait_external
         cu_device_synchronize,
         cu_get_op_table,
-        cu_get_last_error
+        cu_get_last_error,
+        cu_describe_allocation
     }
 };
 

@@ -295,7 +295,9 @@ void flip(InputArray _src, OutputArray _dst, int flip_mode)
 Operations are typed C functions in per-module tables, like the CPU HAL's `cv_hal_*`
 entries, so the compiler checks every argument. Each call is made twice: first in `QUERY`
 mode, with no handles and no side effects, and only if the backend accepts, in `EXECUTE`
-mode. Nothing is allocated, uploaded or waited for before a backend has said yes.
+mode. Nothing is allocated, uploaded or waited for before a backend has said yes. Outputs
+and temporaries that do not exist yet are described by the backend itself
+(`describe_allocation`), so the answer covers the memory the call will really get.
 
 ### Choosing the device
 

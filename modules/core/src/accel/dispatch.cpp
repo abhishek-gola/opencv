@@ -121,8 +121,24 @@ void fillView(cvAccelView& v, const cvAccelAllocation* alloc, size_t offset, int
 }
 
 //! view of a continuous array that does not exist yet (QUERY of a planned temporary)
+//! what the backend will report for memory it has not allocated yet (see describe_allocation)
+cvAccelMemoryDesc plannedDesc(Backend* b, int device, uint32_t kind, uint64_t size)
+{
+    cvAccelMemoryDesc d;
+    memset(&d, 0, sizeof(d));
+    if (!b->fn().describe_allocation || b->fn().describe_allocation(device, size, kind, 0, &d) != CV_ACCEL_OK)
+    {
+        memset(&d, 0, sizeof(d));   // the backend cannot tell: only what core knows for sure
+        d.kind = kind;
+    }
+    d.backend_id = (uint32_t)b->id();
+    d.device_index = (uint32_t)device;
+    return d;
+}
+
+//! a view of a buffer the call will allocate on @p device (an output or a temporary)
 void fillPlannedView(cvAccelView& v, cvAccelAllocation& alloc, const MatShape& shape, int type,
-                     const cvAccelMemoryDesc& desc)
+                     Backend* b, int device, uint32_t kind)
 {
     size_t steps[CV_ACCEL_MAX_DIMS];
     size_t total = CV_ELEM_SIZE(type);
@@ -133,7 +149,7 @@ void fillPlannedView(cvAccelView& v, cvAccelAllocation& alloc, const MatShape& s
     }
     memset(&alloc, 0, sizeof(alloc));
     alloc.size = total;
-    alloc.desc = desc;
+    alloc.desc = plannedDesc(b, device, kind, total);
     fillView(v, &alloc, 0, type, shape.dims, shape.p, steps);
 }
 
@@ -335,11 +351,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
 
     // 2. plan
     planArgs(b, device);
-    cvAccelMemoryDesc deviceDesc;
-    memset(&deviceDesc, 0, sizeof(deviceDesc));
-    deviceDesc.backend_id = (uint32_t)b->id();
-    deviceDesc.device_index = (uint32_t)device;
-    deviceDesc.kind = b->deviceInfo(device).preferred_kind;
+    const uint32_t plannedKind = b->deviceInfo(device).preferred_kind;   // what outputs and temporaries get
 
     // 3. query
     const void* table = b->opTable(module, version);
@@ -368,7 +380,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             }
             break;
         default:
-            fillPlannedView(v, a.viewAlloc, a.shape, a.type, deviceDesc);
+            fillPlannedView(v, a.viewAlloc, a.shape, a.type, b, device, plannedKind);
             break;
         }
     }
@@ -399,7 +411,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
     //    happen before the submission window)
     if (!stream)
         stream = b->defaultStream(device);
-    const MatAllocator* deviceAllocator = b->allocator(device, (int)deviceDesc.kind);
+    const MatAllocator* deviceAllocator = b->allocator(device, (int)plannedKind);
     bool needSync = syncDebugMode();
     for (size_t i = 0; i < args.size(); i++)
     {

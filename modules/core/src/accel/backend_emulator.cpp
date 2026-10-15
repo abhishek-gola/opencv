@@ -304,6 +304,61 @@ cvAccelStatus CV_API_CALL emu_get_device_info(int device, cvAccelDeviceInfo* inf
     return CV_ACCEL_OK;
 }
 
+//! what memory of @p kind on @p device is; one answer for allocate and describe_allocation
+void describeKind(int device, uint32_t kind, cvAccelMemoryDesc& d)
+{
+    memset(&d, 0, sizeof(d));
+    d.device_index = (uint32_t)device;
+    d.base_alignment = CV_MALLOC_ALIGN;
+    if (kind == CV_ACCEL_MEM_HOST_PINNED)
+    {
+        d.kind = CV_ACCEL_MEM_HOST_PINNED;
+        d.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
+        d.handle_kind = CV_ACCEL_HANDLE_HOST_POINTER;
+        return;
+    }
+    switch (device)
+    {
+    case EMU_DISCRETE:
+    case EMU_FAILING:
+        d.kind = CV_ACCEL_MEM_DEVICE;
+        d.host_access = CV_ACCEL_HOST_ACCESS_COPY;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    case EMU_COHERENT:
+        d.kind = CV_ACCEL_MEM_SHARED;
+        d.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    case EMU_NONCOHERENT:
+        d.kind = CV_ACCEL_MEM_SHARED;
+        d.host_access = CV_ACCEL_HOST_ACCESS_NONCOHERENT;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        d.coherence_granule = 64;
+        break;
+    case EMU_MANAGED:
+        d.kind = CV_ACCEL_MEM_MANAGED;
+        d.host_access = CV_ACCEL_HOST_ACCESS_DEVICE_IDLE;
+        d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+        break;
+    default:
+        d.kind = CV_ACCEL_MEM_DEVICE;
+        d.host_access = CV_ACCEL_HOST_ACCESS_NONE;
+        d.handle_kind = CV_ACCEL_HANDLE_OPAQUE;
+        d.flags |= CV_ACCEL_MEMF_PROTECTED;
+        break;
+    }
+}
+
+cvAccelStatus CV_API_CALL emu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t /*flags*/,
+                                                  cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT
+{
+    if (!desc || device < 0 || device >= EMU_DEVICES)
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
+    describeKind(device, kind, *desc);
+    return CV_ACCEL_OK;
+}
+
 cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind, uint32_t /*flags*/,
                                        cvAccelAllocation* out) CV_ACCEL_NOEXCEPT
 {
@@ -320,56 +375,15 @@ cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind,
         a->owned = true;
         a->mem = (uchar*)fastMalloc(a->size ? a->size : 1);
         a->cpuView = a->mem;
-        a->scrambled = false;
         a->cpuOpen = false;
         cvAccelMemoryDesc& d = out->desc;
-        d.device_index = (uint32_t)device;
-        d.base_alignment = CV_MALLOC_ALIGN;
-        if (kind == CV_ACCEL_MEM_HOST_PINNED)
+        describeKind(device, kind, d);
+        a->kind = d.kind;
+        a->scrambled = isScrambledDesc(d, device);
+        if (d.host_access == CV_ACCEL_HOST_ACCESS_NONCOHERENT)
         {
-            a->kind = CV_ACCEL_MEM_HOST_PINNED;
-            d.kind = CV_ACCEL_MEM_HOST_PINNED;
-            d.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
-            d.handle_kind = CV_ACCEL_HANDLE_HOST_POINTER;
-        }
-        else
-        {
-            switch (device)
-            {
-            case EMU_DISCRETE:
-            case EMU_FAILING:
-                d.kind = CV_ACCEL_MEM_DEVICE;
-                d.host_access = CV_ACCEL_HOST_ACCESS_COPY;
-                d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
-                a->scrambled = true;
-                break;
-            case EMU_COHERENT:
-                d.kind = CV_ACCEL_MEM_SHARED;
-                d.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
-                d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
-                break;
-            case EMU_NONCOHERENT:
-                d.kind = CV_ACCEL_MEM_SHARED;
-                d.host_access = CV_ACCEL_HOST_ACCESS_NONCOHERENT;
-                d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
-                d.coherence_granule = 64;
-                a->cpuView = (uchar*)fastMalloc(a->size ? a->size : 1);
-                memset(a->cpuView, POISON, a->size);   // stale "cache lines"
-                break;
-            case EMU_MANAGED:
-                d.kind = CV_ACCEL_MEM_MANAGED;
-                d.host_access = CV_ACCEL_HOST_ACCESS_DEVICE_IDLE;
-                d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
-                break;
-            default:
-                d.kind = CV_ACCEL_MEM_DEVICE;
-                d.host_access = CV_ACCEL_HOST_ACCESS_NONE;
-                d.handle_kind = CV_ACCEL_HANDLE_OPAQUE;
-                d.flags |= CV_ACCEL_MEMF_PROTECTED;
-                a->scrambled = true;
-                break;
-            }
-            a->kind = d.kind;
+            a->cpuView = (uchar*)fastMalloc(a->size ? a->size : 1);
+            memset(a->cpuView, POISON, a->size);   // stale "cache lines"
         }
         out->handle = (uint64_t)(uintptr_t)a->mem;
         out->size = size;
@@ -690,6 +704,12 @@ bool sameFormat(const cvAccelCall* call, const cvAccelView* a, const cvAccelView
     return isScrambledDesc(a->alloc->desc, call->device) == isScrambledDesc(b->alloc->desc, call->device);
 }
 
+//! like a real kernel, the emulator must know how to address memory (a device pointer, ...)
+bool addressable(const cvAccelView* v)
+{
+    return v->alloc && v->alloc->desc.handle_kind != CV_ACCEL_HANDLE_NONE;
+}
+
 Mat viewToMat(const cvAccelView* v)
 {
     return Mat(v->size[0], v->size[1], v->type, devicePtr(v->alloc) + v->offset, (size_t)v->step[0]);
@@ -702,7 +722,7 @@ cvAccelStatus CV_API_CALL emu_flip(const cvAccelCall* call, const cvAccelView* s
         return lostError();
     try
     {
-        if (!src->alloc || !dst->alloc || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
+        if (!addressable(src) || !addressable(dst) || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
             return CV_ACCEL_NOT_IMPLEMENTED;
         if (src->size[0] != dst->size[0] || src->size[1] != dst->size[1])
             return fail(CV_ACCEL_INVALID_ARGUMENT, "flip: size mismatch");
@@ -726,7 +746,7 @@ cvAccelStatus CV_API_CALL emu_transpose(const cvAccelCall* call, const cvAccelVi
         return lostError();
     try
     {
-        if (!src->alloc || !dst->alloc || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
+        if (!addressable(src) || !addressable(dst) || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
             return CV_ACCEL_NOT_IMPLEMENTED;
         if (src->size[0] != dst->size[1] || src->size[1] != dst->size[0])
             return fail(CV_ACCEL_INVALID_ARGUMENT, "transpose: size mismatch");
@@ -801,7 +821,8 @@ const OpenCV_Core_Accel_API g_emulatorApi = {
         NULL,               // stream_wait_external
         emu_device_synchronize,
         emu_get_op_table,
-        emu_get_last_error
+        emu_get_last_error,
+        emu_describe_allocation
     }
 };
 

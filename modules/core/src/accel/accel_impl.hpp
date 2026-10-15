@@ -140,7 +140,8 @@ public:
     const std::string& name() const { return name_; }
     int priority() const { return priority_; }
     const std::string& origin() const { return origin_; }
-    const OpenCV_Core_Accel_API_v0_0_api_entries& fn() const { return api_->v0; }
+    //! the backend's entries; those past the size of its table read as NULL
+    const OpenCV_Core_Accel_API_v0_0_api_entries& fn() const { return fn_; }
 
     int deviceCount();
     cvAccelDeviceInfo deviceInfo(int device);
@@ -211,6 +212,7 @@ private:
 
     int id_;
     const OpenCV_Core_Accel_API* api_;
+    OpenCV_Core_Accel_API_v0_0_api_entries fn_;     //!< zero-filled copy of the backend's table
     int priority_;
     std::string name_;
     std::string origin_;

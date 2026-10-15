@@ -282,6 +282,10 @@ Backend::Backend(int id, const OpenCV_Core_Accel_API* api, int priority, const s
       name_(api->v0.backend_name ? api->v0.backend_name : "unnamed"), origin_(origin),
       enumerated_(false), lost_(false), pinnedCacheBytes_(0)
 {
+    // a backend built against an older header has a shorter table: what it lacks reads as NULL
+    memset(&fn_, 0, sizeof(fn_));
+    const size_t entries = api->api_header.valid_size - offsetof(OpenCV_Core_Accel_API_v0, v0);
+    memcpy(&fn_, &api->v0, std::min(entries, sizeof(fn_)));
     for (int i = 0; i < MAX_TRACKED_DEVICES; i++)
     {
         lostDevices_[i].store(false);
@@ -594,7 +598,10 @@ int Registry::add(const OpenCV_Core_Accel_API* api, int priority, const std::str
     if (!api)
         return 0;
     const OpenCV_API_Header& h = api->api_header;
-    if (h.valid_size < sizeof(OpenCV_Core_Accel_API_v0))
+    // every table has the entries up to get_last_error; later ones were appended
+    const size_t minSize = offsetof(OpenCV_Core_Accel_API_v0, v0) +
+                           offsetof(OpenCV_Core_Accel_API_v0_0_api_entries, describe_allocation);
+    if (h.valid_size < minSize)
     {
         CV_LOG_ERROR(NULL, "accel: backend from " << origin << " rejected: API table is too small");
         return 0;

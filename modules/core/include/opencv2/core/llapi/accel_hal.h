@@ -387,6 +387,15 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
 
     //! message for the last error on the calling thread (never NULL)
     const char* (CV_API_CALL *get_last_error)(void) CV_ACCEL_NOEXCEPT;
+
+    // Entries below were appended later: tables of older backends end above, and core reads
+    // what they lack as NULL.
+
+    /** optional: the description allocate() would give @p size bytes of @p kind on @p device,
+        without allocating. Core asks while it plans a call whose outputs or temporaries do not
+        exist yet, so that the QUERY step sees the memory the operation will really get. */
+    cvAccelStatus (CV_API_CALL *describe_allocation)(int device, uint64_t size, uint32_t kind, uint32_t flags,
+                                                     cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT;
 };
 
 typedef struct OpenCV_Core_Accel_API_v0
