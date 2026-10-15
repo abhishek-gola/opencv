@@ -447,7 +447,25 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
     }
     EXPECT_EQ(0, accel::detail::emulatorLiveAllocations(FAILING));
 
-    // 3. a lost device: its memory is leaked rather than freed, the other devices keep working
+    // 3. calls that fail after queuing their work: what they write is invalid until written whole
+    {
+        UMat u = makeOn(d, src), out, c = makeOn(d, other);
+        accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR, true);
+        EXPECT_THROW(cv::flip(u, out, 1), cv::Exception);
+        EXPECT_THROW(u.copyTo(c), cv::Exception);
+        accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
+        EXPECT_THROW(out.getMat(ACCESS_READ), cv::Exception);
+        EXPECT_THROW(c.getMat(ACCESS_READ), cv::Exception);
+
+        cv::flip(u, out, 1);                // written whole: usable again
+        Mat ref, res;
+        cv::flip(src, ref, 1);
+        out.copyTo(res);                    // a download into res, no host copy kept
+        EXPECT_EQ(0, maxDiff(ref, res));
+    }
+    EXPECT_EQ(0, accel::detail::emulatorLiveAllocations(FAILING));
+
+    // 4. a lost device: its memory is leaked rather than freed, the other devices keep working
     {
         UMat u = makeOn(d, src);
         const int64 live = accel::detail::emulatorLiveAllocations(FAILING);

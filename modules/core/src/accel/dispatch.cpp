@@ -464,6 +464,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             return CPU_ONLY;
         }
 
+        bool queued = false;    // the backend may have queued work
         try
         {
             for (size_t i = 0; i < waits.size(); i++)
@@ -495,22 +496,31 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             status = fn(table, &call, views.data(), userdata);
             if (status == CV_ACCEL_OUT_OF_MEMORY)
             {
+                // nothing was queued (backend rule 9): free what finished work left behind, retry once
                 b->collectDeferred(true);
                 status = fn(table, &call, views.data(), userdata);
             }
             if (status == CV_ACCEL_NOT_IMPLEMENTED)
             {
-                // allowed: nothing was enqueued
+                // allowed: nothing was queued
                 acq.abandon();
                 counters().cpuFallbacks++;
                 return CPU_ONLY;
             }
+            queued = status != CV_ACCEL_OUT_OF_MEMORY;
             b->check(status, name, device);
             done = recordFence(stream);
         }
         catch (...)
         {
-            acq.abandon();
+            if (!queued)
+            {
+                acq.abandon();
+                throw;
+            }
+            // part of the work may be queued: the buffers wait for it, and what it writes is
+            // invalid until it is written whole
+            acq.fail(fenceAfterFailure(stream), currentExceptionMessage());
             throw;
         }
         acq.record(done);

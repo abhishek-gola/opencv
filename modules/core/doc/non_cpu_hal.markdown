@@ -158,10 +158,12 @@ through the new `UMatData::accelState` pointer (NULL for host and OpenCL memory)
 - the allocation and its description, and the pinned host copy for `COPY` memory;
 - `writeFence`, the last device write, and `readFences`, the device reads since then (one
   per stream; a newer fence on an in-order stream covers the older one);
-- `pendingDeviceOps`, operations between acquire and record;
+- `pendingReaders` and `pendingWriters`, device operations between acquire and record;
 - `hostMapped` and `hostAccess`, the current CPU mapping and the union of its access flags;
 - `busy`, set while a CPU-side transition waits outside of the buffer lock;
-- `poisoned`, set when the device work that produced the content failed.
+- `poisoned`, set when the device work that produced the content failed (asynchronously, or
+  after queuing part of its work); readers get the original error until the buffer is
+  written whole.
 
 ### CPU access: `UMat::getMat`, `copyTo` into a Mat, `UMat::handle`
 
@@ -407,6 +409,7 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | out of device memory | deferred frees collected, one retry, then an error | `DeviceAllocator::allocate` |
 | allocation on a device fails | no silent fallback to host memory | `UMat::create` |
 | asynchronous device error | buffer poisoned, readers get the original error | `waitDeviceWork` |
+| call fails after queuing part of its work | its buffers wait for the queued part (a fence, or a device sync); what it writes is poisoned until written whole | `DeviceAcquisition::fail` |
 | device lost | that device marked lost (other devices keep working), its calls fall back, its allocations are leaked rather than freed | `Backend::markLost` |
 | device error while a UMat is destroyed | logged, never thrown; host-side state is still freed | `drainForRelease` |
 | device that never finishes | optional limit on every CPU wait (`OPENCV_ACCEL_WAIT_TIMEOUT_MS`), then the device is lost | `FenceRef::wait` |

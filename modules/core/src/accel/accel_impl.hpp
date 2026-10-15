@@ -79,6 +79,14 @@ private:
     int device_;
 };
 
+/** After a failed enqueue, or a failed fence record after one: the backend may have queued part
+    of the work. Returns a fence after it, or an empty fence once the device is idle (or lost,
+    when even that fails). Never throws. */
+FenceRef fenceAfterFailure(const StreamPtr& s) CV_NOEXCEPT;
+
+//! the message of the exception being handled (call inside a catch block)
+std::string currentExceptionMessage();
+
 //! records a fence at the current end of @p s
 FenceRef recordFence(const StreamPtr& s);
 
@@ -341,6 +349,10 @@ public:
     bool acquire(const StreamPtr& stream, std::vector<FenceRef>& waits);
     //! the work was enqueued: @p fence completes it; releases every buffer
     void record(const FenceRef& fence);
+    /** The work failed after the backend may have queued part of it: every buffer takes
+        @p fence (empty: nothing runs any more) and the written ones are poisoned; releases
+        every buffer. */
+    void fail(const FenceRef& fence, const std::string& reason);
     //! nothing was enqueued; releases every buffer (safe to call more than once)
     void abandon();
 

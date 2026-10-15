@@ -213,6 +213,37 @@ bool FenceRef::waitNoThrow() const CV_NOEXCEPT
     return false;
 }
 
+FenceRef fenceAfterFailure(const StreamPtr& s) CV_NOEXCEPT
+{
+    Backend* b = s->backend;
+    cvAccelFence f = 0;
+    if (b->fn().stream_record_fence(s->handle, &f) == CV_ACCEL_OK && f)
+        return FenceRef(b, f, s->uid, s->device);
+    if (b->fn().device_synchronize(s->device) != CV_ACCEL_OK)
+        b->markLost(s->device);     // nothing more can be known about what still runs there
+    return FenceRef();
+}
+
+std::string currentExceptionMessage()
+{
+    try
+    {
+        throw;
+    }
+    catch (const cv::Exception& e)
+    {
+        return e.err;
+    }
+    catch (const std::exception& e)
+    {
+        return e.what();
+    }
+    catch (...)
+    {
+        return "unknown error";
+    }
+}
+
 FenceRef recordFence(const StreamPtr& s)
 {
     cvAccelFence f = 0;
@@ -1022,13 +1053,21 @@ DeviceAccess::~DeviceAccess()
 {
     try
     {
-        p->acq.record(recordFence(p->s));
+        FenceRef done;
+        try
+        {
+            done = recordFence(p->s);
+        }
+        catch (const std::exception& e)
+        {
+            // the caller's work is not tracked: what it touched waits for the device, and what
+            // it could write is invalid until overwritten
+            CV_LOG_ERROR(NULL, "accel: DeviceAccess: can't record the stream position: " << e.what());
+            p->acq.fail(fenceAfterFailure(p->s), e.what());
+        }
+        p->acq.record(done);    // nothing left to record after fail()
     }
-    catch (const std::exception& e)
-    {
-        CV_LOG_ERROR(NULL, "accel: DeviceAccess: can't record the stream position: " << e.what());
-        p->acq.abandon();
-    }
+    catch (...) {}
     delete p;
 }
 

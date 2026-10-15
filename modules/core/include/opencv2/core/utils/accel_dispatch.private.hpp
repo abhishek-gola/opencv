@@ -66,11 +66,15 @@ CV_EXPORTS int64 emulatorLiveAllocations(int device = -1);
 //! times device work and CPU access overlapped on "emulator:4" (a fault on real hardware)
 CV_EXPORTS int64 emulatorViolations();
 
-/** @brief Makes the work of "emulator:5" fail from now on: fences recorded later report
-@p status (a cvAccelStatus; 0 restores normal operation). CV_ACCEL_DEVICE_LOST also makes
-every call on that device fail at once, and OpenCV keeps the device lost for the rest of
-the process, so only one test may use it, at its end. */
-CV_EXPORTS void emulatorInjectFailure(int status);
+/** @brief Makes work on "emulator:5" fail from now on (@p status is a cvAccelStatus, 0 restores
+normal operation).
+
+By default the work is queued and fails later: fences recorded from now on report @p status.
+With @p synchronous, operations and copies queue their work and then return @p status, like a
+backend that fails halfway through a call. CV_ACCEL_DEVICE_LOST also makes every call on the
+device fail at once; OpenCV keeps a lost device lost for the rest of the process, so only one
+test may use it, at its end. */
+CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
 
 /** @brief Disables the OpenCL path for the rest of the current cv:: call.
 

@@ -71,6 +71,21 @@ std::atomic<long long> g_violations(0);
 
 // EMU_FAILING: the status its work reports (emulatorInjectFailure)
 std::atomic<int> g_failingStatus(CV_ACCEL_OK);
+std::atomic<bool> g_failSynchronously(false);
+
+//! what a fence recorded now on @p device reports once the work before it is done
+cvAccelStatus asyncFailure(int device)
+{
+    return device == EMU_FAILING && !g_failSynchronously.load() ? (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK;
+}
+
+//! what a call on @p device returns after queuing its work (a backend failing halfway through)
+cvAccelStatus syncFailure(int device)
+{
+    const cvAccelStatus st = device == EMU_FAILING && g_failSynchronously.load() ?
+                             (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK;
+    return st == CV_ACCEL_OK ? st : fail(st, "emulated failure after queuing the work");
+}
 
 //! a lost device rejects every call and never makes anyone wait (backend rule 8)
 bool deviceLost(int device)
@@ -115,8 +130,7 @@ bool isScrambled(const cvAccelAllocation* a)
 struct EmuFence
 {
     explicit EmuFence(int device_)
-        : done(false), refs(1), device(device_),
-          status(device_ == EMU_FAILING ? (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK) {}
+        : done(false), refs(1), device(device_), status(asyncFailure(device_)) {}
     std::mutex m;
     std::condition_variable cv;
     bool done;
@@ -510,7 +524,7 @@ cvAccelStatus CV_API_CALL emu_copy(int device, cvAccelStream stream, const cvAcc
         ((EmuStream*)stream)->push([=]() {
             copyND(dst, dstep.data(), src, sstep.data(), dims, sz.data(), xorBytes);
         }, true);
-        return CV_ACCEL_OK;
+        return syncFailure(device);
     }
     catch (const std::exception& e)
     {
@@ -667,7 +681,7 @@ cvAccelStatus CV_API_CALL emu_flip(const cvAccelCall* call, const cvAccelView* s
             return CV_ACCEL_OK;
         Mat s = viewToMat(src), d = viewToMat(dst);
         ((EmuStream*)call->stream)->push([s, d, flipMode]() mutable { cv::flip(s, d, flipMode); }, true);
-        return CV_ACCEL_OK;
+        return syncFailure(call->device);
     }
     catch (const std::exception& e)
     {
@@ -691,7 +705,7 @@ cvAccelStatus CV_API_CALL emu_transpose(const cvAccelCall* call, const cvAccelVi
             return CV_ACCEL_OK;
         Mat s = viewToMat(src), d = viewToMat(dst);
         ((EmuStream*)call->stream)->push([s, d]() mutable { cv::transpose(s, d); }, true);
-        return CV_ACCEL_OK;
+        return syncFailure(call->device);
     }
     catch (const std::exception& e)
     {
@@ -783,8 +797,9 @@ int64 emulatorViolations()
     return (int64)impl::g_violations.load();
 }
 
-void emulatorInjectFailure(int status)
+void emulatorInjectFailure(int status, bool synchronous)
 {
+    impl::g_failSynchronously.store(synchronous);
     impl::g_failingStatus.store(status);
 }
 

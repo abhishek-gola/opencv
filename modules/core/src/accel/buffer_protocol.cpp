@@ -169,6 +169,13 @@ bool fencesSettled(BufferState* st)
     return true;
 }
 
+//! written whole: earlier failures no longer matter
+void clearPoison(BufferState* st)
+{
+    st->poisoned = false;
+    st->poisonReason.clear();
+}
+
 void checkNotPoisoned(const BufferState* st)
 {
     if (st->poisoned)
@@ -178,8 +185,9 @@ void checkNotPoisoned(const BufferState* st)
 
 /** Waits on the CPU for device work that conflicts with a CPU access. Called with st->busy
     set, so no new device work on this buffer can start meanwhile; the mutex is released
-    during the waits so that operations in flight can record their fences. */
-void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool write)
+    during the waits so that operations in flight can record their fences. A poisoned buffer
+    throws, unless the caller is about to overwrite all of it (@p overwriteAll). */
+void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool write, bool overwriteAll = false)
 {
     CV_DbgAssert(st->busy && !deviceUseInFlight(st, write));  // see BusyScope
     FenceRef lastWrite;
@@ -194,7 +202,8 @@ void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool writ
     }
     if (lastWrite.empty() && reads.empty())
     {
-        checkNotPoisoned(st);
+        if (!overwriteAll)
+            checkNotPoisoned(st);
         return;
     }
     lk.unlock();
@@ -218,7 +227,8 @@ void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool writ
         st->writeFence.reset();
     if (write)
         st->readFences.clear();
-    checkNotPoisoned(st);
+    if (!overwriteAll)
+        checkNotPoisoned(st);
 }
 
 void ensureShadow(BufferState* st)
@@ -265,8 +275,19 @@ void downloadWhole(BufferState* st)
     r.dst.host = st->shadow;
     if (shadowSource(st) == SHADOW_BACKEND)
         r.flags |= CV_ACCEL_COPY_HOST_PINNED;
-    b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)", st->device);
-    recordFence(s).wait();
+    FenceRef f;
+    try
+    {
+        b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)", st->device);
+        f = recordFence(s);
+        f.wait();
+    }
+    catch (...)
+    {
+        if (f.empty())
+            fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, writing the host copy
+        throw;
+    }
     Counters& c = counters();
     c.bytesD2H += st->alloc.size;
     c.transfers++;
@@ -296,10 +317,26 @@ void uploadShadowLocked(BufferState* st, UMatData* u, const StreamPtr& s, bool w
         streamWait(s, st->writeFence);
     for (size_t i = 0; i < st->readFences.size(); i++)
         streamWait(s, st->readFences[i]);
-    uploadWhole(st, s);
-    FenceRef f = recordFence(s);
-    if (waitNow)
-        f.wait();
+    FenceRef f;
+    try
+    {
+        uploadWhole(st, s);
+        f = recordFence(s);
+        if (waitNow)
+            f.wait();
+    }
+    catch (...)
+    {
+        // part of the copy may be queued: later users wait for it. The device copy stays
+        // obsolete, so its next use uploads again.
+        if (f.empty())
+        {
+            FenceRef after = fenceAfterFailure(s);
+            if (!after.empty())
+                st->writeFence = after;
+        }
+        throw;
+    }
     st->writeFence = f;
     st->readFences.clear();
     u->markDeviceCopyObsolete(false);
@@ -590,7 +627,9 @@ bool acquireOne(UMatData* u, const StreamPtr& stream, int mode, bool longHold, s
     const bool write = (mode & DEV_WRITE) != 0;
     checkOwnHolds(st, write);
     st->cond.wait(lk, [st, write]{ return !st->busy && !deviceUseInFlight(st, write); });
-    checkNotPoisoned(st);
+    const bool needContent = (mode & DEV_READ) || !(mode & DEV_DISCARD);
+    if (needContent)
+        checkNotPoisoned(st);   // a write of the whole buffer may reuse a poisoned one
 
     if (st->hostMapped)
     {
@@ -602,7 +641,6 @@ bool acquireOne(UMatData* u, const StreamPtr& stream, int mode, bool longHold, s
     if (write && (st->alloc.desc.flags & CV_ACCEL_MEMF_READ_ONLY))
         return false;
 
-    const bool needContent = (mode & DEV_READ) || !(mode & DEV_DISCARD);
     if (usesShadow(st) && u->deviceCopyObsolete() && !u->hostCopyObsolete() && needContent)
     {
         // the host copy is newer: the backend that owns the memory uploads it
@@ -633,7 +671,8 @@ bool acquireOne(UMatData* u, const StreamPtr& stream, int mode, bool longHold, s
 }
 
 //! ends one acquisition; with @p fence the work was enqueued and completes at that fence
-void finishOne(UMatData* u, int mode, bool longHold, std::thread::id holder, const FenceRef* fence)
+void finishOne(UMatData* u, int mode, bool longHold, std::thread::id holder, const FenceRef* fence,
+               const char* failure = NULL)
 {
     BufferState* st = u->accelState;
     std::lock_guard<std::mutex> lk(st->mutex);
@@ -648,8 +687,18 @@ void finishOne(UMatData* u, int mode, bool longHold, std::thread::id holder, con
             u->markHostCopyObsolete(true);
             u->markDeviceCopyObsolete(false);
             st->generation++;
+            if (failure)
+            {
+                // part of the content may have been written: invalid until written whole
+                st->poisoned = true;
+                st->poisonReason = failure;
+            }
+            else if (mode & DEV_DISCARD)
+            {
+                clearPoison(st);
+            }
         }
-        else
+        else if (!fence->empty())
         {
             bool replaced = false;
             for (size_t i = 0; i < st->readFences.size(); i++)
@@ -736,6 +785,13 @@ void DeviceAcquisition::record(const FenceRef& fence)
 {
     for (size_t i = 0; i < acquired_; i++)
         finishOne(uses_[i].u, uses_[i].mode, longHold_, holder_, &fence);
+    acquired_ = 0;
+}
+
+void DeviceAcquisition::fail(const FenceRef& fence, const std::string& reason)
+{
+    for (size_t i = 0; i < acquired_; i++)
+        finishOne(uses_[i].u, uses_[i].mode, longHold_, holder_, &fence, reason.c_str());
     acquired_ = 0;
 }
 
@@ -1091,8 +1147,19 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
         r.src.alloc = &st->alloc;
         r.src.offset = srcOffset;
         r.dst.host = dstptr;
-        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)", device_);
-        recordFence(s).wait();  // the destination is user memory
+        FenceRef f;
+        try
+        {
+            b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)", device_);
+            f = recordFence(s);
+            f.wait();   // the destination is user memory
+        }
+        catch (...)
+        {
+            if (f.empty())
+                fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, writing user memory
+            throw;
+        }
         Counters& c = counters();
         c.bytesD2H += totalND(sz, dims);
         c.transfers++;
@@ -1118,6 +1185,10 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
     if (st->hostMapped)
         endHostAccessLocked(st, u);
     const size_t dstOffset = offsetND(dstofs, dststep, dims);
+    // a copy into all of the buffer may reuse a poisoned one, a copy into part of it may not
+    const bool whole = dstOffset == 0 && totalND(sz, dims) == u->size;
+    if (!whole)
+        checkNotPoisoned(st);
     // memory without a CPU view (discrete, protected) is written by the device's copy engine;
     // data may enter protected memory, it just never comes out
     if (usesShadow(st) || hostAccessClass(st) == CV_ACCEL_HOST_ACCESS_NONE)
@@ -1125,9 +1196,11 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
         if (usesShadow(st) && u->deviceCopyObsolete() && !u->hostCopyObsolete())
         {
             // the host copy is current anyway: write there, the device copy follows lazily
-            waitDeviceWork(st, lk, true);
+            waitDeviceWork(st, lk, true, whole);
             copyND(st->shadow + dstOffset, dststep, (const uchar*)srcptr, srcstep, dims, sz);
             st->generation++;
+            if (whole)
+                clearPoison(st);
             return;
         }
         // one DMA straight into the device copy, after everyone using the old content
@@ -1149,22 +1222,43 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
         r.src.host = const_cast<void*>(srcptr);
         r.dst.alloc = &st->alloc;
         r.dst.offset = dstOffset;
-        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (host to device)", device_);
-        FenceRef f = recordFence(s);
-        lk.unlock();
-        f.wait();   // the source is user memory that may be freed when we return
-        lk.lock();
+        FenceRef f;
+        try
+        {
+            b_->check(b_->fn().copy(device_, s->handle, &r), "copy (host to device)", device_);
+            f = recordFence(s);
+            lk.unlock();
+            f.wait();   // the source is user memory that may be freed when we return
+            lk.lock();
+        }
+        catch (...)
+        {
+            const std::string reason = currentExceptionMessage();
+            if (f.empty())
+                fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, reading user memory
+            if (!lk.owns_lock())
+                lk.lock();
+            // the device copy may be partly overwritten: invalid until written whole
+            st->poisoned = true;
+            st->poisonReason = reason;
+            u->markHostCopyObsolete(true);
+            u->markDeviceCopyObsolete(false);
+            st->generation++;
+            throw;
+        }
         st->writeFence = f;
         st->readFences.clear();
         u->markHostCopyObsolete(true);
         u->markDeviceCopyObsolete(false);
         st->generation++;
+        if (whole)
+            clearPoison(st);
         Counters& c = counters();
         c.bytesH2D += totalND(sz, dims);
         c.transfers++;
         return;
     }
-    waitDeviceWork(st, lk, true);
+    waitDeviceWork(st, lk, true, whole);
     void* p = beginCpuAccess(st, ACCESS_WRITE);
     copyND((uchar*)p + dstOffset, dststep, (const uchar*)srcptr, srcstep, dims, sz);
     if (!endCpuAccess(st, ACCESS_WRITE))
@@ -1172,6 +1266,8 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
     u->markHostCopyObsolete(false);
     u->markDeviceCopyObsolete(false);
     st->generation++;
+    if (whole)
+        clearPoison(st);
 }
 
 void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t sz[],
@@ -1206,8 +1302,22 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
     r.src.offset = srcOffset;
     r.dst.alloc = &dst->accelState->alloc;
     r.dst.offset = dstOffset;
-    b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to device)", device_);
-    acq.record(recordFence(s));
+    const cvAccelStatus status = b_->fn().copy(device_, s->handle, &r);
+    if (status == CV_ACCEL_NOT_IMPLEMENTED || status == CV_ACCEL_OUT_OF_MEMORY)
+        b_->check(status, "copy (device to device)", device_);     // nothing was queued: the acquisition is abandoned
+    FenceRef done;
+    try
+    {
+        b_->check(status, "copy (device to device)", device_);
+        done = recordFence(s);
+    }
+    catch (...)
+    {
+        // part of the copy may be queued: the buffers wait for it, the destination is invalid
+        acq.fail(fenceAfterFailure(s), currentExceptionMessage());
+        throw;
+    }
+    acq.record(done);
     Counters& c = counters();
     c.bytesD2D += totalND(sz, dims);
     c.transfers++;

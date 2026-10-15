@@ -53,6 +53,10 @@ Rules a backend must follow, because core relies on them for correctness:
    succeed. Core then frees no more allocations of that device (they are leaked, as after a
    timed-out wait, see OPENCV_ACCEL_WAIT_TIMEOUT_MS) but keeps releasing its own host-side
    state, so that destroying a UMat never blocks or throws.
+9. An operation or copy that returns CV_ACCEL_NOT_IMPLEMENTED or CV_ACCEL_OUT_OF_MEMORY has
+   queued nothing (core falls back, or frees memory and retries). After any other error part
+   of the work may be queued: core records a fence after it (or synchronizes the device) and
+   treats everything the work writes as invalid until it is written whole.
 
 @note Preview only (no backward compatibility until ABI version 1).
 */
