@@ -337,6 +337,30 @@ TEST(Core_Accel, wrapped_host_memory_and_overlapping_imports)
     EXPECT_NO_THROW(accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1));
 }
 
+TEST(Core_Accel, wrapped_device_memory_reads_its_content)
+{
+    // like a device pointer from another library: the content is in device memory, and the
+    // host copy that the CPU needs does not exist yet
+    accel::Device d = emulator(DISCRETE);
+    Mat src(24, 32, CV_8UC1);
+    randu(src, 0, 255);
+    UMat owner = makeOn(d, src);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.size = src.total();
+    {
+        UMat w = accel::wrapExternalMemory(d, mem, MatShape({24, 32}), CV_8UC1);
+        EXPECT_EQ(0, maxDiff(src, w.getMat(ACCESS_READ)));
+    }
+    {
+        UMat w = accel::wrapExternalMemory(d, mem, MatShape({24, 32}), CV_8UC1);
+        Mat res;
+        w.copyTo(res);
+        EXPECT_EQ(0, maxDiff(src, res));
+    }
+}
+
 TEST(Core_Accel, functions_without_a_hook_still_work)
 {
     // cv::add has no accelerator hook: OpenCL (if active) must decline the device memory

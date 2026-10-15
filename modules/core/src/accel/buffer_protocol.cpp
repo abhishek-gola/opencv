@@ -407,9 +407,10 @@ void beginHostAccessLocked(BufferState* st, UMatData* u, int access)
 {
     if (usesShadow(st))
     {
+        const bool fresh = !st->shadow;     // a new host copy holds nothing yet, whatever the flags say
         ensureShadow(st);
         u->data = st->shadow;
-        if (u->hostCopyObsolete() && !u->deviceCopyObsolete())
+        if ((u->hostCopyObsolete() || fresh) && !u->deviceCopyObsolete())
         {
             downloadWhole(st);
             u->markHostCopyObsolete(false);
@@ -999,9 +1000,12 @@ UMatData* DeviceAllocator::wrap(const cvAccelExternalMemory& ext, size_t total) 
     createState(u, a, true);
     u->accelState->hostImport = hostPtr;
     u->accelState->alloc.desc.flags |= CV_ACCEL_MEMF_IMPORTED;
-    // the content belongs to the owner of the memory: it is current wherever the memory is
-    u->markHostCopyObsolete(false);
+    // The content belongs to the owner and lives in the memory, which the device addresses.
+    // Memory with a CPU view is also the host copy; COPY and UNCACHED memory get their host
+    // copy on the first CPU access, memory without CPU access never.
+    BufferState* st = u->accelState;
     u->markDeviceCopyObsolete(false);
+    u->markHostCopyObsolete(usesShadow(st) || hostAccessClass(st) == CV_ACCEL_HOST_ACCESS_NONE);
     return u;
 }
 
@@ -1125,7 +1129,7 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
     const size_t srcOffset = offsetND(srcofs, srcstep, dims);
     if (usesShadow(st))
     {
-        if (!u->hostCopyObsolete() || u->deviceCopyObsolete())
+        if ((!u->hostCopyObsolete() && st->shadow) || u->deviceCopyObsolete())
         {
             // the host copy is current (or nothing was ever written): no DMA at all
             if (st->shadow)
