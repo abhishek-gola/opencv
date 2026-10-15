@@ -76,6 +76,9 @@ device fail at once; OpenCV keeps a lost device lost for the rest of the process
 test may use it, at its end. */
 CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
 
+//! makes the next end_cpu_access after a CPU write fail (on any emulator device), once
+CV_EXPORTS void emulatorFailNextCpuFlush();
+
 /** @brief Disables the OpenCL path for the rest of the current cv:: call.
 
 Data on an accelerator cannot be used by OpenCL kernels; letting the OpenCL path try would

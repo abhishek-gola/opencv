@@ -480,11 +480,17 @@ void endHostAccessLocked(BufferState* st, UMatData* u)
     }
     else
     {
-        endCpuAccess(st, access);
+        const bool flushed = endCpuAccess(st, access);
         if (access & ACCESS_WRITE)
         {
             u->markDeviceCopyObsolete(false);
             st->generation++;
+            if (!flushed)
+            {
+                // the device may see part of the CPU's writes: invalid until written whole
+                st->poisoned = true;
+                st->poisonReason = "end_cpu_access failed after a CPU write";
+            }
         }
     }
     if (st->idleGateHeld)
@@ -1096,10 +1102,25 @@ bool DeviceAllocator::allocate(UMatData* u, AccessFlag /*accessFlags*/, UMatUsag
     {
         // memory with a CPU view: copy the content in now, the Mat keeps its own bytes and
         // gets them back only if the UMat is written (see matGeneration)
-        IdleCpuGuard idle(st);
-        void* p = beginCpuAccess(st, ACCESS_WRITE);
-        memcpy(p, u->origdata, u->size);
-        endCpuAccess(st, ACCESS_WRITE);
+        bool copied = false;
+        try
+        {
+            IdleCpuGuard idle(st);
+            void* p = beginCpuAccess(st, ACCESS_WRITE);
+            memcpy(p, u->origdata, u->size);
+            copied = endCpuAccess(st, ACCESS_WRITE);    // a failed flush: the device would not see it
+        }
+        catch (const std::exception& e)
+        {
+            CV_LOG_WARNING(NULL, "accel: " << e.what());
+        }
+        if (!copied)
+        {
+            u->accelState = NULL;
+            u->handle = 0;
+            destroyBufferState(st);
+            return false;   // Mat::getUMat falls back to the host allocator
+        }
         u->markHostCopyObsolete(false);
         u->markDeviceCopyObsolete(false);
     }
@@ -1340,7 +1361,15 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
     void* p = beginCpuAccess(st, ACCESS_WRITE);
     copyND((uchar*)p + dstOffset, dststep, (const uchar*)srcptr, srcstep, dims, sz);
     if (!endCpuAccess(st, ACCESS_WRITE))
+    {
+        // the device may see part of the new content: invalid until written whole
+        st->poisoned = true;
+        st->poisonReason = "end_cpu_access failed after a copy into the UMat";
+        u->markHostCopyObsolete(false);
+        u->markDeviceCopyObsolete(false);
+        st->generation++;
         CV_Error_(Error::StsError, ("accel(%s): end_cpu_access failed after a copy into the UMat", b_->name().c_str()));
+    }
     u->markHostCopyObsolete(false);
     u->markDeviceCopyObsolete(false);
     st->generation++;

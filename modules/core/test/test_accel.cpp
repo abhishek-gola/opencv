@@ -273,6 +273,23 @@ TEST(Core_Accel, copy_out_while_a_mat_view_is_open)
     EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(42)), u.getMat(ACCESS_READ)));   // the writes survived
 }
 
+TEST(Core_Accel, failed_cache_flush_never_publishes_cpu_writes)
+{
+    // non-coherent shared memory: CPU writes reach the device only through end_cpu_access
+    accel::Device d = emulator(NONCOHERENT);
+    UMat u = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(1)));
+    {
+        Mat view = u.getMat(ACCESS_RW);
+        view.setTo(Scalar(7));
+        accel::detail::emulatorFailNextCpuFlush();
+    }   // the flush fails: the device may hold old bytes, new bytes, or both
+    UMat out;
+    EXPECT_THROW(cv::flip(u, out, 1), cv::Exception);     // readers get an error, not stale data
+    EXPECT_THROW(u.getMat(ACCESS_READ), cv::Exception);
+    Mat(8, 8, CV_8UC1, Scalar(3)).copyTo(u);                // written whole: usable again
+    EXPECT_EQ(3, u.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
 TEST(Core_Accel, protected_memory_never_reaches_the_cpu)
 {
     accel::Device d = emulator(PROTECTED_MEM);

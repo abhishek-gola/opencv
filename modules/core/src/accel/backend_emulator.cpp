@@ -69,6 +69,9 @@ std::atomic<int> g_managedCpuAccess(0);
 std::atomic<int> g_managedDeviceWork(0);
 std::atomic<long long> g_violations(0);
 
+//! one-shot (emulatorFailNextCpuFlush): the next end_cpu_access after a CPU write fails
+std::atomic<bool> g_failNextFlush(false);
+
 // EMU_FAILING: the status its work reports (emulatorInjectFailure)
 std::atomic<int> g_failingStatus(CV_ACCEL_OK);
 std::atomic<bool> g_failSynchronously(false);
@@ -583,6 +586,8 @@ cvAccelStatus CV_API_CALL emu_end_cpu_access(const cvAccelAllocation* alloc, uin
     if (!alloc || !alloc->backend_data || offset + size > alloc->size)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     EmuAlloc* a = (EmuAlloc*)alloc->backend_data;
+    if ((access & (uint32_t)ACCESS_WRITE) && g_failNextFlush.exchange(false))
+        return fail(CV_ACCEL_INTERNAL_ERROR, "emulated cache flush failure");   // nothing was written back
     if (a->device == EMU_MANAGED && a->cpuOpen)
     {
         a->cpuOpen = false;
@@ -934,6 +939,11 @@ int64 emulatorLiveAllocations(int device)
 int64 emulatorViolations()
 {
     return (int64)impl::g_violations.load();
+}
+
+void emulatorFailNextCpuFlush()
+{
+    impl::g_failNextFlush.store(true);
 }
 
 void emulatorInjectFailure(int status, bool synchronous)
