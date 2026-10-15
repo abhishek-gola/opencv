@@ -482,9 +482,7 @@ TEST(Core_Accel, mat_view_chain_ends_its_mapping)
     randu(src, 0, 255);
     UMat u = makeOn(d, src);
     {
-        Mat m = u.getMat(ACCESS_READ);
-        UMat t = m.getUMat(ACCESS_READ);
-        m.release();
+        UMat t = u.getMat(ACCESS_READ).getUMat(ACCESS_READ);    // the Mat in between is gone already
     }   // the last view of the mapping goes with t
     accel::resetTransferStats();
     UMat out;
