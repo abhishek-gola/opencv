@@ -423,7 +423,7 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | call fails after queuing part of its work | its buffers wait for the queued part (a fence, or a device sync); what it writes is poisoned until written whole | `DeviceAcquisition::fail` |
 | device lost | that device marked lost (other devices keep working), its calls fall back, its allocations are leaked rather than freed | `Backend::markLost` |
 | device error while a UMat is destroyed | logged, never thrown; host-side state is still freed | `drainForRelease` |
-| device that never finishes | optional limit on every CPU wait (`OPENCV_ACCEL_WAIT_TIMEOUT_MS`), then the device is lost | `FenceRef::wait` |
+| device that never finishes | optional limit on CPU waits (`OPENCV_ACCEL_WAIT_TIMEOUT_MS`), then the device is lost; waits that guard memory going back to its owner (user buffers, imported memory, a Mat's memory) have no limit | `FenceRef::wait` |
 | a view outside its allocation | rejected before every EXECUTE | `viewFitsAllocation` |
 | exception inside a backend | cannot cross the C boundary | `CV_ACCEL_NOEXCEPT` |
 | plugin built against an older table | missing entries read as NULL | `CV_ACCEL_OP_PRESENT` |

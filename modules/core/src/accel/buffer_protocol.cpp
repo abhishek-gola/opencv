@@ -329,12 +329,12 @@ void downloadWhole(BufferState* st)
         b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)", st->device);
         f = recordFence(s);
         endExternal(st, f, ACCESS_READ);
-        f.wait();
+        f.wait(false);  // the host copy may be a Mat's memory, and this fence is not kept
     }
     catch (...)
     {
         if (f.empty())
-            fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, writing the host copy
+            fenceAfterFailure(s).waitNoThrow(false);    // part of the copy may be queued, writing the host copy
         throw;
     }
     Counters& c = counters();
@@ -374,7 +374,7 @@ void uploadShadowLocked(BufferState* st, UMatData* u, const StreamPtr& s, bool w
         f = recordFence(s);
         endExternal(st, f, ACCESS_WRITE);
         if (waitNow)
-            f.wait();
+            f.wait(false);  // reads the host copy, which may be a Mat's memory
     }
     catch (...)
     {
@@ -928,9 +928,12 @@ bool sameAccelDevice(const UMatData* a, const UMatData* b)
     from ~UMat, so it never throws; false when the device failed (logged, device marked lost). */
 static bool drainForRelease(BufferState* st) CV_NOEXCEPT
 {
-    bool ok = st->writeFence.waitNoThrow();
+    // memory that goes back to its owner is never handed back while the device may still use
+    // it: no time limit here (a device that reports a failure has stopped)
+    const bool borrowed = st->imported || st->fromMat;
+    bool ok = st->writeFence.waitNoThrow(!borrowed);
     for (size_t i = 0; i < st->readFences.size(); i++)
-        ok = st->readFences[i].waitNoThrow() && ok;
+        ok = st->readFences[i].waitNoThrow(!borrowed) && ok;
     st->writeFence.reset();
     st->readFences.clear();
     return ok && !st->backend->isLost(st->device);
@@ -1290,12 +1293,12 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
             b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)", device_);
             f = recordFence(s);
             endExternal(st, f, ACCESS_READ);
-            f.wait();   // the destination is user memory
+            f.wait(false);  // the destination is user memory: no time limit
         }
         catch (...)
         {
             if (f.empty())
-                fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, writing user memory
+                fenceAfterFailure(s).waitNoThrow(false);    // part of the copy may be queued, writing user memory
             throw;
         }
         Counters& c = counters();
@@ -1375,14 +1378,14 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
             f = recordFence(s);
             endExternal(st, f, ACCESS_WRITE);
             lk.unlock();
-            f.wait();   // the source is user memory that may be freed when we return
+            f.wait(false);  // the source is user memory that may be freed when we return: no time limit
             lk.lock();
         }
         catch (...)
         {
             const std::string reason = currentExceptionMessage();
             if (f.empty())
-                fenceAfterFailure(s).waitNoThrow();     // part of the copy may be queued, reading user memory
+                fenceAfterFailure(s).waitNoThrow(false);    // part of the copy may be queued, reading user memory
             if (!lk.owns_lock())
                 lk.lock();
             // the device copy may be partly overwritten: invalid until written whole
@@ -1481,7 +1484,7 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
     c.bytesD2D += totalND(sz, dims);
     c.transfers++;
     if (src->accelState->imported || dst->accelState->imported)
-        done.wait();    // user memory: the owner may touch it once we return (as in OpCall)
+        done.wait(false);   // user memory: the owner may touch it once we return (as in OpCall), no time limit
 }
 
 bool DeviceAllocator::getMemoryDesc(const UMatData* u, cvAccelMemoryDesc* desc) const

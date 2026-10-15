@@ -61,16 +61,19 @@ public:
 
     //! polls; an empty fence is complete; throws if the device reports an error
     bool isComplete() const;
-    //! CPU wait (counted in TransferStats::hostWaits); throws on device errors and on timeout
-    void wait() const;
+    /** CPU wait (counted in TransferStats::hostWaits); throws on device errors. With
+        @p bounded false the OPENCV_ACCEL_WAIT_TIMEOUT_MS limit does not apply: for waits that
+        guard memory going back to its owner (a user buffer, imported memory, a Mat's memory),
+        which must never be handed back while the device may still use it. */
+    void wait(bool bounded = true) const;
 
     enum Poll { DONE, PENDING, FAILED };
     /** Never throws: for release paths, which run from destructors. A failure is logged (and
         DEVICE_LOST marks the device lost); the work behind the fence no longer runs, so the
         caller may free what it used. */
     Poll poll() const CV_NOEXCEPT;
-    //! never throws; false when the device failed
-    bool waitNoThrow() const CV_NOEXCEPT;
+    //! never throws; false when the device failed (see wait() for @p bounded)
+    bool waitNoThrow(bool bounded = true) const CV_NOEXCEPT;
 
 private:
     Backend* b_;
@@ -169,6 +172,13 @@ public:
 
     /** A device stays lost once lost; a failure without a known device loses the whole backend.
         Lock-free and never throws: called from release paths and from check(). */
+    //! tests only: forgets that devices were lost (accel::detail::reviveDevices)
+    void revive() CV_NOEXCEPT
+    {
+        lost_.store(false);
+        for (int i = 0; i < MAX_TRACKED_DEVICES; i++)
+            lostDevices_[i].store(false);
+    }
     bool isLost(int device) const CV_NOEXCEPT
     {
         return lost_.load() || (device >= 0 && device < MAX_TRACKED_DEVICES && lostDevices_[device].load());

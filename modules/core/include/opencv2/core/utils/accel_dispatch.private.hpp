@@ -79,6 +79,11 @@ CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
 //! makes the next end_cpu_access after a CPU write fail (on any emulator device), once
 CV_EXPORTS void emulatorFailNextCpuFlush();
 
+//! sets the OPENCV_ACCEL_WAIT_TIMEOUT_MS limit at run time (0: wait forever); tests and diagnostics
+CV_EXPORTS void setWaitTimeout(uint64 ms);
+//! tests only: forgets that devices were lost (a lost device otherwise stays lost for the process)
+CV_EXPORTS void reviveDevices();
+
 /** @brief A simulated dma-buf of @p size bytes, shared with other "drivers"; returns its fd for
 ExternalMemory::DMABUF_FD on "emulator:1". */
 CV_EXPORTS int64 emulatorCreateDmaBuf(size_t size);

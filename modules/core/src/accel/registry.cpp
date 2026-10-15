@@ -154,18 +154,18 @@ bool FenceRef::isComplete() const
 }
 
 //! OPENCV_ACCEL_WAIT_TIMEOUT_MS: a device that does not finish in time is considered lost (0: wait forever)
-static uint64_t waitTimeoutNs()
+static std::atomic<uint64_t>& waitTimeoutNs()
 {
-    static uint64_t ns = (uint64_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_WAIT_TIMEOUT_MS", 0) * 1000000u;
+    static std::atomic<uint64_t> ns((uint64_t)utils::getConfigurationParameterSizeT("OPENCV_ACCEL_WAIT_TIMEOUT_MS", 0) * 1000000u);
     return ns;
 }
 
-void FenceRef::wait() const
+void FenceRef::wait(bool bounded) const
 {
     if (!f_)
         return;
     counters().hostWaits++;
-    const uint64_t timeout = waitTimeoutNs();
+    const uint64_t timeout = bounded ? waitTimeoutNs().load() : 0;
     const cvAccelStatus st = b_->fn().fence_wait(f_, timeout ? timeout : CV_ACCEL_INFINITE);
     if (st == CV_ACCEL_TIMEOUT)
     {
@@ -198,11 +198,11 @@ FenceRef::Poll FenceRef::poll() const CV_NOEXCEPT
     return FAILED;
 }
 
-bool FenceRef::waitNoThrow() const CV_NOEXCEPT
+bool FenceRef::waitNoThrow(bool bounded) const CV_NOEXCEPT
 {
     try
     {
-        wait();
+        wait(bounded);
         return true;
     }
     catch (const std::exception& e)
@@ -1134,6 +1134,23 @@ DeviceAccess::~DeviceAccess()
     catch (...) {}
     delete p;
 }
+
+namespace detail {
+
+void setWaitTimeout(uint64 ms)
+{
+    impl::waitTimeoutNs().store(ms * 1000000u);
+}
+
+void reviveDevices()
+{
+    impl::ensureInitialized();
+    std::vector<impl::Backend*> all = impl::Registry::getInstance().all();
+    for (size_t i = 0; i < all.size(); i++)
+        all[i]->revive();
+}
+
+} // namespace detail
 
 uint64 DeviceAccess::handle() const
 {

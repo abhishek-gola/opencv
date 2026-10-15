@@ -432,6 +432,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
         stream = b->defaultStream(device);
     const MatAllocator* deviceAllocator = b->allocator(device, (int)plannedKind, protectedIn);
     bool needSync = syncDebugMode();
+    bool borrowed = false;      // the call uses memory that goes back to its owner: no time limit on the wait
     for (size_t i = 0; i < args.size(); i++)
     {
         Arg& a = args[i];
@@ -470,7 +471,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             // plain host memory used in place by a device that can address it
             if (a.isUMat)
                 a.mat = a.um.getMat(ACCESS_READ);   // host allocator: no copy
-            needSync = true;    // finish before the caller can touch that memory again
+            needSync = borrowed = true;     // finish before the caller can touch that memory again
         }
     }
 
@@ -497,7 +498,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             a.mode = a.isOutput ? (DEV_WRITE | (a.fullOverwrite && coversAllocation(target) ? DEV_DISCARD : 0)) : DEV_READ;
             acq.add(target.u, a.mode);
             if (target.u->accelState->imported)
-                needSync = true;    // user memory: the owner may touch it once we return
+                needSync = borrowed = true;     // user memory: the owner may touch it once we return
         }
         std::vector<FenceRef> waits;
         if (!acq.acquire(stream, waits))
@@ -580,7 +581,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             a.temp.copyTo(*a.arr);
     }
     if (needSync)
-        done.wait();
+        done.wait(!borrowed);
     return HANDLED;
 }
 

@@ -646,6 +646,29 @@ TEST(Core_Accel, device_sync_waits_for_streams_of_finished_threads)
     EXPECT_EQ(1, out.getMat(ACCESS_READ).at<uchar>(0, 0));
 }
 
+TEST(Core_Accel, wait_limit_never_hands_back_memory_the_device_still_uses)
+{
+    accel::Device d = emulator(COHERENT);
+    accel::detail::setWaitTimeout(5);  // ms; device work below takes 50 ms
+    runWithDeviceDelay(50000, [&]() {
+        std::vector<uchar> storage(4096 * 2);
+        uchar* p = alignPtr(storage.data(), 4096);
+        Mat host(32, 32, CV_8UC1, p);
+        host.setTo(Scalar(0));
+        accel::ExternalMemory mem;
+        mem.type = accel::ExternalMemory::HOST_POINTER;
+        mem.handle = (int64)(intptr_t)p;
+        mem.size = host.total();
+        UMat w = accel::wrapExternalMemory(d, mem, MatShape({32, 32}), CV_8UC1);
+        UMat src = makeOn(d, Mat(32, 32, CV_8UC1, Scalar(7)));
+        src.copyTo(w);                  // a device copy into the owner's memory: no limit on that wait
+        w.release();
+        EXPECT_EQ(0, maxDiff(Mat(32, 32, CV_8UC1, Scalar(7)), host));
+    });
+    accel::detail::setWaitTimeout(0);
+    accel::detail::reviveDevices();
+}
+
 TEST(Core_Accel, copy_into_wrapped_memory_is_done_on_return)
 {
     accel::Device d = emulator(COHERENT);
