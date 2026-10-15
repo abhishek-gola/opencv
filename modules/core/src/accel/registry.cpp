@@ -1119,6 +1119,8 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
     ext.offset = memory.offset;
     ext.size = memory.size ? memory.size : total;
     ext.flags = (memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0) | (memory.protectedContent ? CV_ACCEL_MEMF_PROTECTED : 0);
+    ext.layout_modifier = memory.layoutModifier;
+    ext.fourcc = memory.fourcc;
     size_t viewOffset = 0;
     m.u = a->wrap(ext, total, &viewOffset);
     const bool shared = viewOffset != (size_t)-1;   // a view of a buffer core already holds (referenced)
@@ -1129,6 +1131,32 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
     if (!shared)
         m.addref();
     return m;
+}
+
+std::vector<UMat> wrapExternalImage(const Device& device, const ExternalImage& image)
+{
+    CV_Assert(!image.planes.empty());
+    std::vector<UMat> planes;
+    for (size_t i = 0; i < image.planes.size(); i++)
+    {
+        const ExternalPlane& p = image.planes[i];
+        CV_Assert(p.rows > 0 && p.cols > 0 && p.type >= 0);
+        const size_t rowBytes = (size_t)p.cols * CV_ELEM_SIZE(p.type);
+        const size_t pitch = p.pitch ? p.pitch : rowBytes;
+        CV_Assert(pitch >= rowBytes && "accel: a plane's pitch is shorter than its rows");
+        ExternalMemory mem;
+        mem.type = image.type;
+        mem.handle = p.handle;
+        mem.offset = p.offset;
+        mem.size = pitch * (size_t)(p.rows - 1) + rowBytes;
+        mem.readOnly = image.readOnly;
+        mem.protectedContent = image.protectedContent;
+        mem.layoutModifier = image.layoutModifier;
+        mem.fourcc = image.fourcc;
+        const size_t steps[2] = { pitch, (size_t)CV_ELEM_SIZE(p.type) };
+        planes.push_back(wrapExternalMemory(device, mem, MatShape({p.rows, p.cols}), p.type, steps));
+    }
+    return planes;
 }
 
 struct DeviceAccess::Impl

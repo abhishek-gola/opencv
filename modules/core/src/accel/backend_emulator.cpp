@@ -578,10 +578,14 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->size = (size_t)ext->size;
             a->mem = a->cpuView = buf->mem.data() + ext->offset;
             a->dmabuf = buf;
+            // a tiled or compressed layout has no linear CPU view
+            const uint64_t modifier = ext->struct_size >= offsetof(cvAccelExternalMemory, layout_modifier) + sizeof(uint64_t)
+                                      ? ext->layout_modifier : 0;
             out->desc.device_index = (uint32_t)device;
             out->desc.kind = CV_ACCEL_MEM_SHARED;
-            out->desc.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
+            out->desc.host_access = modifier ? CV_ACCEL_HOST_ACCESS_NONE : CV_ACCEL_HOST_ACCESS_COHERENT;
             out->desc.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
+            out->desc.layout_modifier = modifier;
             out->desc.flags = CV_ACCEL_MEMF_IMPORTED | CV_ACCEL_MEMF_EXTERNAL_SYNC | (ext->flags & CV_ACCEL_MEMF_READ_ONLY);
             out->handle = (uint64_t)(uintptr_t)a->mem;
             out->size = ext->size;
@@ -985,10 +989,11 @@ bool sameFormat(const cvAccelCall* call, const cvAccelView* a, const cvAccelView
     return isScrambledDesc(a->alloc->desc, call->device) == isScrambledDesc(b->alloc->desc, call->device);
 }
 
-//! like a real kernel, the emulator must know how to address memory (a device pointer, ...)
+//! like a real kernel, the emulator must know how to address memory (a device pointer, ...),
+//! and its kernels work on linear layouts only
 bool addressable(const cvAccelView* v)
 {
-    return v->alloc && v->alloc->desc.handle_kind != CV_ACCEL_HANDLE_NONE;
+    return v->alloc && v->alloc->desc.handle_kind != CV_ACCEL_HANDLE_NONE && v->alloc->desc.layout_modifier == 0;
 }
 
 Mat viewToMat(const cvAccelView* v)

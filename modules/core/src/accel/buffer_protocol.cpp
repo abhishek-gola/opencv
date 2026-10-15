@@ -1242,6 +1242,17 @@ UMatData* DeviceAllocator::wrap(const cvAccelExternalMemory& ext, size_t total, 
         }
     }
     CV_Assert(a.size >= total);
+    if (a.desc.layout_modifier != ext.layout_modifier)
+    {
+        // a backend that does not know the layout (or predates the field) reports it as linear:
+        // using tiled or compressed memory as linear would read garbage
+        if (b_->fn().deallocate(&a) != CV_ACCEL_OK)
+            CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): failed to release an import: " << b_->fn().get_last_error());
+        if (hostPtr)
+            b_->releaseHostImport(device_, hostPtr);
+        CV_Error_(Error::StsNotImplemented, ("accel(%s): the backend cannot import memory with layout modifier 0x%llx",
+                                             b_->name().c_str(), (unsigned long long)ext.layout_modifier));
+    }
     if ((ext.flags & CV_ACCEL_MEMF_PROTECTED) && !(a.desc.flags & CV_ACCEL_MEMF_PROTECTED))
     {
         // protection is attested by the backend, never taken on the caller's word

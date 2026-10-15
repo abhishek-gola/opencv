@@ -605,6 +605,71 @@ TEST(Core_Accel, dma_buf_fences_of_other_drivers_are_honoured)
     EXPECT_GT(accel::detail::emulatorDmaBufAttachedFences(fd), attached);  // ...hands its fence on
 }
 
+TEST(Core_Accel, multi_plane_images_in_one_or_several_buffers)
+{
+    accel::Device d = emulator(COHERENT);
+    // NV12, 16x16, in one dma-buf: luma rows of 32 bytes, then chroma (8x8 pairs) at offset 512
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(512 + 32 * 8);
+    accel::detail::emulatorDmaBufProduce(fd, 7, 0);
+    accel::ExternalImage nv12;
+    nv12.type = accel::ExternalMemory::DMABUF_FD;
+    accel::ExternalPlane y, uv;
+    y.handle = uv.handle = fd;
+    y.pitch = uv.pitch = 32;
+    y.rows = y.cols = 16;
+    y.type = CV_8UC1;
+    uv.offset = 512;
+    uv.rows = uv.cols = 8;
+    uv.type = CV_8UC2;
+    nv12.planes.push_back(y);
+    nv12.planes.push_back(uv);
+    std::vector<UMat> planes = accel::wrapExternalImage(d, nv12);
+    ASSERT_EQ(2u, planes.size());
+    EXPECT_EQ(Size(16, 16), planes[0].size());
+    EXPECT_EQ(32u, planes[0].step[0]);
+    EXPECT_EQ(CV_8UC2, planes[1].type());
+    EXPECT_EQ(Vec2b(7, 7), planes[1].getMat(ACCESS_READ).at<Vec2b>(7, 7));
+    UMat flipped;
+    accel::resetTransferStats();
+    cv::flip(planes[0], flipped, 1);
+    EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
+    EXPECT_EQ(7, flipped.getMat(ACCESS_READ).at<uchar>(0, 0));
+
+    // one fd per plane
+    const int64 fdY = accel::detail::emulatorCreateDmaBuf(256), fdUV = accel::detail::emulatorCreateDmaBuf(128);
+    accel::detail::emulatorDmaBufProduce(fdUV, 3, 0);
+    nv12.planes[0].handle = fdY;
+    nv12.planes[0].pitch = 16;
+    nv12.planes[1].handle = fdUV;
+    nv12.planes[1].offset = 0;
+    nv12.planes[1].pitch = 16;
+    planes = accel::wrapExternalImage(d, nv12);
+    EXPECT_EQ(Vec2b(3, 3), planes[1].getMat(ACCESS_READ).at<Vec2b>(0, 0));
+}
+
+TEST(Core_Accel, tiled_layouts_never_reach_linear_code)
+{
+    accel::Device d = emulator(COHERENT);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DMABUF_FD;
+    mem.handle = accel::detail::emulatorCreateDmaBuf(256);
+    mem.size = 256;
+    mem.layoutModifier = 0x0100000000000002ull;    // a vendor tiling
+    UMat tiled = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    EXPECT_EQ(accel::HOST_ACCESS_NONE, accel::describe(tiled).hostAccess);
+    EXPECT_THROW(tiled.getMat(ACCESS_READ), cv::Exception);   // no linear CPU view
+    UMat out;
+    EXPECT_THROW(cv::flip(tiled, out, 1), cv::Exception);     // the device's kernels are linear, and no CPU fallback
+
+    // a backend that does not know the layout reports linear memory: refused
+    accel::ExternalMemory ptr;
+    ptr.type = accel::ExternalMemory::DEVICE_POINTER;
+    ptr.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 256, 0, false);
+    ptr.size = 256;
+    ptr.layoutModifier = 0x0100000000000002ull;
+    EXPECT_THROW(accel::wrapExternalMemory(emulator(DISCRETE), ptr, MatShape({16, 16}), CV_8UC1), cv::Exception);
+}
+
 TEST(Core_Accel, device_access_checks_the_stream)
 {
     UMat u = makeOn(emulator(DISCRETE), Mat(4, 4, CV_8UC1, Scalar(1)));

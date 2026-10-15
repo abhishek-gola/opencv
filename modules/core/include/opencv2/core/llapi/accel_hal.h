@@ -298,6 +298,12 @@ typedef struct cvAccelExternalMemory
     uint64_t offset;
     uint64_t size;
     uint32_t flags;         //!< CV_ACCEL_MEMF_READ_ONLY, CV_ACCEL_MEMF_PROTECTED
+    /** DRM format modifier of the memory: 0 for linear, anything else for a tiled or compressed
+        layout without a linear CPU view. The backend reports it back in desc.layout_modifier;
+        core refuses an import whose backend reports another layout (one that predates this
+        field reports linear). */
+    uint64_t layout_modifier;
+    uint32_t fourcc;        //!< DRM fourcc of the image the memory holds (NV12, P010, ...), 0 if none; informational
 } cvAccelExternalMemory;
 
 /** @brief External fence types for cross-device synchronization without a CPU wait. */

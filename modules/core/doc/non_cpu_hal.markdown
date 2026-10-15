@@ -417,6 +417,8 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | read-only imported memory | device writes refused, CPU write views throw | `acquireForDevice` |
 | pageable memory in a DMA | host copies are pinned; user Mats are not pinned implicitly | `ensureShadow` |
 | overlapping host imports | refused, the caller copies | `Backend::reserveHostImport` |
+| multi-plane images (NV12, P010), one fd or one per plane | one UMat per plane with its own pitch | `wrapExternalImage` |
+| tiled or compressed layouts (DRM modifiers) | no CPU view; refused by backends that do not report the layout back | `ExternalMemory::layoutModifier` |
 | the same device memory or dma-buf wrapped twice, or a UMat's own memory wrapped | a view of the buffer core already holds, so one synchronization state; a range that only partly overlaps it is refused | `Backend::findBacking`, `cvAccelAllocation::backing_id` |
 | misaligned host imports (device alignment; cache-line granule for non-coherent memory) | refused, the caller copies | `DeviceAllocator::wrap` |
 | two devices of one backend | peer access where it is enabled (CUDA: `OPENCV_ACCEL_CUDA_PEER_ACCESS`, at enumeration), else a staged copy | `can_access` |
