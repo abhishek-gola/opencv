@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace cv { namespace accel { namespace impl {
@@ -250,7 +251,14 @@ struct BufferState
     std::mutex mutex;
     std::condition_variable cond;
     bool busy;                      //!< a host transition that waits outside of the mutex is running
-    int pendingDeviceOps;           //!< operations between acquireForDevice and recordDeviceUse
+    int pendingReaders;             //!< device operations between acquire and record that only read
+    int pendingWriters;             //!< ... that write; a writer excludes everyone, a reader excludes writers
+    struct Hold
+    {
+        std::thread::id thread;
+        int mode;
+    };
+    std::vector<Hold> longHolds;    //!< open DeviceAccess objects, to report same-thread conflicts
     bool hostMapped;                //!< Mat views may exist (UMatData::refcount was > 0)
     int hostAccess;                 //!< union of AccessFlag over the current mapping
     FenceRef writeFence;            //!< last device write
@@ -279,14 +287,47 @@ enum DeviceMode
     DEV_DISCARD = 4     //!< together with DEV_WRITE: the whole allocation is overwritten
 };
 
-/** Prepares @p u for use by work that will be enqueued on @p stream: uploads the host copy
-    when it is newer, and returns the fences the work must wait for. Returns false (and
-    changes nothing) when a live Mat view conflicts with @p mode. */
-bool acquireForDevice(UMatData* u, const StreamPtr& stream, int mode, std::vector<FenceRef>& waits);
-//! records the completion fence of the work enqueued after acquireForDevice
-void recordDeviceUse(UMatData* u, const FenceRef& fence, int mode);
-//! undoes acquireForDevice when nothing was enqueued
-void abandonDeviceUse(UMatData* u);
+struct DeviceUse
+{
+    UMatData* u;
+    int mode;           //!< DEV_* flags
+};
+
+/** The buffers one piece of device work uses, acquired together.
+
+acquire() takes them in one global order (by state address), so concurrent acquirers never
+wait for each other in a cycle, and a buffer added twice is acquired once with the union of
+the modes. Each buffer waits while a conflicting operation sits between acquire and record,
+gets its host copy uploaded when that is newer, and contributes the fences the work must
+wait for. If anything fails, or the object goes away before record(), every buffer acquired
+so far is released, so no path leaves a buffer acquired. A long hold (DeviceAccess) is
+remembered per thread, so that the same thread touching the buffer again gets an error
+instead of a deadlock. */
+class DeviceAcquisition
+{
+public:
+    explicit DeviceAcquisition(bool longHold = false) : longHold_(longHold), acquired_(0) {}
+    ~DeviceAcquisition() { abandon(); }
+
+    void add(UMatData* u, int mode);
+    bool empty() const { return uses_.empty(); }
+
+    /** Returns false and holds nothing when a live Mat view conflicts with a use. Appends the
+        fences that work enqueued on @p stream must wait for to @p waits. */
+    bool acquire(const StreamPtr& stream, std::vector<FenceRef>& waits);
+    //! the work was enqueued: @p fence completes it; releases every buffer
+    void record(const FenceRef& fence);
+    //! nothing was enqueued; releases every buffer (safe to call more than once)
+    void abandon();
+
+private:
+    DeviceAcquisition(const DeviceAcquisition&);
+    DeviceAcquisition& operator=(const DeviceAcquisition&);
+    std::vector<DeviceUse> uses_;
+    bool longHold_;
+    size_t acquired_;
+    std::thread::id holder_;
+};
 
 //! waits for all device work on @p u (CPU wait)
 void waitForDevice(UMatData* u);

@@ -936,49 +936,39 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
 
 struct DeviceAccess::Impl
 {
+    Impl() : acq(true) {}
     UMat m;
     StreamPtr s;
-    int mode;
+    DeviceAcquisition acq;  //!< a long hold: released when the DeviceAccess goes away
 };
 
 DeviceAccess::DeviceAccess(const UMat& m, const Stream& stream, AccessFlag access) : p(0)
 {
     CV_Assert(m.u && m.u->accelState && "accel: DeviceAccess needs a UMat allocated on a device");
     CV_Assert(!stream.empty());
-    Impl* impl_ = new Impl();
+    std::unique_ptr<Impl> impl_(new Impl());
     impl_->m = m;
     impl_->s = stream.impl->s;
-    impl_->mode = ((access & ACCESS_READ) ? DEV_READ : 0) | ((access & ACCESS_WRITE) ? DEV_WRITE : 0);
+    int mode = ((access & ACCESS_READ) ? DEV_READ : 0) | ((access & ACCESS_WRITE) ? DEV_WRITE : 0);
+    impl_->acq.add(m.u, mode ? mode : DEV_READ);
     std::vector<FenceRef> waits;
-    if (!acquireForDevice(m.u, impl_->s, impl_->mode, waits))
-    {
-        delete impl_;
+    if (!impl_->acq.acquire(impl_->s, waits))
         CV_Error(Error::StsError, "accel: DeviceAccess: a conflicting Mat view of the UMat is alive");
-    }
-    try
-    {
-        for (size_t i = 0; i < waits.size(); i++)
-            streamWait(impl_->s, waits[i]);
-    }
-    catch (...)
-    {
-        abandonDeviceUse(m.u);
-        delete impl_;
-        throw;
-    }
-    p = impl_;
+    for (size_t i = 0; i < waits.size(); i++)
+        streamWait(impl_->s, waits[i]);     // on failure the acquisition is released with impl_
+    p = impl_.release();
 }
 
 DeviceAccess::~DeviceAccess()
 {
     try
     {
-        recordDeviceUse(p->m.u, recordFence(p->s), p->mode);
+        p->acq.record(recordFence(p->s));
     }
     catch (const std::exception& e)
     {
         CV_LOG_ERROR(NULL, "accel: DeviceAccess: can't record the stream position: " << e.what());
-        abandonDeviceUse(p->m.u);
+        p->acq.abandon();
     }
     delete p;
 }

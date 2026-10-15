@@ -40,7 +40,7 @@ enum Plan
 struct Arg
 {
     Arg() : isOutput(false), arr(0), type(-1), fullOverwrite(true), isUMat(false), isHost(false),
-            onDevice(false), plan(PLAN_ABSENT), mode(0), acquired(0)
+            onDevice(false), plan(PLAN_ABSENT), mode(0)
     {
         memset(&desc, 0, sizeof(desc));
         memset(&viewAlloc, 0, sizeof(viewAlloc));
@@ -59,7 +59,6 @@ struct Arg
     int plan;
     UMat temp;
     int mode;
-    UMatData* acquired;
     cvAccelAllocation viewAlloc;
 };
 
@@ -181,7 +180,6 @@ struct OpCall::Impl
 private:
     bool planArgs(Backend* b, int device);
     void createOutput(Arg& a, Backend* b, int device);
-    void releaseAcquired();
 };
 
 OpCall::OpCall(const char* opName, const char* module, uint32_t moduleVersion)
@@ -297,18 +295,6 @@ void OpCall::Impl::createOutput(Arg& a, Backend* b, int device)
     d.allocator = saved;   // placement belongs to the data, not to the header
     a.um = d;
     describeUMat(a);
-}
-
-void OpCall::Impl::releaseAcquired()
-{
-    for (size_t i = 0; i < args.size(); i++)
-    {
-        if (args[i].acquired)
-        {
-            abandonDeviceUse(args[i].acquired);
-            args[i].acquired = 0;
-        }
-    }
 }
 
 RunResult OpCall::Impl::run(Invoker fn, void* userdata)
@@ -456,7 +442,8 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             return CPU_ONLY;
         }
 
-        std::vector<FenceRef> waits;
+        // every buffer the work touches, acquired together (the same buffer twice counts once)
+        DeviceAcquisition acq;
         for (size_t i = 0; i < args.size(); i++)
         {
             Arg& a = args[i];
@@ -464,17 +451,17 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             if (a.plan == PLAN_ABSENT || !target.u || !target.u->accelState)
                 continue;
             a.mode = a.isOutput ? (DEV_WRITE | (a.fullOverwrite && coversAllocation(target) ? DEV_DISCARD : 0)) : DEV_READ;
-            if (!acquireForDevice(target.u, stream, a.mode, waits))
-            {
-                // a Mat view of this buffer is alive: the CPU path is the only safe one
-                releaseAcquired();
-                counters().cpuFallbacks++;
-                CV_LOG_DEBUG(NULL, "accel(" << b->name() << "): " << name << " runs on the CPU (a Mat view of an argument is alive)");
-                return CPU_ONLY;
-            }
-            a.acquired = target.u;
+            acq.add(target.u, a.mode);
             if (target.u->accelState->imported)
                 needSync = true;    // user memory: the owner may touch it once we return
+        }
+        std::vector<FenceRef> waits;
+        if (!acq.acquire(stream, waits))
+        {
+            // a Mat view of one of the buffers is alive: the CPU path is the only safe one
+            counters().cpuFallbacks++;
+            CV_LOG_DEBUG(NULL, "accel(" << b->name() << "): " << name << " runs on the CPU (a Mat view of an argument is alive)");
+            return CPU_ONLY;
         }
 
         try
@@ -514,7 +501,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
             if (status == CV_ACCEL_NOT_IMPLEMENTED)
             {
                 // allowed: nothing was enqueued
-                releaseAcquired();
+                acq.abandon();
                 counters().cpuFallbacks++;
                 return CPU_ONLY;
             }
@@ -523,19 +510,10 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
         }
         catch (...)
         {
-            releaseAcquired();
+            acq.abandon();
             throw;
         }
-
-        for (size_t i = 0; i < args.size(); i++)
-        {
-            Arg& a = args[i];
-            if (a.acquired)
-            {
-                recordDeviceUse(a.acquired, done, a.mode);
-                a.acquired = 0;
-            }
-        }
+        acq.record(done);
     }
     counters().deviceOps++;
 
