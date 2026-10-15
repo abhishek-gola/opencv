@@ -23,6 +23,7 @@
 #include <cuda_runtime.h>
 #include <cuda.h>   // driver API types only: libcuda is loaded at run time (see Driver)
 
+#include <opencv2/core/utils/configuration.private.hpp>
 #include <opencv2/core/utils/tls.hpp>
 
 #include <chrono>
@@ -186,6 +187,7 @@ struct DeviceProps
     int pageableMemoryAccess;
     int hostRegisterSupported;
     uint32_t sharedHostAccess;   //!< how the CPU sees pinned memory mapped into this GPU
+    uint64_t peerEnabled;        //!< bit j: kernels here reach memory of GPU j (peer access is on)
 };
 
 std::vector<DeviceProps>& devices()
@@ -214,6 +216,26 @@ std::vector<DeviceProps>& devices()
             const int cc = p.prop.major * 10 + p.prop.minor;
             p.sharedHostAccess = (p.prop.integrated && cc < 72) ? CV_ACCEL_HOST_ACCESS_UNCACHED
                                                                 : CV_ACCEL_HOST_ACCESS_COHERENT;
+        }
+        // Peer access maps every allocation of one GPU into the other's address space and makes
+        // every later allocation and free on both slower: only on request, once, here (so that
+        // can_access stays free of side effects).
+        if (n > 1 && utils::getConfigurationParameterBool("OPENCV_ACCEL_CUDA_PEER_ACCESS", false))
+        {
+            for (int i = 0; i < n && i < 64; i++)
+            {
+                for (int j = 0; j < n && j < 64; j++)
+                {
+                    int can = 0;
+                    if (i == j || cudaDeviceCanAccessPeer(&can, i, j) != cudaSuccess || !can)
+                        continue;
+                    DeviceGuard guard(i);
+                    const cudaError_t e = cudaDeviceEnablePeerAccess(j, 0);
+                    if (e == cudaSuccess || e == cudaErrorPeerAccessAlreadyEnabled)
+                        (*d)[i].peerEnabled |= (uint64_t)1 << j;
+                    cudaGetLastError();
+                }
+            }
         }
     });
     return *d;
@@ -261,7 +283,9 @@ cvAccelStatus CV_API_CALL cu_get_device_info(int device, cvAccelDeviceInfo* info
     info->vendor_id = 0x10de;
     info->total_memory = p.prop.totalGlobalMem;
     info->caps = CV_ACCEL_CAP_ASYNC | CV_ACCEL_CAP_HOST_PINNED | CV_ACCEL_CAP_MANAGED |
-                 CV_ACCEL_CAP_PEER_ACCESS | CV_ACCEL_CAP_STREAMS_THREAD_SAFE;
+                 CV_ACCEL_CAP_STREAMS_THREAD_SAFE;
+    if (p.peerEnabled)
+        info->caps |= CV_ACCEL_CAP_PEER_ACCESS;
     if (p.prop.integrated)
         info->caps |= CV_ACCEL_CAP_SHARED;
     if (!p.concurrentManagedAccess)
@@ -471,15 +495,9 @@ cvAccelStatus CV_API_CALL cu_can_access(int device, const cvAccelMemoryDesc* des
         // mapped pinned and managed memory is visible to every GPU
         if (desc->kind == CV_ACCEL_MEM_HOST_PINNED || desc->kind == CV_ACCEL_MEM_SHARED || desc->kind == CV_ACCEL_MEM_MANAGED)
             return CV_ACCEL_OK;
-        int can = 0;
-        if (cudaDeviceCanAccessPeer(&can, device, own_device) != cudaSuccess || !can)
-            return CV_ACCEL_NOT_IMPLEMENTED;
-        DeviceGuard guard(device);
-        cudaError_t e = cudaDeviceEnablePeerAccess(own_device, 0);
-        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled)
-            return status(e, "cudaDeviceEnablePeerAccess");
-        cudaGetLastError();
-        return CV_ACCEL_OK;
+        // device memory of another GPU: only where peer access was enabled (see devices())
+        const uint64_t peers = devices()[device].peerEnabled;
+        return own_device < 64 && ((peers >> own_device) & 1) ? CV_ACCEL_OK : CV_ACCEL_NOT_IMPLEMENTED;
     }
     // plain host memory: only with HMM / ATS (Grace Hopper, recent drivers)
     if (desc->kind == CV_ACCEL_MEM_HOST && desc->handle_kind == CV_ACCEL_HANDLE_HOST_POINTER &&

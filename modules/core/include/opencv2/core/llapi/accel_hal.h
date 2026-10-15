@@ -296,7 +296,7 @@ enum
     CV_ACCEL_CAP_IMPORT_DMABUF = 1 << 5,
     CV_ACCEL_CAP_EXPORT_DMABUF = 1 << 6,
     CV_ACCEL_CAP_EXTERNAL_FENCE = 1 << 7,   //!< fence_export / stream_wait_external
-    CV_ACCEL_CAP_PEER_ACCESS = 1 << 8,      //!< kernels can read other devices of the same backend
+    CV_ACCEL_CAP_PEER_ACCESS = 1 << 8,      //!< kernels reach memory of another device of this backend (can_access tells which)
     CV_ACCEL_CAP_STREAMS_THREAD_SAFE = 1 << 9, //!< one stream may be used from several threads at once
     /** may hand out memory that the CPU may touch only while the device is idle
         (CV_ACCEL_HOST_ACCESS_DEVICE_IDLE); core then gates every submission from the start */
@@ -344,7 +344,9 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     /** OK when kernels of @p device can read and write memory described by @p desc in place.
         @p own_device is the device index when the memory was allocated or imported by this
         backend, and -1 when it belongs to the host or to another backend. Core never asks
-        about the backend's own memory on the same device: that is always accessible. */
+        about the backend's own memory on the same device: that is always accessible. Core
+        asks while planning, so this has no side effects: what it reports is set up beforehand
+        (peer access, for instance, when the devices are enumerated). */
     cvAccelStatus (CV_API_CALL *can_access)(int device, const cvAccelMemoryDesc* desc, int own_device) CV_ACCEL_NOEXCEPT;
     /** Starts CPU access to [offset, offset+size) with access flags (cv::AccessFlag values).
         Called after all device work on the allocation finished. For NONCOHERENT memory this
