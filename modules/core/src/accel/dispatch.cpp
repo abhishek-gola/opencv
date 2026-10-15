@@ -330,7 +330,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
     if (backendId == 0)
         return anyOnDevice ? CPU_ONLY : NOT_HANDLED;   // a host scope runs everything on the CPU
     Backend* b = Registry::getInstance().get(backendId);
-    if (!b || b->isLost())
+    if (!b || b->isLost(device))
         return anyOnDevice ? CPU_ONLY : NOT_HANDLED;
 
     // 2. plan
@@ -393,7 +393,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
                 createOutput(args[i], b, device);
         return CPU_ONLY;
     }
-    b->check(status, name);
+    b->check(status, name, device);
 
     // 4. prepare: outputs, temporaries and uploads (these may touch the CPU side, so they
     //    happen before the submission window)
@@ -505,7 +505,7 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
                 counters().cpuFallbacks++;
                 return CPU_ONLY;
             }
-            b->check(status, name);
+            b->check(status, name, device);
             done = recordFence(stream);
         }
         catch (...)

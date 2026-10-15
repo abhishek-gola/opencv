@@ -48,6 +48,11 @@ Rules a backend must follow, because core relies on them for correctness:
    fences that are already complete.
 7. Imported host memory is never freed or reused by the backend; overlapping imports are
    refused by core, which falls back to a copy.
+8. Once a call has returned CV_ACCEL_DEVICE_LOST for a device, waits on its fences return
+   promptly with an error instead of blocking, and fence_release / stream_destroy still
+   succeed. Core then frees no more allocations of that device (they are leaked, as after a
+   timed-out wait, see OPENCV_ACCEL_WAIT_TIMEOUT_MS) but keeps releasing its own host-side
+   state, so that destroying a UMat never blocks or throws.
 
 @note Preview only (no backward compatibility until ABI version 1).
 */
@@ -349,7 +354,9 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     cvAccelStatus (CV_API_CALL *stream_record_fence)(cvAccelStream stream, cvAccelFence* out) CV_ACCEL_NOEXCEPT;
     //! device-side wait: later work on @p stream starts after @p fence completes
     cvAccelStatus (CV_API_CALL *stream_wait_fence)(cvAccelStream stream, cvAccelFence fence) CV_ACCEL_NOEXCEPT;
-    //! CPU wait; timeout 0 polls (CV_ACCEL_TIMEOUT while pending)
+    /** CPU wait; timeout 0 polls (CV_ACCEL_TIMEOUT while pending). Any status other than OK
+        and TIMEOUT means the work behind the fence failed and is no longer running: core then
+        frees the memory that work used. */
     cvAccelStatus (CV_API_CALL *fence_wait)(cvAccelFence fence, uint64_t timeout_ns) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *fence_retain)(cvAccelFence fence) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *fence_release)(cvAccelFence fence) CV_ACCEL_NOEXCEPT;

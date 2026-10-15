@@ -407,7 +407,9 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | out of device memory | deferred frees collected, one retry, then an error | `DeviceAllocator::allocate` |
 | allocation on a device fails | no silent fallback to host memory | `UMat::create` |
 | asynchronous device error | buffer poisoned, readers get the original error | `waitDeviceWork` |
-| device lost | backend marked lost, its calls fall back | `Backend::markLost` |
+| device lost | that device marked lost (other devices keep working), its calls fall back, its allocations are leaked rather than freed | `Backend::markLost` |
+| device error while a UMat is destroyed | logged, never thrown; host-side state is still freed | `drainForRelease` |
+| device that never finishes | optional limit on every CPU wait (`OPENCV_ACCEL_WAIT_TIMEOUT_MS`), then the device is lost | `FenceRef::wait` |
 | a view outside its allocation | rejected before every EXECUTE | `viewFitsAllocation` |
 | exception inside a backend | cannot cross the C boundary | `CV_ACCEL_NOEXCEPT` |
 | plugin built against an older table | missing entries read as NULL | `CV_ACCEL_OP_PRESENT` |
@@ -467,8 +469,10 @@ make opencv_test_core
 The emulator makes every rule testable without hardware: device memory of its discrete
 device is stored scrambled (a missing download shows as garbage), its non-coherent device
 keeps a separate CPU view that only the cache operations synchronize (a missing invalidate
-or clean shows as stale data), and its managed device counts device work that overlaps CPU
-access. `OPENCV_ACCEL_EMULATOR_DELAY_US` delays every queued task to expose missing waits.
+or clean shows as stale data), its managed device counts device work that overlaps CPU
+access, and a sixth device fails on request (asynchronous errors, device loss) to check that
+no error escapes a destructor. `OPENCV_ACCEL_EMULATOR_DELAY_US` delays every queued task to
+expose missing waits.
 
 ## Migration plan
 

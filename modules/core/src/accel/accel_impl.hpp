@@ -40,13 +40,14 @@ struct StreamHolder
 };
 typedef std::shared_ptr<StreamHolder> StreamPtr;
 
-/** Counted reference to a backend fence and the stream it was recorded on. */
+/** Counted reference to a backend fence, the stream it was recorded on and that stream's device. */
 class FenceRef
 {
 public:
-    FenceRef() : b_(0), f_(0), streamUid_(0) {}
+    FenceRef() : b_(0), f_(0), streamUid_(0), device_(-1) {}
     //! adopts the reference returned by stream_record_fence
-    FenceRef(Backend* b, cvAccelFence f, uint64 streamUid) : b_(b), f_(f), streamUid_(streamUid) {}
+    FenceRef(Backend* b, cvAccelFence f, uint64 streamUid, int device)
+        : b_(b), f_(f), streamUid_(streamUid), device_(device) {}
     FenceRef(const FenceRef& o);
     FenceRef& operator=(const FenceRef& o);
     ~FenceRef() { reset(); }
@@ -56,16 +57,26 @@ public:
     Backend* backend() const { return b_; }
     cvAccelFence get() const { return f_; }
     uint64 streamUid() const { return streamUid_; }
+    int device() const { return device_; }
 
-    //! polls; an empty fence is complete
+    //! polls; an empty fence is complete; throws if the device reports an error
     bool isComplete() const;
-    //! CPU wait (counted in TransferStats::hostWaits)
+    //! CPU wait (counted in TransferStats::hostWaits); throws on device errors and on timeout
     void wait() const;
+
+    enum Poll { DONE, PENDING, FAILED };
+    /** Never throws: for release paths, which run from destructors. A failure is logged (and
+        DEVICE_LOST marks the device lost); the work behind the fence no longer runs, so the
+        caller may free what it used. */
+    Poll poll() const CV_NOEXCEPT;
+    //! never throws; false when the device failed
+    bool waitNoThrow() const CV_NOEXCEPT;
 
 private:
     Backend* b_;
     cvAccelFence f_;
     uint64 streamUid_;
+    int device_;
 };
 
 //! records a fence at the current end of @p s
@@ -125,8 +136,8 @@ public:
     int deviceCount();
     cvAccelDeviceInfo deviceInfo(int device);
 
-    //! throws cv::Exception with the backend message unless @p st is CV_ACCEL_OK
-    void check(cvAccelStatus st, const char* what) const;
+    //! throws cv::Exception with the backend message unless @p st is CV_ACCEL_OK; DEVICE_LOST marks @p device lost
+    void check(cvAccelStatus st, const char* what, int device = -1) const;
 
     //! cached op table of a module, NULL when the backend has none
     const void* opTable(const char* module, uint32_t version);
@@ -145,8 +156,19 @@ public:
     //! frees deferred buffers whose fences completed; with @p waitAll, waits for all of them
     void collectDeferred(bool waitAll);
 
-    bool isLost() const { return lost_.load(); }
-    void markLost() { lost_.store(true); }
+    /** A device stays lost once lost; a failure without a known device loses the whole backend.
+        Lock-free and never throws: called from release paths and from check(). */
+    bool isLost(int device) const CV_NOEXCEPT
+    {
+        return lost_.load() || (device >= 0 && device < MAX_TRACKED_DEVICES && lostDevices_[device].load());
+    }
+    void markLost(int device) CV_NOEXCEPT
+    {
+        if (device >= 0 && device < MAX_TRACKED_DEVICES)
+            lostDevices_[device].store(true);
+        else
+            lost_.store(true);
+    }
 
     IdleGate& idleGate(int device);
 
@@ -177,7 +199,9 @@ private:
     std::map<std::string, const void*> opTables_;
     std::map<std::pair<int, int>, MatAllocator*> allocators_;
     std::vector<BufferState*> deferred_;
+    enum { MAX_TRACKED_DEVICES = 64 };  //!< devices past this are tracked together, as the backend
     std::atomic<bool> lost_;
+    std::atomic<bool> lostDevices_[MAX_TRACKED_DEVICES];
     std::vector<std::unique_ptr<IdleGate> > idleGates_;
     std::map<std::pair<int, uintptr_t>, uintptr_t> hostImports_;   //!< (device, first page) -> end
     std::multimap<std::pair<int, uint64_t>, cvAccelAllocation> pinnedCache_;
@@ -328,9 +352,6 @@ private:
     size_t acquired_;
     std::thread::id holder_;
 };
-
-//! waits for all device work on @p u (CPU wait)
-void waitForDevice(UMatData* u);
 
 /** The allocator for one (backend, device, memory kind). It owns no state of its own: the
     coherence protocol lives in the functions above, so every backend gets the same rules. */

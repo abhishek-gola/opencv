@@ -151,20 +151,20 @@ struct BusyScope
     std::unique_lock<std::mutex>& lk;
 };
 
-bool fencesComplete(BufferState* st)
+//! release path, never throws: true when no fence is pending (a failed device counts as done)
+bool fencesSettled(BufferState* st)
 {
     if (!st->writeFence.empty())
     {
-        if (!st->writeFence.isComplete())
+        if (st->writeFence.poll() == FenceRef::PENDING)
             return false;
         st->writeFence.reset();
     }
     for (size_t i = 0; i < st->readFences.size(); )
     {
-        if (st->readFences[i].isComplete())
-            st->readFences.erase(st->readFences.begin() + i);
-        else
+        if (st->readFences[i].poll() == FenceRef::PENDING)
             return false;
+        st->readFences.erase(st->readFences.begin() + i);
     }
     return true;
 }
@@ -265,7 +265,7 @@ void downloadWhole(BufferState* st)
     r.dst.host = st->shadow;
     if (shadowSource(st) == SHADOW_BACKEND)
         r.flags |= CV_ACCEL_COPY_HOST_PINNED;
-    b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)");
+    b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)", st->device);
     recordFence(s).wait();
     Counters& c = counters();
     c.bytesD2H += st->alloc.size;
@@ -282,7 +282,7 @@ void uploadWhole(BufferState* st, const StreamPtr& s)
     r.dst.alloc = &st->alloc;
     if (shadowSource(st) == SHADOW_BACKEND)
         r.flags |= CV_ACCEL_COPY_HOST_PINNED;
-    b->check(b->fn().copy(st->device, s->handle, &r), "copy (host to device)");
+    b->check(b->fn().copy(st->device, s->handle, &r), "copy (host to device)", st->device);
     Counters& c = counters();
     c.bytesH2D += st->alloc.size;
     c.transfers++;
@@ -343,12 +343,12 @@ void* beginCpuAccess(BufferState* st, int access)
 {
     Backend* b = st->backend;
     if (hostAccessClass(st) == CV_ACCEL_HOST_ACCESS_DEVICE_IDLE)
-        b->check(b->fn().device_synchronize(st->device), "device_synchronize");
+        b->check(b->fn().device_synchronize(st->device), "device_synchronize", st->device);
     void* p = 0;
     cvAccelStatus status = b->fn().begin_cpu_access(&st->alloc, 0, st->alloc.size, (uint32_t)access, &p);
     if (status == CV_ACCEL_OK && !p)
         status = CV_ACCEL_INTERNAL_ERROR;
-    b->check(status, "begin_cpu_access");
+    b->check(status, "begin_cpu_access", st->device);
     return p;
 }
 
@@ -362,7 +362,7 @@ bool endCpuAccess(BufferState* st, int access)
     CV_LOG_ERROR(NULL, "accel(" << b->name() << "): end_cpu_access failed: " << b->fn().get_last_error()
                  << ". CPU writes may not be visible to the device.");
     if (status == CV_ACCEL_DEVICE_LOST)
-        b->markLost();
+        b->markLost(st->device);
     return false;
 }
 
@@ -399,7 +399,7 @@ void upgradeHostAccessLocked(BufferState* st, UMatData* u)
     // the mapping is already open (and holds the device gate): only announce the write
     void* p = 0;
     Backend* b = st->backend;
-    b->check(b->fn().begin_cpu_access(&st->alloc, 0, st->alloc.size, ACCESS_WRITE, &p), "begin_cpu_access");
+    b->check(b->fn().begin_cpu_access(&st->alloc, 0, st->alloc.size, ACCESS_WRITE, &p), "begin_cpu_access", st->device);
     CV_Assert(p == (void*)u->data);
 }
 
@@ -748,30 +748,28 @@ void DeviceAcquisition::abandon()
     }
 }
 
-void waitForDevice(UMatData* u)
-{
-    BufferState* st = u->accelState;
-    std::unique_lock<std::mutex> lk(st->mutex);
-    BusyScope busy(st, lk, true);
-    waitDeviceWork(st, lk, true);
-}
-
 //////////////////////////////////// release ////////////////////////////////////
 
 void destroyBufferState(BufferState* st)
 {
     Backend* b = st->backend;
+    // A lost device rejects every call, or is still running after a timed-out wait (where a
+    // free would block, as cudaFree does): its allocations are leaked, host memory is freed.
+    const bool lost = b->isLost(st->device);
     if (shadowSource(st) == SHADOW_BACKEND)
     {
-        st->shadowAlloc.desc.device_index = (uint32_t)st->device;
-        b->recyclePinned(st->shadowAlloc);
+        if (!lost)
+        {
+            st->shadowAlloc.desc.device_index = (uint32_t)st->device;
+            b->recyclePinned(st->shadowAlloc);
+        }
     }
     else if (shadowSource(st) == SHADOW_FASTMALLOC)
     {
         fastFree(st->shadow);
     }
     st->shadow = 0;
-    if (st->alloc.handle || st->alloc.backend_data)
+    if (!lost && (st->alloc.handle || st->alloc.backend_data))
     {
         if (b->fn().deallocate(&st->alloc) != CV_ACCEL_OK)
             CV_LOG_ERROR(NULL, "accel(" << b->name() << "): failed to free device memory: " << b->fn().get_last_error());
@@ -794,10 +792,53 @@ bool sameAccelDevice(const UMatData* a, const UMatData* b)
            a->accelState->device == b->accelState->device;
 }
 
+/** Release path: waits for every fence on a buffer that nothing refers to any more. Runs
+    from ~UMat, so it never throws; false when the device failed (logged, device marked lost). */
+static bool drainForRelease(BufferState* st) CV_NOEXCEPT
+{
+    bool ok = st->writeFence.waitNoThrow();
+    for (size_t i = 0; i < st->readFences.size(); i++)
+        ok = st->readFences[i].waitNoThrow() && ok;
+    st->writeFence.reset();
+    st->readFences.clear();
+    return ok && !st->backend->isLost(st->device);
+}
+
+//! release path: the device result back into the memory of the Mat the UMat came from; never throws
+static void copyBackToMat(UMatData* u, BufferState* st) CV_NOEXCEPT
+{
+    try
+    {
+        if (usesShadow(st))
+        {
+            downloadWhole(st);  // into the Mat's memory
+        }
+        else
+        {
+            IdleCpuGuard idle(st);
+            void* p = beginCpuAccess(st, ACCESS_READ);
+            memcpy(u->origdata, p, u->size);
+            endCpuAccess(st, ACCESS_READ);
+        }
+        return;
+    }
+    catch (const std::exception& e)
+    {
+        try { CV_LOG_ERROR(NULL, "accel: " << e.what()); } catch (...) {}
+    }
+    catch (...) {}
+    try
+    {
+        CV_LOG_ERROR(NULL, "accel(" << st->backend->name() << "): the device result could not be copied back; "
+                     "the Mat keeps its previous content");
+    }
+    catch (...) {}
+}
+
 static bool readyToFree(BufferState* st)
 {
     std::lock_guard<std::mutex> lk(st->mutex);
-    return st->pendingReaders == 0 && st->pendingWriters == 0 && fencesComplete(st);
+    return st->pendingReaders == 0 && st->pendingWriters == 0 && fencesSettled(st);
 }
 
 //////////////////////////////////// DeviceAllocator ////////////////////////////////////
@@ -867,7 +908,7 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
             b_->collectDeferred(true);
             status = b_->fn().allocate(device_, total, (uint32_t)kind, 0, &a);
         }
-        b_->check(status, "allocate");
+        b_->check(status, "allocate", device_);
     }
     UMatData* u = new UMatData(this);
     u->size = total;
@@ -894,7 +935,7 @@ UMatData* DeviceAllocator::wrap(const cvAccelExternalMemory& ext, size_t total) 
     if (status == CV_ACCEL_NOT_IMPLEMENTED)
         CV_Error_(Error::StsNotImplemented, ("accel(%s): this kind of external memory cannot be imported "
                                              "(type %d); copy it into a UMat instead", b_->name().c_str(), (int)ext.type));
-    b_->check(status, "import_memory");
+    b_->check(status, "import_memory", device_);
     CV_Assert(a.size >= total);
     UMatData* u = new UMatData(this);
     u->size = total;
@@ -961,23 +1002,18 @@ void DeviceAllocator::deallocate(UMatData* u) const
     BufferState* st = u->accelState;
     CV_Assert(st);
 
+    // From here on errors are logged, not thrown: this runs from ~UMat.
     if (st->fromMat)
     {
         // the memory or the content belongs to a Mat: finish everything, then hand it back
-        waitForDevice(u);
+        const bool deviceOk = drainForRelease(st);
         if (!st->imported && u->hostCopyObsolete() && !u->deviceCopyObsolete())
         {
-            if (usesShadow(st))
-            {
-                downloadWhole(st);  // into the Mat's memory
-            }
+            if (deviceOk && !st->poisoned)
+                copyBackToMat(u, st);
             else
-            {
-                IdleCpuGuard idle(st);
-                void* p = beginCpuAccess(st, ACCESS_READ);
-                memcpy(u->origdata, p, u->size);
-                endCpuAccess(st, ACCESS_READ);
-            }
+                CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): the device failed before its result was copied "
+                             "back; the Mat keeps its previous content");
         }
         u->accelState = NULL;
         destroyBufferState(st);
@@ -987,6 +1023,7 @@ void DeviceAllocator::deallocate(UMatData* u) const
         u->currAllocator = u->prevAllocator;
         u->prevAllocator = NULL;
         u->currAllocator->deallocate(u);
+        b_->collectDeferred(false);
         return;
     }
 
@@ -994,12 +1031,7 @@ void DeviceAllocator::deallocate(UMatData* u) const
     u->handle = 0;
     u->data = u->origdata = 0;
     if (st->imported)
-    {
-        // the owner may reuse the memory as soon as we return
-        std::unique_lock<std::mutex> lk(st->mutex);
-        BusyScope busy(st, lk, true);
-        waitDeviceWork(st, lk, true);
-    }
+        drainForRelease(st);  // the owner may reuse the memory as soon as we return
     if (st->imported || readyToFree(st))
         destroyBufferState(st);
     else
@@ -1059,7 +1091,7 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
         r.src.alloc = &st->alloc;
         r.src.offset = srcOffset;
         r.dst.host = dstptr;
-        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)");
+        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)", device_);
         recordFence(s).wait();  // the destination is user memory
         Counters& c = counters();
         c.bytesD2H += totalND(sz, dims);
@@ -1117,7 +1149,7 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
         r.src.host = const_cast<void*>(srcptr);
         r.dst.alloc = &st->alloc;
         r.dst.offset = dstOffset;
-        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (host to device)");
+        b_->check(b_->fn().copy(device_, s->handle, &r), "copy (host to device)", device_);
         FenceRef f = recordFence(s);
         lk.unlock();
         f.wait();   // the source is user memory that may be freed when we return
@@ -1174,7 +1206,7 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
     r.src.offset = srcOffset;
     r.dst.alloc = &dst->accelState->alloc;
     r.dst.offset = dstOffset;
-    b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to device)");
+    b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to device)", device_);
     acq.record(recordFence(s));
     Counters& c = counters();
     c.bytesD2D += totalND(sz, dims);
