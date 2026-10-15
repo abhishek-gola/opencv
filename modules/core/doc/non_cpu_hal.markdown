@@ -243,7 +243,9 @@ see the same DRAM:
    never reaches the CPU: `getMat`, downloads and CPU fallbacks throw. Whatever is computed
    from it stays protected: outputs and temporaries of the call are allocated protected
    (`CV_ACCEL_MEMF_PROTECTED` in `allocate`), and an ordinary output, a Mat output or a
-   device copy into ordinary memory is refused.
+   device copy into ordinary memory is refused. Protection is attested by the backend that
+   owns the memory: `ExternalMemory::protectedContent` only makes a wrap fail when the backend
+   does not attest it.
 9. **Imported dma-bufs.** Buffers from cameras, decoders or displays may carry implicit
    fences. Core brackets every device use of them, its own operations and copies as well as
    the caller's work under a `DeviceAccess`, with `begin_device_access` (the stream waits for
@@ -415,6 +417,7 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | read-only imported memory | device writes refused, CPU write views throw | `acquireForDevice` |
 | pageable memory in a DMA | host copies are pinned; user Mats are not pinned implicitly | `ensureShadow` |
 | overlapping host imports | refused, the caller copies | `Backend::reserveHostImport` |
+| the same device memory or dma-buf wrapped twice, or a UMat's own memory wrapped | a view of the buffer core already holds, so one synchronization state; a range that only partly overlaps it is refused | `Backend::findBacking`, `cvAccelAllocation::backing_id` |
 | misaligned host imports (device alignment; cache-line granule for non-coherent memory) | refused, the caller copies | `DeviceAllocator::wrap` |
 | two devices of one backend | peer access where it is enabled (CUDA: `OPENCV_ACCEL_CUDA_PEER_ACCESS`, at enumeration), else a staged copy | `can_access` |
 | two backends | staged copy, counted as a transfer | `UMat::copyTo` |

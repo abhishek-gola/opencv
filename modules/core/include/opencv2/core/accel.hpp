@@ -227,7 +227,9 @@ struct CV_EXPORTS ExternalMemory
     size_t offset;
     size_t size;
     bool readOnly;
-    bool protectedContent;  //!< protected content, e.g. a dma-buf from a secure heap (see MemoryInfo)
+    /** The memory must hold protected content (a dma-buf from a secure heap, say): the wrap is
+        refused unless the backend attests it. Protection itself always comes from the backend. */
+    bool protectedContent;
 };
 
 /** @brief Wraps external memory into a UMat without copying.

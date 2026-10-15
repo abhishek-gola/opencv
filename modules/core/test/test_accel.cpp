@@ -312,10 +312,9 @@ TEST(Core_Accel, read_only_memory_has_a_read_only_cpu_view)
 {
     // read-only device memory (a wrapped pointer, say): a write through its Mat view faults
     accel::Device d = emulator(DISCRETE);
-    UMat owner = makeOn(d, Mat(64, 64, CV_8UC1, Scalar(3)));
     accel::ExternalMemory mem;
     mem.type = accel::ExternalMemory::DEVICE_POINTER;
-    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64 * 64, 3, false);
     mem.size = 64 * 64;
     mem.readOnly = true;
     UMat ro = accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1);
@@ -365,13 +364,10 @@ TEST(Core_Accel, protected_content_stays_in_protected_memory)
 {
     // a protected frame (from a secure decoder, say) next to ordinary memory on one device
     accel::Device d = emulator(DISCRETE);
-    Mat src(8, 8, CV_8UC1);
-    randu(src, 0, 255);
-    UMat owner = makeOn(d, src);
     accel::ExternalMemory mem;
     mem.type = accel::ExternalMemory::DEVICE_POINTER;
-    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
-    mem.size = src.total();
+    mem.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64, 7, true);
+    mem.size = 64;
     mem.protectedContent = true;
     UMat secure = accel::wrapExternalMemory(d, mem, MatShape({8, 8}), CV_8UC1);
     EXPECT_TRUE(accel::describe(secure).protectedContent);
@@ -388,6 +384,16 @@ TEST(Core_Accel, protected_content_stays_in_protected_memory)
     EXPECT_THROW(cv::flip(secure, host, 1), cv::Exception);    // and so would a Mat
     EXPECT_THROW(secure.copyTo(plain), cv::Exception);
     EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(0)), plain));
+
+    // protection comes from the backend: ordinary memory cannot be declared protected...
+    accel::ExternalMemory claimed = mem;
+    claimed.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64, 7, false);
+    EXPECT_THROW(accel::wrapExternalMemory(d, claimed, MatShape({8, 8}), CV_8UC1), cv::Exception);
+    // ...and protected memory stays protected without the caller saying so
+    accel::ExternalMemory unclaimed = mem;
+    unclaimed.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64, 7, true);
+    unclaimed.protectedContent = false;
+    EXPECT_TRUE(accel::describe(accel::wrapExternalMemory(d, unclaimed, MatShape({8, 8}), CV_8UC1)).protectedContent);
 }
 
 TEST(Core_Accel, transfer_policy_reports_hidden_copies)
@@ -607,6 +613,32 @@ TEST(Core_Accel, device_access_checks_the_stream)
     EXPECT_NO_THROW({ accel::DeviceAccess acc(u, accel::Stream::getDefault(emulator(DISCRETE)), ACCESS_READ); });
 }
 
+TEST(Core_Accel, aliases_of_one_memory_share_one_buffer)
+{
+    accel::Device d = emulator(DISCRETE);
+    UMat owner = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(1)));
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.size = 256;
+    UMat w1 = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    UMat w2 = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    EXPECT_EQ(owner.u, w1.u);       // memory OpenCV already holds: views of that buffer
+    EXPECT_EQ(owner.u, w2.u);
+    mem.offset = 128;
+    mem.size = 128;
+    UMat half = accel::wrapExternalMemory(d, mem, MatShape({8, 16}), CV_8UC1);
+    EXPECT_EQ(owner.u, half.u);
+    EXPECT_EQ(128u, half.offset);
+    mem.offset = 200;               // runs past the end of that buffer: refused
+    mem.size = 100;
+    EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({1, 100}), CV_8UC1), cv::Exception);
+    mem.offset = 0;
+    mem.size = 256;
+    mem.readOnly = true;            // a writable buffer cannot also be read-only
+    EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1), cv::Exception);
+}
+
 TEST(Core_Accel, functions_without_a_hook_still_work)
 {
     // cv::add has no accelerator hook: OpenCL (if active) must decline the device memory
@@ -752,6 +784,23 @@ TEST(Core_Accel, wait_limit_never_hands_back_memory_the_device_still_uses)
     });
     accel::detail::setWaitTimeout(0);
     accel::detail::reviveDevices();
+}
+
+TEST(Core_Accel, aliases_are_ordered_through_their_shared_state)
+{
+    accel::Device d = emulator(DISCRETE);
+    runWithDeviceDelay(20000, [&]() {
+        UMat owner = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(1)));
+        accel::ExternalMemory mem;
+        mem.type = accel::ExternalMemory::DEVICE_POINTER;
+        mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+        mem.size = 256;
+        UMat w1 = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+        UMat w2 = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+        UMat src = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(9)));
+        src.copyTo(w1);             // a device write through one wrapper, still queued...
+        EXPECT_EQ(9, w2.getMat(ACCESS_READ).at<uchar>(15, 15));    // ...seen by a CPU read through the other
+    });
 }
 
 TEST(Core_Accel, copy_into_wrapped_memory_is_done_on_return)

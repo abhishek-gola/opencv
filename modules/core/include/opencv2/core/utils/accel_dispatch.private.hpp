@@ -89,6 +89,11 @@ CV_EXPORTS void reviveDevices();
 //! turns OPENCV_ACCEL_VALIDATE on or off at run time (read-only Mat views are checksummed)
 CV_EXPORTS void setValidation(bool on);
 
+/** @brief Device memory of "another library" (not held by OpenCV), filled with @p value; returns
+its device pointer for ExternalMemory::DEVICE_POINTER. With @p protectedContent the emulator
+allocates it as protected memory and attests that when it is wrapped. Never freed. */
+CV_EXPORTS int64 emulatorAllocateExternal(int device, size_t size, int value, bool protectedContent);
+
 /** @brief A simulated dma-buf of @p size bytes, shared with other "drivers"; returns its fd for
 ExternalMemory::DMABUF_FD on "emulator:1". */
 CV_EXPORTS int64 emulatorCreateDmaBuf(size_t size);

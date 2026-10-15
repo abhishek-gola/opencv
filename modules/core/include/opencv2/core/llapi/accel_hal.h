@@ -206,7 +206,12 @@ typedef struct cvAccelAllocation
     uint64_t size;              //!< bytes requested (allocate) or imported, never rounded up: whole-buffer copies use it
     void* backend_data;         //!< private to the backend
     cvAccelMemoryDesc desc;
-    uint64_t reserved[2];       //!< zero; room for new fields (the size stays)
+    /** identity of the physical memory: the same for every allocation and import that reach it
+        while it lives (its base address, a CUDA buffer id, a dma-buf's inode, ...); 0 when not
+        known. A wrap of memory that core already holds becomes a view of that buffer, so that
+        both share one synchronization state. */
+    uint64_t backing_id;
+    uint64_t backing_offset;    //!< where handle lies in that memory
 } cvAccelAllocation;
 
 /** @brief An n-dimensional strided view into an allocation (an argument of an operation).
