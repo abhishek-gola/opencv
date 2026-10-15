@@ -120,10 +120,17 @@ bool viewFitsAllocation(const cvAccelView& v)
 
 namespace {
 
-//! keeps BufferState::busy set for the lifetime of the object, and wakes waiters at the end
+/** Keeps BufferState::busy set for the lifetime of the object, and wakes waiters at the end.
+    Busy is set only once no other transition runs and no device operation sits between
+    acquire and record: a transition never holds busy while it waits for one, because that
+    operation may itself be waiting for busy (a call that acquires the same buffer twice). */
 struct BusyScope
 {
-    BusyScope(BufferState* st_, std::unique_lock<std::mutex>& lk_) : st(st_), lk(lk_) { st->busy = true; }
+    BusyScope(BufferState* st_, std::unique_lock<std::mutex>& lk_) : st(st_), lk(lk_)
+    {
+        st->cond.wait(lk, [this]{ return !st->busy && st->pendingDeviceOps == 0; });
+        st->busy = true;
+    }
     ~BusyScope()
     {
         if (!lk.owns_lock())
@@ -165,7 +172,7 @@ void checkNotPoisoned(const BufferState* st)
     during the waits so that operations in flight can record their fences. */
 void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool write)
 {
-    st->cond.wait(lk, [st]{ return st->pendingDeviceOps == 0; });
+    CV_DbgAssert(st->busy && st->pendingDeviceOps == 0);    // see BusyScope
     FenceRef lastWrite;
     if (!st->writeFence.empty() && !st->writeFence.isComplete())
         lastWrite = st->writeFence;
@@ -634,7 +641,6 @@ void waitForDevice(UMatData* u)
 {
     BufferState* st = u->accelState;
     std::unique_lock<std::mutex> lk(st->mutex);
-    st->cond.wait(lk, [st]{ return !st->busy; });
     BusyScope busy(st, lk);
     waitDeviceWork(st, lk, true);
 }
@@ -914,7 +920,6 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
     checkHostAccessAllowed(st, ACCESS_READ);
     IdleCpuGuard idle(st);
     std::unique_lock<std::mutex> lk(st->mutex);
-    st->cond.wait(lk, [st]{ return !st->busy; });
     BusyScope busy(st, lk);
     waitDeviceWork(st, lk, false);
     const size_t srcOffset = offsetND(srcofs, srcstep, dims);
@@ -962,12 +967,11 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
         CV_Error_(Error::StsError, ("accel(%s): this UMat wraps read-only memory", b_->name().c_str()));
     IdleCpuGuard idle(st);
     std::unique_lock<std::mutex> lk(st->mutex);
-    st->cond.wait(lk, [st]{ return !st->busy; });
+    BusyScope busy(st, lk);
     if (st->hostMapped && u->refcount > 0)
         CV_Error(Error::StsError, "accel: cannot copy into a UMat while a Mat view of it is alive");
     if (st->hostMapped)
         endHostAccessLocked(st, u);
-    BusyScope busy(st, lk);
     const size_t dstOffset = offsetND(dstofs, dststep, dims);
     // memory without a CPU view (discrete, protected) is written by the device's copy engine;
     // data may enter protected memory, it just never comes out
