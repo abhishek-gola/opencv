@@ -464,6 +464,20 @@ void destroyBufferState(BufferState* st);
 //! true for allocators of accelerator backends: their data must never move elsewhere silently
 bool isDeviceAllocator(const MatAllocator* a);
 
+/** _OutputArray::createSameSize / fitSameSize: while it lives, an output UMat without an
+    allocator of its own is created on the device that holds @p model, so a function without an
+    accelerator hook keeps its data on the device even when it runs on the CPU. */
+class SamePlacement
+{
+public:
+    SamePlacement(const _OutputArray& out, const _InputArray& model);
+    ~SamePlacement();
+private:
+    SamePlacement(const SamePlacement&);
+    SamePlacement& operator=(const SamePlacement&);
+    UMat* out_;
+};
+
 //! both buffers live on the same device of the same accelerator backend
 bool sameAccelDevice(const UMatData* a, const UMatData* b);
 

@@ -1054,6 +1054,26 @@ bool isDeviceAllocator(const MatAllocator* a)
     return dynamic_cast<const DeviceAllocator*>(a) != NULL;
 }
 
+SamePlacement::SamePlacement(const _OutputArray& out, const _InputArray& model) : out_(NULL)
+{
+    if (out.kind() != _InputArray::UMAT || model.kind() != _InputArray::UMAT)
+        return;
+    UMat& o = out.getUMatRef();
+    if (o.allocator)
+        return;     // explicit placement wins
+    const UMat& m = *(const UMat*)model.getObj();
+    if (!m.u || !m.u->accelState || !isDeviceAllocator(m.u->currAllocator))
+        return;
+    o.allocator = const_cast<MatAllocator*>(m.u->currAllocator);
+    out_ = &o;
+}
+
+SamePlacement::~SamePlacement()
+{
+    if (out_)
+        out_->allocator = NULL;     // placement belongs to the data, not to the header
+}
+
 bool sameAccelDevice(const UMatData* a, const UMatData* b)
 {
     return a && b && a->accelState && b->accelState &&

@@ -54,7 +54,11 @@ Checked against 5.x at e13b74e9a7 (15 October 2026) with PR #30259 applied.
 3. **Correct first, then zero-copy.** The protocol decides when to wait, flush, invalidate
    or copy. When memory is shared, the copy steps disappear and the rest stays.
 4. **Where data lives does not depend on op coverage.** A cv:: call on device data produces
-   its output on that device whether the backend implemented the call or not.
+   its output on that device whether the backend implemented the call or not. Functions with
+   an accelerator hook always do. Without a hook, every output created after the shape of an
+   input (`createSameSize`, as the element-wise operations do) follows that input's device,
+   and other new outputs go where `UMat::create` puts them: the `ExecutionScope`'s device
+   inside a scope, host memory outside one, until the function gets its hook.
 5. **No hidden copies.** Every transfer is visible in `cv::accel::TransferStats`, and
    `TRANSFER_FORBID` turns implicit ones into errors.
 6. **A stable C boundary.** Backends can ship inside OpenCV or as plugins, written in C or

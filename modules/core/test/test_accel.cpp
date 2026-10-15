@@ -747,6 +747,7 @@ TEST(Core_Accel, functions_without_a_hook_still_work)
     Mat a(16, 16, CV_8UC1, Scalar(20)), b(16, 16, CV_8UC1, Scalar(22));
     UMat ua = makeOn(d, a), ub = makeOn(d, b), uc;
     cv::add(ua, ub, uc);
+    EXPECT_TRUE(d == accel::describe(uc).device);  // the result stays with its inputs
     EXPECT_EQ(0, maxDiff(Mat(16, 16, CV_8UC1, Scalar(42)), uc.getMat(ACCESS_READ)));
 }
 
