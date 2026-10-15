@@ -314,6 +314,27 @@ TEST(Core_Accel, mat_gets_back_what_was_written_through_its_umat)
     EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(5)), m));
 }
 
+TEST(Core_Accel, mat_backed_umat_stays_inside_the_mat)
+{
+    // external memory whose last row ends before its step does, followed by other data
+    const int rows = 4, cols = 6, step = 16;
+    const size_t extent = (size_t)step * (rows - 1) + cols;
+    std::vector<uchar> buf(extent + step, 0xEE);
+    Mat m(rows, cols, CV_8UC1, buf.data(), step);
+    Mat src(rows, cols, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 0);
+    {
+        accel::ExecutionScope scope(emulator(DISCRETE));
+        UMat u = m.getUMat(ACCESS_RW);
+        cv::flip(src, u, 0);                                // written on the device
+        std::fill(buf.begin() + extent, buf.end(), 0x11);   // the data after the Mat changes meanwhile
+    }
+    EXPECT_EQ(0, maxDiff(ref, m));
+    for (size_t i = extent; i < buf.size(); i++)
+        ASSERT_EQ(0x11, buf[i]) << "byte " << i << " after the Mat was overwritten";
+}
+
 TEST(Core_Accel, clone_stays_on_the_device)
 {
     accel::Device d = emulator(DISCRETE);
