@@ -12,6 +12,9 @@
 #include "test_precomp.hpp"
 
 #include <opencv2/core/accel.hpp>
+#ifdef HAVE_CUDA
+#include <opencv2/core/cuda.hpp>
+#endif
 #include <opencv2/core/utils/accel_dispatch.private.hpp>
 
 #include <fstream>
@@ -990,5 +993,104 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
     cv::flip(a, b, 1);
     EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
 }
+
+#ifdef HAVE_CUDA
+// The CUDA backend on a real GPU: memory, streams and fences. It has no kernels yet, so calls
+// run on the CPU, with their results on the GPU.
+
+static accel::Device cudaDevice()
+{
+    accel::Device d = accel::Device::find("cuda:0");
+    if (d.empty())
+        throw SkipTestException("no CUDA device");
+    return d;
+}
+
+TEST(Core_Accel_CUDA, host_round_trip_costs_one_copy_each_way)
+{
+    accel::Device d = cudaDevice();
+    Mat src(480, 640, CV_8UC3);
+    randu(src, 0, 255);
+    const uint64 bytes = (uint64)(src.total() * src.elemSize());
+    accel::resetTransferStats();
+    UMat u = makeOn(d, src);
+    EXPECT_EQ(accel::MEMORY_DEVICE, accel::describe(u).kind);
+    EXPECT_EQ(0, maxDiff(src, u.getMat(ACCESS_READ)));
+    EXPECT_EQ(0, maxDiff(src, u.getMat(ACCESS_READ)));     // the host copy is current: no second download
+    accel::TransferStats s = accel::getTransferStats();
+    EXPECT_EQ(bytes, s.bytesHostToDevice);                   // read-only CPU access never writes back
+    EXPECT_EQ(bytes, s.bytesDeviceToHost);
+}
+
+TEST(Core_Accel_CUDA, device_copies_stay_on_the_device)
+{
+    accel::Device d = cudaDevice();
+    Mat src(256, 256, CV_32FC1);
+    randu(src, -1, 1);
+    UMat u = makeOn(d, src);
+    accel::resetTransferStats();
+    UMat c = u.clone();
+    accel::TransferStats s = accel::getTransferStats();
+    EXPECT_TRUE(d == accel::describe(c).device);
+    EXPECT_EQ((uint64)(src.total() * src.elemSize()), s.bytesDeviceToDevice);
+    EXPECT_EQ(0u, s.bytesDeviceToHost + s.bytesHostToDevice);
+    EXPECT_EQ(0, maxDiff(src, c.getMat(ACCESS_READ)));
+}
+
+TEST(Core_Accel_CUDA, calls_without_kernels_keep_their_results_on_the_gpu)
+{
+    accel::Device d = cudaDevice();
+    Mat src(64, 48, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 0);
+    UMat u = makeOn(d, src), out, sum;
+    accel::resetTransferStats();
+    cv::flip(u, out, 0);                    // a hook, but no CUDA kernel yet
+    EXPECT_EQ(1u, accel::getTransferStats().cpuFallbacks);
+    EXPECT_TRUE(d == accel::describe(out).device);
+    EXPECT_EQ(0, maxDiff(ref, out.getMat(ACCESS_READ)));
+    cv::add(u, u, sum);                     // no hook at all
+    EXPECT_TRUE(d == accel::describe(sum).device);
+}
+
+TEST(Core_Accel_CUDA, wrapping_a_umat_pointer_gives_a_view_of_it)
+{
+    accel::Device d = cudaDevice();
+    UMat owner = makeOn(d, Mat(32, 32, CV_8UC1, Scalar(4)));
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.offset = 32 * 8;
+    mem.size = 32 * 8;
+    UMat rows = accel::wrapExternalMemory(d, mem, MatShape({8, 32}), CV_8UC1);
+    EXPECT_EQ(owner.u, rows.u);             // cuMemGetAddressRange: the same allocation, one state
+    EXPECT_EQ(256u, rows.offset);
+    EXPECT_EQ(4, rows.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
+TEST(Core_Accel_CUDA, user_kernels_on_the_default_stream_are_ordered)
+{
+    accel::Device d = cudaDevice();
+    UMat u = makeOn(d, Mat(64, 64, CV_8UC1, Scalar(0)));
+    {
+        accel::DeviceAccess acc(u, accel::Stream::getDefault(d), ACCESS_WRITE);
+        cuda::GpuMat g(u.rows, u.cols, u.type(), (void*)(uintptr_t)(acc.handle() + acc.offset()), u.step[0]);
+        g.setTo(Scalar(9));                 // the caller's kernel, on the legacy default stream
+    }
+    EXPECT_EQ(9, u.getMat(ACCESS_READ).at<uchar>(63, 63));
+}
+
+TEST(Core_Accel_CUDA, mat_backed_umat_gets_device_results_back)
+{
+    accel::Device d = cudaDevice();
+    Mat m(32, 32, CV_8UC1, Scalar(1));
+    {
+        accel::ExecutionScope scope(d);
+        UMat u = m.getUMat(ACCESS_RW);
+        makeOn(d, Mat(32, 32, CV_8UC1, Scalar(6))).copyTo(u);  // a copy on the GPU into it
+    }
+    EXPECT_EQ(0, maxDiff(Mat(32, 32, CV_8UC1, Scalar(6)), m));
+}
+#endif // HAVE_CUDA
 
 }} // namespace
