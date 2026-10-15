@@ -166,16 +166,18 @@ struct EmuStream
     explicit EmuStream(int device_) : device(device_), stop(false)
     {
         delayUs = utils::getConfigurationParameterSizeT("OPENCV_ACCEL_EMULATOR_DELAY_US", 0);
-        worker = std::thread([this]{ loop(); });
+        worker = std::thread([this]{ loop(); delete this; });
     }
-    ~EmuStream()
+    /** stream_destroy: returns at once, like cudaStreamDestroy. The worker finishes the queue
+        and then deletes the stream. Joining it here would deadlock: core destroys a thread's
+        streams during OpenCV's thread-exit cleanup, under a lock that the exiting worker needs
+        for its own cleanup. */
+    void retire()
     {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            stop = true;
-        }
+        worker.detach();
+        std::lock_guard<std::mutex> lk(m);  // notify under the lock: the worker cannot delete us before we let go
+        stop = true;
         cv.notify_all();
-        worker.join();  // drains the queue first
     }
     //! @p deviceWork: a kernel or a copy (as opposed to fence bookkeeping)
     void push(std::function<void()> task, bool deviceWork = false)
@@ -241,6 +243,18 @@ std::set<EmuStream*>& liveStreams()
 {
     static std::set<EmuStream*>* s = new std::set<EmuStream*>();
     return *s;
+}
+
+//! the last fence of each retired stream, so that device_synchronize still waits for its queue (under streamsMutex)
+struct DrainingFence
+{
+    int device;
+    EmuFence* fence;
+};
+std::vector<DrainingFence>& drainingFences()
+{
+    static std::vector<DrainingFence>* v = new std::vector<DrainingFence>();
+    return *v;
 }
 
 //! n-dimensional strided copy, sz[dims-1] in bytes; XOR when exactly one side is scrambled
@@ -619,16 +633,19 @@ cvAccelStatus CV_API_CALL emu_stream_create(int device, uint32_t /*flags*/, cvAc
     }
 }
 
+cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelFence* out) CV_ACCEL_NOEXCEPT;
+
 cvAccelStatus CV_API_CALL emu_stream_destroy(cvAccelStream stream) CV_ACCEL_NOEXCEPT
 {
     if (!stream)
         return CV_ACCEL_OK;
     EmuStream* s = (EmuStream*)stream;
-    {
-        std::lock_guard<std::mutex> lk(streamsMutex());
-        liveStreams().erase(s);
-    }
-    delete s;
+    std::lock_guard<std::mutex> lk(streamsMutex());
+    liveStreams().erase(s);
+    cvAccelFence f = 0;
+    if (emu_stream_record_fence(stream, &f) == CV_ACCEL_OK)
+        drainingFences().push_back(DrainingFence{s->device, (EmuFence*)f});
+    s->retire();    // s may be gone from here on
     return CV_ACCEL_OK;
 }
 
@@ -709,6 +726,23 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
             cvAccelFence f = 0;
             if (emu_stream_record_fence((cvAccelStream)*it, &f) == CV_ACCEL_OK)
                 fences.push_back((EmuFence*)f);
+        }
+        // retired streams may still be draining their queues
+        std::vector<DrainingFence>& draining = drainingFences();
+        for (size_t i = 0; i < draining.size(); )
+        {
+            if (draining[i].fence->wait(0))
+            {
+                draining[i].fence->release();
+                draining.erase(draining.begin() + i);
+                continue;
+            }
+            if (draining[i].device == device)
+            {
+                draining[i].fence->refs++;
+                fences.push_back(draining[i].fence);
+            }
+            i++;
         }
     }
     for (size_t i = 0; i < fences.size(); i++)
