@@ -44,6 +44,9 @@ enum RunResult
 //! true once at least one accelerator backend is registered (cheap)
 CV_EXPORTS bool isActive();
 
+//! true while an ExecutionScope that names a device is active on the calling thread (cheap)
+CV_EXPORTS bool inExecutionScope();
+
 //! true while the calling thread runs the CPU fallback of an accelerator call
 CV_EXPORTS bool isOpenCLSuppressed();
 
@@ -153,7 +156,7 @@ private:
 //! @cond IGNORED
 #define CV_ACCEL_RUN_(condition, func, ...) \
     cv::accel::detail::OpenCLSuppressor __cv_accel_ocl_suppressor; \
-    if ((condition) && cv::accel::detail::isActive()) \
+    if (cv::accel::detail::isActive() && ((condition) || cv::accel::detail::inExecutionScope())) \
     { \
         int __cv_accel_result = (func); \
         if (__cv_accel_result == cv::accel::detail::HANDLED) \

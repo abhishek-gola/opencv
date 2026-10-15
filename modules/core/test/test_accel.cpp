@@ -417,6 +417,22 @@ TEST(Core_Accel, mat_backed_umat_stays_inside_the_mat)
         ASSERT_EQ(0x11, buf[i]) << "byte " << i << " after the Mat was overwritten";
 }
 
+TEST(Core_Accel, mat_calls_inside_a_scope_run_on_its_device)
+{
+    Mat src(16, 24, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 0);
+    for (int dev : {DISCRETE, COHERENT})
+    {
+        accel::ExecutionScope scope(emulator(dev));
+        accel::resetTransferStats();
+        Mat dst;
+        cv::flip(src, dst, 0);          // Mat in, Mat out: still the scope's device
+        EXPECT_EQ(1u, accel::getTransferStats().deviceOps) << "device " << dev;
+        EXPECT_EQ(0, maxDiff(ref, dst));
+    }
+}
+
 TEST(Core_Accel, clone_stays_on_the_device)
 {
     accel::Device d = emulator(DISCRETE);

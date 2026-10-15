@@ -780,6 +780,12 @@ bool isActive()
     return impl::activity().load(std::memory_order_relaxed) > 0;
 }
 
+bool inExecutionScope()
+{
+    const impl::ScopeEntry* s = impl::currentScope();
+    return s && s->backendId != 0;
+}
+
 bool isOpenCLSuppressed()
 {
     if (impl::oclSuppressCount().load(std::memory_order_relaxed) == 0)
