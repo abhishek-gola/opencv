@@ -508,6 +508,41 @@ TEST(Core_Accel, host_outputs_are_written_in_place_when_the_device_can)
     EXPECT_EQ(0, maxDiff(ref, same));
 }
 
+TEST(Core_Accel, device_choice_follows_coverage)
+{
+    // the input's device lacks the operation, the output's device has it
+    Mat src(16, 16, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 1);
+    UMat in = makeOn(emulator(DISCRETE), src);
+    UMat out = makeOn(emulator(COHERENT), Mat::zeros(16, 16, CV_8UC1));
+    accel::detail::emulatorDisableOps(DISCRETE, true);
+    accel::resetTransferStats();
+    cv::flip(in, out, 1);
+    accel::detail::emulatorDisableOps(DISCRETE, false);
+    EXPECT_EQ(1u, accel::getTransferStats().deviceOps);    // not a CPU fallback
+    EXPECT_EQ(0u, accel::getTransferStats().cpuFallbacks);
+    EXPECT_EQ(0, maxDiff(ref, out.getMat(ACCESS_READ)));
+}
+
+TEST(Core_Accel, device_choice_follows_transfer_cost)
+{
+    // a call with a small input on the discrete device, a large one on the coherent device: the
+    // coherent device moves 64 bytes, the discrete one would move 4096
+    UMat small = makeOn(emulator(DISCRETE), Mat(8, 8, CV_8UC1, Scalar(5)));
+    UMat large = makeOn(emulator(COHERENT), Mat(64, 64, CV_8UC1, Scalar(1)));
+    UMat out;
+    accel::detail::OpCall call("test.two_inputs", CV_ACCEL_OPS_CORE, CV_ACCEL_OPS_CORE_VERSION);
+    call.input(small);
+    call.input(large);
+    call.output(out, small.shape(), small.type());
+    EXPECT_EQ(accel::detail::HANDLED, call.run([](const void* t, const cvAccelCall* c, const cvAccelView* v) {
+        return ((const cvAccelOpsCore_v0*)t)->flip(c, &v[0], &v[2], 1);    // the large input is only read
+    }));
+    EXPECT_TRUE(emulator(COHERENT) == accel::describe(out).device);
+    EXPECT_EQ(5, out.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
 TEST(Core_Accel, clone_stays_on_the_device)
 {
     accel::Device d = emulator(DISCRETE);

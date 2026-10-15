@@ -71,6 +71,9 @@ std::atomic<int> g_managedCpuAccess(0);
 std::atomic<int> g_managedDeviceWork(0);
 std::atomic<long long> g_violations(0);
 
+//! devices whose kernels report NOT_IMPLEMENTED (emulatorDisableOps): a device without the operation
+std::atomic<bool> g_opsDisabled[EMU_DEVICES];
+
 //! one-shot (emulatorFailNextCpuFlush): the next end_cpu_access after a CPU write fails
 std::atomic<bool> g_failNextFlush(false);
 
@@ -1006,6 +1009,8 @@ cvAccelStatus CV_API_CALL emu_flip(const cvAccelCall* call, const cvAccelView* s
 {
     if (deviceLost(call->device))
         return lostError();
+    if (call->device >= 0 && call->device < EMU_DEVICES && g_opsDisabled[call->device].load())
+        return CV_ACCEL_NOT_IMPLEMENTED;
     try
     {
         if (!addressable(src) || !addressable(dst) || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
@@ -1030,6 +1035,8 @@ cvAccelStatus CV_API_CALL emu_transpose(const cvAccelCall* call, const cvAccelVi
 {
     if (deviceLost(call->device))
         return lostError();
+    if (call->device >= 0 && call->device < EMU_DEVICES && g_opsDisabled[call->device].load())
+        return CV_ACCEL_NOT_IMPLEMENTED;
     try
     {
         if (!addressable(src) || !addressable(dst) || src->dims != 2 || dst->dims != 2 || src->type != dst->type)
@@ -1178,6 +1185,12 @@ int emulatorDmaBufAttachedFences(int64 fd)
     CV_Assert(buf);
     std::lock_guard<std::mutex> lk(buf->m);
     return buf->attached;
+}
+
+void emulatorDisableOps(int device, bool disable)
+{
+    CV_Assert(0 <= device && device < impl::EMU_DEVICES);
+    impl::g_opsDisabled[device].store(disable);
 }
 
 void emulatorFailNextCpuFlush()

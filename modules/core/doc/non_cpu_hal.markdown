@@ -314,8 +314,11 @@ and temporaries that do not exist yet are described by the backend itself
 
 ### Choosing the device
 
-The innermost `cv::accel::ExecutionScope` of the calling thread wins. Otherwise the call
-runs on the device of the first argument that lives on one ("compute follows data"). For
+The innermost `cv::accel::ExecutionScope` of the calling thread wins. Otherwise every device
+that holds an argument is a candidate: the dispatcher plans the call for each, asks its
+backend (QUERY, free of side effects), and picks the device that accepts and copies the fewest
+bytes, the earlier argument's device on a tie ("compute follows data", weighed by coverage and
+transfer cost). For
 each argument the dispatcher plans one of four things: use its memory in place (the device
 can access it), upload it into a temporary, create the output on the device, or produce the
 output in a temporary and copy it to where the caller keeps it (a Mat, a UMat on another

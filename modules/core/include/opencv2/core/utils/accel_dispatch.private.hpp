@@ -79,6 +79,9 @@ device fail at once; OpenCV keeps a lost device lost for the rest of the process
 test may use it, at its end. */
 CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
 
+//! the kernels of @p device report NOT_IMPLEMENTED while @p disable holds (a device without the operation)
+CV_EXPORTS void emulatorDisableOps(int device, bool disable);
+
 //! makes the next end_cpu_access after a CPU write fail (on any emulator device), once
 CV_EXPORTS void emulatorFailNextCpuFlush();
 
