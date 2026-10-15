@@ -204,6 +204,28 @@ TEST(Core_Accel, partial_device_write_keeps_the_rest_of_the_buffer)
     EXPECT_EQ(0, maxDiff(ref, u.getMat(ACCESS_READ)));
 }
 
+TEST(Core_Accel, partly_written_output_keeps_the_rest)
+{
+    // an operation that writes the top half of its output only (fullOverwrite = false); the
+    // output is a Mat, so the device writes a temporary that is then copied into it
+    accel::Device d = emulator(DISCRETE);
+    Mat src(8, 8, CV_8UC1), dst(8, 8, CV_8UC1, Scalar(5));
+    randu(src, 0, 255);
+    UMat usrc = makeOn(d, src);
+    accel::detail::OpCall call("test.flip_top_half", CV_ACCEL_OPS_CORE, CV_ACCEL_OPS_CORE_VERSION);
+    call.input(usrc);
+    call.output(dst, src.shape(), src.type(), false);
+    EXPECT_EQ(accel::detail::HANDLED, call.run([](const void* t, const cvAccelCall* c, const cvAccelView* v) {
+        cvAccelView half[2] = { v[0], v[1] };
+        half[0].size[0] /= 2;
+        half[1].size[0] /= 2;
+        return ((const cvAccelOpsCore_v0*)t)->flip(c, &half[0], &half[1], 1);
+    }));
+    Mat ref(8, 8, CV_8UC1, Scalar(5));
+    cv::flip(src.rowRange(0, 4), ref.rowRange(0, 4), 1);
+    EXPECT_EQ(0, maxDiff(ref, dst));
+}
+
 TEST(Core_Accel, in_place_operation)
 {
     accel::Device d = emulator(DISCRETE);
