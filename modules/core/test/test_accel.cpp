@@ -489,6 +489,39 @@ TEST(Core_Accel, wrapped_device_memory_reads_its_content)
     }
 }
 
+TEST(Core_Accel, dma_buf_fences_of_other_drivers_are_honoured)
+{
+    // a dma-buf that another driver (a camera) fills: the frame is valid once its fence completes
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(16 * 16);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DMABUF_FD;
+    mem.handle = fd;
+    mem.size = 16 * 16;
+    UMat frame = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+
+    accel::detail::emulatorDmaBufProduce(fd, 9, 20000);    // the camera writes 9s, 20 ms from now
+    UMat out;
+    cv::flip(frame, out, 1);                                // the device waits for the camera's fence
+    EXPECT_EQ(9, out.getMat(ACCESS_READ).at<uchar>(0, 0));
+
+    accel::detail::emulatorDmaBufProduce(fd, 4, 20000);
+    EXPECT_EQ(4, frame.getMat(ACCESS_READ).at<uchar>(0, 0));   // and so does the CPU
+
+    const int attached = accel::detail::emulatorDmaBufAttachedFences(fd);
+    UMat src = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(5)));
+    cv::flip(src, frame, 0);                                // a device write into the dma-buf...
+    EXPECT_GT(accel::detail::emulatorDmaBufAttachedFences(fd), attached);  // ...hands its fence on
+}
+
+TEST(Core_Accel, device_access_checks_the_stream)
+{
+    UMat u = makeOn(emulator(DISCRETE), Mat(4, 4, CV_8UC1, Scalar(1)));
+    accel::Stream other = accel::Stream::getDefault(emulator(COHERENT));
+    EXPECT_THROW({ accel::DeviceAccess acc(u, other, ACCESS_READ); }, cv::Exception);  // a device that cannot reach it
+    EXPECT_NO_THROW({ accel::DeviceAccess acc(u, accel::Stream::getDefault(emulator(DISCRETE)), ACCESS_READ); });
+}
+
 TEST(Core_Accel, functions_without_a_hook_still_work)
 {
     // cv::add has no accelerator hook: OpenCL (if active) must decline the device memory

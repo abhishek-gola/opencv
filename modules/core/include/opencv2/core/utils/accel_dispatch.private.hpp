@@ -79,6 +79,14 @@ CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
 //! makes the next end_cpu_access after a CPU write fail (on any emulator device), once
 CV_EXPORTS void emulatorFailNextCpuFlush();
 
+/** @brief A simulated dma-buf of @p size bytes, shared with other "drivers"; returns its fd for
+ExternalMemory::DMABUF_FD on "emulator:1". */
+CV_EXPORTS int64 emulatorCreateDmaBuf(size_t size);
+//! another driver (a camera, say) writes @p value into the whole dma-buf @p delayUs from now; users wait for it
+CV_EXPORTS void emulatorDmaBufProduce(int64 fd, int value, int delayUs);
+//! how many fences OpenCV has attached to the dma-buf so far (end_device_access)
+CV_EXPORTS int emulatorDmaBufAttachedFences(int64 fd);
+
 /** @brief Disables the OpenCL path for the rest of the current cv:: call.
 
 Data on an accelerator cannot be used by OpenCL kernels; letting the OpenCL path try would

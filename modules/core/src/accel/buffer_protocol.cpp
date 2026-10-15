@@ -177,6 +177,38 @@ void clearPoison(BufferState* st)
     st->poisonReason.clear();
 }
 
+/** Memory with implicit fences of other drivers (CV_ACCEL_MEMF_EXTERNAL_SYNC, e.g. a camera's
+    dma-buf): device work on it waits for their fences, and they wait for the work's fence. */
+void beginExternal(BufferState* st, const StreamPtr& s, int access)
+{
+    Backend* b = st->backend;
+    if (!(st->alloc.desc.flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) || !b->fn().begin_device_access)
+        return;
+    b->check(b->fn().begin_device_access(&st->alloc, s->handle, (uint32_t)access), "begin_device_access", st->device);
+}
+
+//! never throws: runs when the work is already queued
+void endExternal(BufferState* st, const FenceRef& f, int access) CV_NOEXCEPT
+{
+    Backend* b = st->backend;
+    if (!(st->alloc.desc.flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) || !b->fn().end_device_access || f.empty())
+        return;
+    if (b->fn().end_device_access(&st->alloc, f.get(), (uint32_t)access) != CV_ACCEL_OK)
+    {
+        try
+        {
+            CV_LOG_ERROR(NULL, "accel(" << b->name() << "): end_device_access failed, other drivers may not wait for "
+                         "this work: " << b->fn().get_last_error());
+        }
+        catch (...) {}
+    }
+}
+
+int accessOfMode(int mode)
+{
+    return ((mode & DEV_READ) ? ACCESS_READ : 0) | ((mode & DEV_WRITE) ? ACCESS_WRITE : 0);
+}
+
 void checkNotPoisoned(const BufferState* st)
 {
     if (st->poisoned)
@@ -293,8 +325,10 @@ void downloadWhole(BufferState* st)
     FenceRef f;
     try
     {
+        beginExternal(st, s, ACCESS_READ);
         b->check(b->fn().copy(st->device, s->handle, &r), "copy (device to host)", st->device);
         f = recordFence(s);
+        endExternal(st, f, ACCESS_READ);
         f.wait();
     }
     catch (...)
@@ -335,8 +369,10 @@ void uploadShadowLocked(BufferState* st, UMatData* u, const StreamPtr& s, bool w
     FenceRef f;
     try
     {
+        beginExternal(st, s, ACCESS_WRITE);
         uploadWhole(st, s);
         f = recordFence(s);
+        endExternal(st, f, ACCESS_WRITE);
         if (waitNow)
             f.wait();
     }
@@ -804,6 +840,8 @@ bool DeviceAcquisition::acquire(const StreamPtr& stream, std::vector<FenceRef>& 
                 return false;
             }
         }
+        for (size_t i = 0; i < uses_.size(); i++)
+            beginExternal(uses_[i].u->accelState, stream, accessOfMode(uses_[i].mode));
     }
     catch (...)
     {
@@ -816,14 +854,20 @@ bool DeviceAcquisition::acquire(const StreamPtr& stream, std::vector<FenceRef>& 
 void DeviceAcquisition::record(const FenceRef& fence)
 {
     for (size_t i = 0; i < acquired_; i++)
+    {
+        endExternal(uses_[i].u->accelState, fence, accessOfMode(uses_[i].mode));
         finishOne(uses_[i].u, uses_[i].mode, longHold_, holder_, &fence);
+    }
     acquired_ = 0;
 }
 
 void DeviceAcquisition::fail(const FenceRef& fence, const std::string& reason)
 {
     for (size_t i = 0; i < acquired_; i++)
+    {
+        endExternal(uses_[i].u->accelState, fence, accessOfMode(uses_[i].mode));
         finishOne(uses_[i].u, uses_[i].mode, longHold_, holder_, &fence, reason.c_str());
+    }
     acquired_ = 0;
 }
 
@@ -1242,8 +1286,10 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
         FenceRef f;
         try
         {
+            beginExternal(st, s, ACCESS_READ);
             b_->check(b_->fn().copy(device_, s->handle, &r), "copy (device to host)", device_);
             f = recordFence(s);
+            endExternal(st, f, ACCESS_READ);
             f.wait();   // the destination is user memory
         }
         catch (...)
@@ -1324,8 +1370,10 @@ void DeviceAllocator::upload(UMatData* u, const void* srcptr, int dims, const si
         FenceRef f;
         try
         {
+            beginExternal(st, s, ACCESS_WRITE);
             b_->check(b_->fn().copy(device_, s->handle, &r), "copy (host to device)", device_);
             f = recordFence(s);
+            endExternal(st, f, ACCESS_WRITE);
             lk.unlock();
             f.wait();   // the source is user memory that may be freed when we return
             lk.lock();

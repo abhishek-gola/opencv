@@ -407,6 +407,9 @@ bool Backend::canAccess(int device, const cvAccelMemoryDesc& desc)
         return true;
     if (!fn().can_access)
         return false;
+    // implicit fences are bracketed by the owning backend only (begin/end_device_access)
+    if (desc.backend_id != (uint32_t)id_ && (desc.flags & CV_ACCEL_MEMF_EXTERNAL_SYNC))
+        return false;
     const int own = desc.backend_id == (uint32_t)id_ ? (int)desc.device_index : -1;
     return fn().can_access(device, &desc, own) == CV_ACCEL_OK;
 }
@@ -1087,6 +1090,15 @@ DeviceAccess::DeviceAccess(const UMat& m, const Stream& stream, AccessFlag acces
 {
     CV_Assert(m.u && m.u->accelState && "accel: DeviceAccess needs a UMat allocated on a device");
     CV_Assert(!stream.empty());
+    // the caller's work runs on that stream with this memory's handle
+    const BufferState* st = m.u->accelState;
+    const StreamPtr& sp = stream.impl->s;
+    if (sp->backend != st->backend)
+        CV_Error_(Error::StsBadArg, ("accel: DeviceAccess: the stream belongs to backend '%s', the UMat to '%s'",
+                                     sp->backend->name().c_str(), st->backend->name().c_str()));
+    if (sp->device != st->device && !sp->backend->canAccess(sp->device, st->alloc.desc))
+        CV_Error_(Error::StsBadArg, ("accel: DeviceAccess: device %d cannot reach the UMat's memory on device %d",
+                                     sp->device, st->device));
     std::unique_ptr<Impl> impl_(new Impl());
     impl_->m = m;
     impl_->s = stream.impl->s;
