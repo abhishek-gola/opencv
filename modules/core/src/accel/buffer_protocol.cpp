@@ -1006,6 +1006,10 @@ UMatData* DeviceAllocator::wrap(const cvAccelExternalMemory& ext, size_t total) 
     if (!b_->fn().import_memory)
         CV_Error_(Error::StsNotImplemented, ("accel(%s): the backend cannot import external memory", b_->name().c_str()));
     const void* hostPtr = ext.type == CV_ACCEL_EXTMEM_HOST_POINTER ? (const void*)((uchar*)(intptr_t)ext.handle + ext.offset) : 0;
+    const uint32_t align = hostPtr ? b_->deviceInfo(device_).host_import_alignment : 0;
+    if (align > 1 && (uintptr_t)hostPtr % align != 0)
+        CV_Error_(Error::StsBadArg, ("accel(%s): the device imports host memory on %u-byte boundaries only; "
+                                     "copy it into a UMat instead", b_->name().c_str(), (unsigned)align));
     if (hostPtr && !b_->reserveHostImport(device_, hostPtr, (size_t)ext.size))
         CV_Error_(Error::StsError, ("accel(%s): this host memory overlaps memory that is already imported "
                                     "(pinning works on whole pages); copy it into a UMat instead", b_->name().c_str()));
@@ -1018,6 +1022,21 @@ UMatData* DeviceAllocator::wrap(const cvAccelExternalMemory& ext, size_t total) 
         CV_Error_(Error::StsNotImplemented, ("accel(%s): this kind of external memory cannot be imported "
                                              "(type %d); copy it into a UMat instead", b_->name().c_str(), (int)ext.type));
     b_->check(status, "import_memory", device_);
+    if (hostPtr && a.desc.host_access == CV_ACCEL_HOST_ACCESS_NONCOHERENT)
+    {
+        // cache maintenance works on whole granules: a partial one at either end would write
+        // back or drop bytes of the data next to it (backend rule 3)
+        const uint64_t g = a.desc.coherence_granule;
+        if (g == 0 || (uintptr_t)hostPtr % g != 0 || ext.size % g != 0)
+        {
+            if (b_->fn().deallocate(&a) != CV_ACCEL_OK)
+                CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): failed to release an import: " << b_->fn().get_last_error());
+            b_->releaseHostImport(device_, hostPtr);
+            CV_Error_(Error::StsBadArg, ("accel(%s): host memory imported without cache coherence must start and end "
+                                         "on %u-byte boundaries; copy it into a UMat instead",
+                                         b_->name().c_str(), (unsigned)g));
+        }
+    }
     CV_Assert(a.size >= total);
     UMatData* u = new UMatData(this);
     u->size = total;

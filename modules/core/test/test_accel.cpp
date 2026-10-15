@@ -411,6 +411,12 @@ TEST(Core_Accel, wrapped_host_memory_and_overlapping_imports)
 
     w.release();    // waits for the device: the memory goes back to its owner
     EXPECT_NO_THROW(accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1));
+
+    // this device imports host memory on 64-byte boundaries only
+    accel::ExternalMemory odd = mem;
+    odd.handle = (int64)(intptr_t)(p + 1);
+    odd.size = 63 * 64;
+    EXPECT_THROW(accel::wrapExternalMemory(d, odd, MatShape({63, 64}), CV_8UC1), cv::Exception);
 }
 
 TEST(Core_Accel, wrapped_device_memory_reads_its_content)

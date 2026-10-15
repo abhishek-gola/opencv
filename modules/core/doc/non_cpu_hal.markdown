@@ -401,7 +401,8 @@ the DNN CUDA backend to UMat buffers, which is the precondition.
 | protected memory, tiled layouts | CPU access and CPU fallback throw | `checkHostAccessAllowed` |
 | read-only imported memory | device writes refused, CPU write views throw | `acquireForDevice` |
 | pageable memory in a DMA | host copies are pinned; user Mats are not pinned implicitly | `ensureShadow` |
-| overlapping or misaligned host imports | refused, the caller copies | `Backend::reserveHostImport` |
+| overlapping host imports | refused, the caller copies | `Backend::reserveHostImport` |
+| misaligned host imports (device alignment; cache-line granule for non-coherent memory) | refused, the caller copies | `DeviceAllocator::wrap` |
 | two devices of one backend | peer access if the backend allows, else a staged copy | `can_access` |
 | two backends | staged copy, counted as a transfer | `UMat::copyTo` |
 | legacy and user allocators | describe themselves or keep their old behaviour | `getMemoryDesc` |

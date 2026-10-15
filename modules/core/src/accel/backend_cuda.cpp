@@ -178,8 +178,10 @@ cvAccelStatus CV_API_CALL cu_get_device_info(int device, cvAccelDeviceInfo* info
         info->caps |= CV_ACCEL_CAP_DEVICE_IDLE_MEMORY;  // managed memory faults on the CPU while a kernel runs
     if (p.hostRegisterSupported)
     {
+        // any address: the driver pins whole pages, and core refuses two imports that share a
+        // page (cudaHostRegister would fail with cudaErrorHostMemoryAlreadyRegistered)
         info->caps |= CV_ACCEL_CAP_IMPORT_HOST_PTR;
-        info->host_import_alignment = 4096;  // whole pages: overlapping registrations fail
+        info->host_import_alignment = 0;
     }
     info->preferred_kind = p.prop.integrated ? CV_ACCEL_MEM_SHARED : CV_ACCEL_MEM_DEVICE;
     return CV_ACCEL_OK;
