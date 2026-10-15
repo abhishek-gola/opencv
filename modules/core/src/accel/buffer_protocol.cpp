@@ -925,8 +925,8 @@ static bool readyToFree(BufferState* st)
 
 //////////////////////////////////// DeviceAllocator ////////////////////////////////////
 
-DeviceAllocator::DeviceAllocator(Backend* b, int device, int kind)
-    : b_(b), device_(device), kind_(kind)
+DeviceAllocator::DeviceAllocator(Backend* b, int device, int kind, bool protectedMem)
+    : b_(b), device_(device), kind_(kind), protected_(protectedMem)
 {}
 
 int DeviceAllocator::kindFor(UMatUsageFlags usageFlags) const
@@ -980,17 +980,28 @@ UMatData* DeviceAllocator::allocate(int dims, const int* sizes, int type, void* 
     cvAccelAllocation a;
     memset(&a, 0, sizeof(a));
     const int kind = kindFor(usageFlags);
+    const uint32_t allocFlags = protected_ ? CV_ACCEL_MEMF_PROTECTED : 0;
     cvAccelStatus status = CV_ACCEL_OK;
     if (total > 0)
     {
-        status = b_->fn().allocate(device_, total, (uint32_t)kind, 0, &a);
+        status = b_->fn().allocate(device_, total, (uint32_t)kind, allocFlags, &a);
         if (status == CV_ACCEL_OUT_OF_MEMORY)
         {
             // memory held by buffers that are released but still in flight
             b_->collectDeferred(true);
-            status = b_->fn().allocate(device_, total, (uint32_t)kind, 0, &a);
+            status = b_->fn().allocate(device_, total, (uint32_t)kind, allocFlags, &a);
         }
+        if (protected_ && status == CV_ACCEL_NOT_IMPLEMENTED)
+            CV_Error_(Error::StsNotImplemented, ("accel(%s): device %d has no protected memory for results "
+                                                 "computed from protected content", b_->name().c_str(), device_));
         b_->check(status, "allocate", device_);
+        if (protected_ && !(a.desc.flags & CV_ACCEL_MEMF_PROTECTED))
+        {
+            if (b_->fn().deallocate(&a) != CV_ACCEL_OK)
+                CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): failed to free device memory: " << b_->fn().get_last_error());
+            CV_Error_(Error::StsError, ("accel(%s): the backend returned ordinary memory for protected content",
+                                        b_->name().c_str()));
+        }
     }
     UMatData* u = new UMatData(this);
     u->size = total;
@@ -1343,6 +1354,10 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
 {
     // two buffers of one device (the same buffer for a copy between its ROIs): a device copy
     CV_Assert(src->accelState && dst->accelState);
+    if ((src->accelState->alloc.desc.flags & CV_ACCEL_MEMF_PROTECTED) &&
+        !(dst->accelState->alloc.desc.flags & CV_ACCEL_MEMF_PROTECTED))
+        CV_Error_(Error::StsError, ("accel(%s): protected content cannot be copied into ordinary memory",
+                                    b_->name().c_str()));
     StreamPtr s = b_->defaultStream(device_);
     const size_t srcOffset = offsetND(srcofs, srcstep, dims);
     const size_t dstOffset = offsetND(dstofs, dststep, dims);

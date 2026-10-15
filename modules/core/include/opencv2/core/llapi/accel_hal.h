@@ -325,7 +325,9 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     //! @{
     /** Allocates @p size bytes of the requested kind. The backend may return another kind
         (e.g. MANAGED when SHARED is requested on a discrete GPU) but desc must describe the
-        result truthfully. backend_id in desc is filled in by core. */
+        result truthfully. backend_id in desc is filled in by core. @p flags may hold
+        CV_ACCEL_MEMF_PROTECTED: protected memory, for results computed from protected
+        content; a device without any returns CV_ACCEL_NOT_IMPLEMENTED. */
     cvAccelStatus (CV_API_CALL *allocate)(int device, uint64_t size, uint32_t kind, uint32_t flags,
                                           cvAccelAllocation* out) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *deallocate)(cvAccelAllocation* alloc) CV_ACCEL_NOEXCEPT;

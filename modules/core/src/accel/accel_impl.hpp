@@ -159,7 +159,8 @@ public:
     StreamPtr defaultStream(int device);
 
     //! the generic allocator for @p device and memory kind (cvAccelMemoryKind), never released
-    MatAllocator* allocator(int device, int kind);
+    //! @p protectedMem: allocations for results computed from protected content
+    MatAllocator* allocator(int device, int kind, bool protectedMem = false);
 
     //! takes ownership of a released buffer whose device work may still be running
     void deferRelease(BufferState* st);
@@ -388,7 +389,7 @@ private:
 class DeviceAllocator CV_FINAL : public MatAllocator
 {
 public:
-    DeviceAllocator(Backend* b, int device, int kind);
+    DeviceAllocator(Backend* b, int device, int kind, bool protectedMem = false);
 
     UMatData* allocate(int dims, const int* sizes, int type, void* data, size_t* step,
                        AccessFlag flags, UMatUsageFlags usageFlags) const CV_OVERRIDE;
@@ -419,6 +420,7 @@ private:
     Backend* b_;
     int device_;
     int kind_;
+    bool protected_;    //!< allocates protected memory (CV_ACCEL_MEMF_PROTECTED)
 };
 
 //! frees the backend memory of a released buffer and deletes @p st (fences must be complete)

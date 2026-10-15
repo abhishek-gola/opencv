@@ -304,18 +304,30 @@ cvAccelStatus CV_API_CALL emu_get_device_info(int device, cvAccelDeviceInfo* inf
     return CV_ACCEL_OK;
 }
 
-//! what memory of @p kind on @p device is; one answer for allocate and describe_allocation
-void describeKind(int device, uint32_t kind, cvAccelMemoryDesc& d)
+/** What memory of @p kind on @p device is: one answer for allocate and describe_allocation.
+    False when the device has none: protected memory exists on the discrete-like devices only,
+    as on a GPU with a secure mode. */
+bool describeKind(int device, uint32_t kind, uint32_t flags, cvAccelMemoryDesc& d)
 {
     memset(&d, 0, sizeof(d));
     d.device_index = (uint32_t)device;
     d.base_alignment = CV_MALLOC_ALIGN;
+    if (flags & CV_ACCEL_MEMF_PROTECTED)
+    {
+        if (kind == CV_ACCEL_MEM_HOST_PINNED || !(device == EMU_DISCRETE || device == EMU_FAILING || device == EMU_PROTECTED))
+            return false;
+        d.kind = CV_ACCEL_MEM_DEVICE;
+        d.host_access = CV_ACCEL_HOST_ACCESS_NONE;
+        d.handle_kind = device == EMU_PROTECTED ? CV_ACCEL_HANDLE_OPAQUE : CV_ACCEL_HANDLE_DEVICE_POINTER;
+        d.flags = CV_ACCEL_MEMF_PROTECTED;
+        return true;
+    }
     if (kind == CV_ACCEL_MEM_HOST_PINNED)
     {
         d.kind = CV_ACCEL_MEM_HOST_PINNED;
         d.host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
         d.handle_kind = CV_ACCEL_HANDLE_HOST_POINTER;
-        return;
+        return true;
     }
     switch (device)
     {
@@ -348,24 +360,29 @@ void describeKind(int device, uint32_t kind, cvAccelMemoryDesc& d)
         d.flags |= CV_ACCEL_MEMF_PROTECTED;
         break;
     }
+    return true;
 }
 
-cvAccelStatus CV_API_CALL emu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t /*flags*/,
+cvAccelStatus CV_API_CALL emu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t flags,
                                                   cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT
 {
     if (!desc || device < 0 || device >= EMU_DEVICES)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
-    describeKind(device, kind, *desc);
+    if (!describeKind(device, kind, flags, *desc))
+        return fail(CV_ACCEL_NOT_IMPLEMENTED, "no protected memory on this device");
     return CV_ACCEL_OK;
 }
 
-cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind, uint32_t /*flags*/,
+cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind, uint32_t flags,
                                        cvAccelAllocation* out) CV_ACCEL_NOEXCEPT
 {
     if (!out || device < 0 || device >= EMU_DEVICES)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     if (deviceLost(device))
         return lostError();
+    cvAccelMemoryDesc desc;
+    if (!describeKind(device, kind, flags, desc))
+        return fail(CV_ACCEL_NOT_IMPLEMENTED, "no protected memory on this device");
     try
     {
         memset(out, 0, sizeof(*out));
@@ -377,7 +394,7 @@ cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind,
         a->cpuView = a->mem;
         a->cpuOpen = false;
         cvAccelMemoryDesc& d = out->desc;
-        describeKind(device, kind, d);
+        d = desc;
         a->kind = d.kind;
         a->scrambled = isScrambledDesc(d, device);
         if (d.host_access == CV_ACCEL_HOST_ACCESS_NONCOHERENT)
@@ -437,11 +454,13 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->owned = false;
             a->scrambled = true;
             a->cpuOpen = false;
+            // a protected source (a secure decoder's frame, say) stays protected
+            const bool prot = (ext->flags & CV_ACCEL_MEMF_PROTECTED) != 0;
             out->desc.device_index = (uint32_t)device;
             out->desc.kind = CV_ACCEL_MEM_DEVICE;
-            out->desc.host_access = CV_ACCEL_HOST_ACCESS_COPY;
+            out->desc.host_access = prot ? CV_ACCEL_HOST_ACCESS_NONE : CV_ACCEL_HOST_ACCESS_COPY;
             out->desc.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
-            out->desc.flags = CV_ACCEL_MEMF_IMPORTED | (ext->flags & CV_ACCEL_MEMF_READ_ONLY);
+            out->desc.flags = CV_ACCEL_MEMF_IMPORTED | (ext->flags & (CV_ACCEL_MEMF_READ_ONLY | CV_ACCEL_MEMF_PROTECTED));
             out->handle = (uint64_t)(uintptr_t)a->mem;
             out->size = ext->size;
             out->backend_data = a;

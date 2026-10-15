@@ -240,7 +240,10 @@ see the same DRAM:
    writes into memory that was reused. Imported memory goes back to its owner only after the
    device is done.
 8. **Protected memory.** Data can be uploaded into it and processed on the device, but it
-   never reaches the CPU: `getMat`, downloads and CPU fallbacks throw.
+   never reaches the CPU: `getMat`, downloads and CPU fallbacks throw. Whatever is computed
+   from it stays protected: outputs and temporaries of the call are allocated protected
+   (`CV_ACCEL_MEMF_PROTECTED` in `allocate`), and an ordinary output, a Mat output or a
+   device copy into ordinary memory is refused.
 9. **Imported dma-bufs.** Buffers from cameras, decoders or displays may carry implicit
    fences. The backend waits for them before use and attaches its own fence after writing
    (`DMA_BUF_IOCTL_EXPORT_SYNC_FILE` / `IMPORT_SYNC_FILE`), so other drivers stay ordered.

@@ -218,20 +218,24 @@ uint32_t describeKind(const DeviceProps& p, int device, uint32_t kind, cvAccelMe
     return d.kind;
 }
 
-cvAccelStatus CV_API_CALL cu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t /*flags*/,
+cvAccelStatus CV_API_CALL cu_describe_allocation(int device, uint64_t /*size*/, uint32_t kind, uint32_t flags,
                                                  cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT
 {
     if (device < 0 || device >= (int)devices().size() || !desc)
         return CV_ACCEL_INVALID_ARGUMENT;
+    if (flags & CV_ACCEL_MEMF_PROTECTED)
+        return CV_ACCEL_NOT_IMPLEMENTED;    // CUDA has no protected memory
     describeKind(devices()[device], device, kind, *desc);
     return CV_ACCEL_OK;
 }
 
-cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, uint32_t /*flags*/,
+cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, uint32_t flags,
                                       cvAccelAllocation* out) CV_ACCEL_NOEXCEPT
 {
     if (device < 0 || device >= (int)devices().size() || !out)
         return CV_ACCEL_INVALID_ARGUMENT;
+    if (flags & CV_ACCEL_MEMF_PROTECTED)
+        return CV_ACCEL_NOT_IMPLEMENTED;    // CUDA has no protected memory
     const DeviceProps& p = devices()[device];
     DeviceGuard guard(device);
     memset(out, 0, sizeof(*out));

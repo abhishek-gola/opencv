@@ -436,16 +436,16 @@ StreamPtr Backend::defaultStream(int device)
     return s;
 }
 
-MatAllocator* Backend::allocator(int device, int kind)
+MatAllocator* Backend::allocator(int device, int kind, bool protectedMem)
 {
     std::lock_guard<std::mutex> lk(mutex_);
     enumerate();
     CV_Assert(0 <= device && device < (int)devices_.size());
-    const std::pair<int, int> key(device, kind);
+    const std::pair<int, int> key(device, kind | (protectedMem ? 1 << 16 : 0));
     std::map<std::pair<int, int>, MatAllocator*>::const_iterator it = allocators_.find(key);
     if (it != allocators_.end())
         return it->second;
-    MatAllocator* a = new DeviceAllocator(this, device, kind);  // never deleted, like the OpenCL allocator
+    MatAllocator* a = new DeviceAllocator(this, device, kind, protectedMem);  // never deleted, like the OpenCL allocator
     allocators_[key] = a;
     return a;
 }
@@ -889,6 +889,7 @@ MemoryInfo describe(const UMat& m)
     info.hostAccess = (HostAccess)d.host_access;
     info.imported = (d.flags & CV_ACCEL_MEMF_IMPORTED) != 0;
     info.readOnly = (d.flags & CV_ACCEL_MEMF_READ_ONLY) != 0;
+    info.protectedContent = (d.flags & CV_ACCEL_MEMF_PROTECTED) != 0;
     return info;
 }
 
@@ -1026,10 +1027,13 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
     ext.handle = (int64_t)memory.handle;
     ext.offset = memory.offset;
     ext.size = memory.size ? memory.size : total;
-    ext.flags = memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0;
+    ext.flags = (memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0) | (memory.protectedContent ? CV_ACCEL_MEMF_PROTECTED : 0);
     m.u = a->wrap(ext, total);
+    // core enforces both, whatever the backend reports
     if (memory.readOnly)
         m.u->accelState->alloc.desc.flags |= CV_ACCEL_MEMF_READ_ONLY;
+    if (memory.protectedContent)
+        m.u->accelState->alloc.desc.flags |= CV_ACCEL_MEMF_PROTECTED;
     m.offset = 0;
     finalizeHdr(m);
     m.addref();

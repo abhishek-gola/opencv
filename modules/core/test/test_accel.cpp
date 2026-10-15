@@ -294,6 +294,35 @@ TEST(Core_Accel, protected_memory_never_reaches_the_cpu)
     EXPECT_THROW(cv::transpose(uf, t), cv::Exception);
 }
 
+TEST(Core_Accel, protected_content_stays_in_protected_memory)
+{
+    // a protected frame (from a secure decoder, say) next to ordinary memory on one device
+    accel::Device d = emulator(DISCRETE);
+    Mat src(8, 8, CV_8UC1);
+    randu(src, 0, 255);
+    UMat owner = makeOn(d, src);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.size = src.total();
+    mem.protectedContent = true;
+    UMat secure = accel::wrapExternalMemory(d, mem, MatShape({8, 8}), CV_8UC1);
+    EXPECT_TRUE(accel::describe(secure).protectedContent);
+    EXPECT_THROW(secure.getMat(ACCESS_READ), cv::Exception);
+
+    UMat out;
+    cv::flip(secure, out, 1);                   // runs on the device, into protected memory
+    EXPECT_TRUE(accel::describe(out).protectedContent);
+    EXPECT_THROW(out.getMat(ACCESS_READ), cv::Exception);
+
+    UMat plain = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(0)));
+    Mat host;
+    EXPECT_THROW(cv::flip(secure, plain, 1), cv::Exception);   // an ordinary output would expose it
+    EXPECT_THROW(cv::flip(secure, host, 1), cv::Exception);    // and so would a Mat
+    EXPECT_THROW(secure.copyTo(plain), cv::Exception);
+    EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(0)), plain));
+}
+
 TEST(Core_Accel, transfer_policy_reports_hidden_copies)
 {
     Mat src(8, 8, CV_32FC3, Scalar::all(1));
