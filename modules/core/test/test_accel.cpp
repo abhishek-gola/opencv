@@ -14,6 +14,7 @@
 #include <opencv2/core/accel.hpp>
 #include <opencv2/core/utils/accel_dispatch.private.hpp>
 
+#include <fstream>
 #include <thread>
 
 namespace opencv_test { namespace {
@@ -288,6 +289,55 @@ TEST(Core_Accel, failed_cache_flush_never_publishes_cpu_writes)
     EXPECT_THROW(u.getMat(ACCESS_READ), cv::Exception);
     Mat(8, 8, CV_8UC1, Scalar(3)).copyTo(u);                // written whole: usable again
     EXPECT_EQ(3, u.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
+#ifdef __linux__
+//! permissions ("rw-p", ...) of the mapping that holds @p p, from /proc/self/maps
+static std::string mappingPermissions(const void* p)
+{
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    const uintptr_t a = (uintptr_t)p;
+    while (std::getline(maps, line))
+    {
+        unsigned long long lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line.c_str(), "%llx-%llx %7s", &lo, &hi, perms) == 3 && lo <= a && a < hi)
+            return perms;
+    }
+    return "";
+}
+
+TEST(Core_Accel, read_only_memory_has_a_read_only_cpu_view)
+{
+    // read-only device memory (a wrapped pointer, say): a write through its Mat view faults
+    accel::Device d = emulator(DISCRETE);
+    UMat owner = makeOn(d, Mat(64, 64, CV_8UC1, Scalar(3)));
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.size = 64 * 64;
+    mem.readOnly = true;
+    UMat ro = accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1);
+    Mat view = ro.getMat(ACCESS_READ);
+    EXPECT_EQ(3, view.at<uchar>(63, 63));
+    const std::string perms = mappingPermissions(view.data);
+    ASSERT_EQ(4u, perms.size());
+    EXPECT_EQ('r', perms[0]);
+    EXPECT_EQ('-', perms[1]);
+}
+#endif
+
+TEST(Core_Accel, validation_mode_catches_writes_through_read_views)
+{
+    accel::detail::setValidation(true);
+    UMat u = makeOn(emulator(COHERENT), Mat(8, 8, CV_8UC1, Scalar(1)));
+    {
+        Mat view = u.getMat(ACCESS_READ);
+        view.at<uchar>(0, 0) = 9;           // a write the protocol never hears about
+    }
+    EXPECT_THROW(u.getMat(ACCESS_READ), cv::Exception);    // the buffer is no longer trusted
+    accel::detail::setValidation(false);
 }
 
 TEST(Core_Accel, protected_memory_never_reaches_the_cpu)

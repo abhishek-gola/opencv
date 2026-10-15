@@ -247,6 +247,12 @@ see the same DRAM:
 9. **Imported dma-bufs.** Buffers from cameras, decoders or displays may carry implicit
    fences. The backend waits for them before use and attaches its own fence after writing
    (`DMA_BUF_IOCTL_EXPORT_SYNC_FILE` / `IMPORT_SYNC_FILE`), so other drivers stay ordered.
+10. **Read-only memory.** A CPU view of read-only memory cannot be written: its host copy is
+   core's own pages, mapped read-only except while a download fills them, and backends map
+   dma-bufs read-only. With `OPENCV_ACCEL_VALIDATE`, every view opened with `ACCESS_READ` is
+   checksummed, and a buffer whose view came back changed is marked failed (this also covers
+   memory the CPU addresses directly, which core cannot protect without touching its
+   neighbours on the same pages).
 
 ### Discrete GPUs without extra copies
 

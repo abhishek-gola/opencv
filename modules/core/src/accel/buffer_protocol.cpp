@@ -34,9 +34,20 @@
 #include "accel_impl.hpp"
 
 #include <opencv2/core/utils/logger.hpp>
+#include <opencv2/core/utils/configuration.private.hpp>
 
 #include <algorithm>
 #include <functional>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace cv { namespace accel { namespace impl {
 
@@ -45,14 +56,15 @@ enum ShadowSource
     SHADOW_NONE = 0,
     SHADOW_FASTMALLOC = 1,
     SHADOW_BACKEND = 2,     //!< pinned host memory from the backend: one DMA per transfer
-    SHADOW_USER = 3         //!< the Mat that the UMat was created from (Mat::getUMat)
+    SHADOW_USER = 3,        //!< the Mat that the UMat was created from (Mat::getUMat)
+    SHADOW_PAGES = 4        //!< core's own pages, read-only except during downloads (read-only memory)
 };
 
 BufferState::BufferState(Backend* b, int device_)
-    : backend(b), device(device_), shadow(0), shadowFromBackend(false),
+    : backend(b), device(device_), shadow(0), shadowFromBackend(false), shadowPages(0),
       busy(false), pendingReaders(0), pendingWriters(0), hostMapped(false), hostAccess(0),
       imported(false), fromMat(false), hostImport(0), idleGateHeld(false), poisoned(false), generation(0),
-      matGeneration(0)
+      matGeneration(0), viewHash(0), viewHashed(false)
 {
     memset(&alloc, 0, sizeof(alloc));
     memset(&shadowAlloc, 0, sizeof(shadowAlloc));
@@ -62,6 +74,8 @@ static inline int shadowSource(const BufferState* st)
 {
     if (!st->shadow)
         return SHADOW_NONE;
+    if (st->shadowPages)
+        return SHADOW_PAGES;
     if (st->fromMat)
         return SHADOW_USER;
     return st->shadowFromBackend ? SHADOW_BACKEND : SHADOW_FASTMALLOC;
@@ -264,10 +278,113 @@ void waitDeviceWork(BufferState* st, std::unique_lock<std::mutex>& lk, bool writ
         checkNotPoisoned(st);
 }
 
+//////////////////////////////////// pages a write can fault on ////////////////////////////////////
+
+size_t pageRounded(size_t size)
+{
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const size_t page = si.dwPageSize ? si.dwPageSize : 4096;
+#else
+    const long ps = sysconf(_SC_PAGESIZE);
+    const size_t page = ps > 0 ? (size_t)ps : 4096;
+#endif
+    return (size + page - 1) / page * page;
+}
+
+uchar* allocPages(size_t size)
+{
+#ifdef _WIN32
+    return (uchar*)VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : (uchar*)p;
+#endif
+}
+
+void freePages(uchar* p, size_t size)
+{
+#ifdef _WIN32
+    CV_UNUSED(size);
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, size);
+#endif
+}
+
+bool protectPages(uchar* p, size_t size, bool writable)
+{
+#ifdef _WIN32
+    DWORD old = 0;
+    return VirtualProtect(p, size, writable ? PAGE_READWRITE : PAGE_READONLY, &old) != 0;
+#else
+    return mprotect(p, size, writable ? (PROT_READ | PROT_WRITE) : PROT_READ) == 0;
+#endif
+}
+
+//! lets a download write core's read-only host copy, for the duration of the scope
+struct WritablePages
+{
+    explicit WritablePages(BufferState* st_) : st(st_->shadowPages ? st_ : NULL)
+    {
+        if (st && !protectPages(st->shadow, st->shadowPages, true))
+            CV_Error(Error::StsError, "accel: cannot unprotect the host copy of read-only memory for a download");
+    }
+    ~WritablePages()
+    {
+        if (st)
+            protectPages(st->shadow, st->shadowPages, false);
+    }
+    BufferState* st;
+};
+
+//////////////////////////////////// validation mode ////////////////////////////////////
+
+//! OPENCV_ACCEL_VALIDATE: read-only Mat views are checksummed, and a write through one is reported
+std::atomic<bool>& validating()
+{
+    static std::atomic<bool> v(utils::getConfigurationParameterBool("OPENCV_ACCEL_VALIDATE", false));
+    return v;
+}
+
+uint64 hashBytes(const uchar* p, size_t n)
+{
+    uint64 h = 0xcbf29ce484222325ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+    {
+        uint64 w;
+        memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x100000001b3ull;
+    }
+    for (; i < n; i++)
+        h = (h ^ p[i]) * 0x100000001b3ull;
+    return h;
+}
+
 void ensureShadow(BufferState* st)
 {
     if (st->shadow)
         return;
+    if (st->alloc.desc.flags & CV_ACCEL_MEMF_READ_ONLY)
+    {
+        // Read-only memory: the host copy is mapped read-only, so a write through a Mat view
+        // faults instead of corrupting it. Only downloads lift the protection, for their duration.
+        const size_t size = pageRounded((size_t)st->alloc.size);
+        if (uchar* p = allocPages(size))
+        {
+            if (protectPages(p, size, false))
+            {
+                st->shadow = p;
+                st->shadowPages = size;
+                st->shadowFromBackend = false;
+                return;
+            }
+            freePages(p, size);
+        }
+        CV_LOG_WARNING(NULL, "accel: no page-protected host copy for read-only memory; writes through its Mat views go undetected");
+    }
     Backend* b = st->backend;
     if ((b->deviceInfo(st->device).caps & CV_ACCEL_CAP_HOST_PINNED) && b->pinnedShadowAllowed(st->device))
     {
@@ -323,6 +440,7 @@ void downloadWhole(BufferState* st)
     if (shadowSource(st) == SHADOW_BACKEND)
         r.flags |= CV_ACCEL_COPY_HOST_PINNED;
     FenceRef f;
+    WritablePages writable(st);     // read-only memory: its protected host copy takes the download
     try
     {
         beginExternal(st, s, ACCESS_READ);
@@ -504,6 +622,17 @@ void upgradeHostAccessLocked(BufferState* st, UMatData* u)
 void endHostAccessLocked(BufferState* st, UMatData* u)
 {
     const int access = st->hostAccess;
+    if (st->viewHashed)
+    {
+        // OPENCV_ACCEL_VALIDATE: a view opened with ACCESS_READ must come back unchanged
+        st->viewHashed = false;
+        if (u->data && hashBytes(u->data, u->size) != st->viewHash)
+        {
+            st->poisoned = true;
+            st->poisonReason = "a Mat view opened with ACCESS_READ was written (OPENCV_ACCEL_VALIDATE)";
+            try { CV_LOG_ERROR(NULL, "accel: " << st->poisonReason); } catch (...) {}
+        }
+    }
     if (usesShadow(st))
     {
         if (access & ACCESS_WRITE)
@@ -624,6 +753,9 @@ Mat getHostView(const UMat& m, AccessFlag accessFlags)
                 beginHostAccessLocked(st, u, access);
             else
                 upgradeHostAccessLocked(st, u);
+            st->viewHashed = first && !(access & ACCESS_WRITE) && validating().load();
+            if (st->viewHashed)
+                st->viewHash = hashBytes(u->data, u->size);
             st->hostMapped = true;
             u->mapcount = 1;    // UMatData::~UMatData unmaps chained views (getMat().getUMat()) only then
             if (first && idle.active())
@@ -899,6 +1031,11 @@ void destroyBufferState(BufferState* st)
     else if (shadowSource(st) == SHADOW_FASTMALLOC)
     {
         fastFree(st->shadow);
+    }
+    else if (shadowSource(st) == SHADOW_PAGES)
+    {
+        freePages(st->shadow, st->shadowPages);
+        st->shadowPages = 0;
     }
     st->shadow = 0;
     if (!lost && (st->alloc.handle || st->alloc.backend_data))
@@ -1496,3 +1633,12 @@ bool DeviceAllocator::getMemoryDesc(const UMatData* u, cvAccelMemoryDesc* desc) 
 }
 
 }}} // namespace cv::accel::impl
+
+namespace cv { namespace accel { namespace detail {
+
+void setValidation(bool on)
+{
+    impl::validating().store(on);
+}
+
+}}} // namespace cv::accel::detail

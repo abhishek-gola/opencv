@@ -86,6 +86,8 @@ CV_EXPORTS void emulatorFailNextCpuFlush();
 CV_EXPORTS void setWaitTimeout(uint64 ms);
 //! tests only: forgets that devices were lost (a lost device otherwise stays lost for the process)
 CV_EXPORTS void reviveDevices();
+//! turns OPENCV_ACCEL_VALIDATE on or off at run time (read-only Mat views are checksummed)
+CV_EXPORTS void setValidation(bool on);
 
 /** @brief A simulated dma-buf of @p size bytes, shared with other "drivers"; returns its fd for
 ExternalMemory::DMABUF_FD on "emulator:1". */

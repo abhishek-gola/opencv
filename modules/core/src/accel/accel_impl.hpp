@@ -307,6 +307,7 @@ struct BufferState
     uchar* shadow;
     cvAccelAllocation shadowAlloc;  //!< valid when the shadow came from the backend (pinned)
     bool shadowFromBackend;
+    size_t shadowPages;             //!< > 0: the shadow is core's own page mapping of that size (read-only memory)
 
     std::mutex mutex;
     std::condition_variable cond;
@@ -332,6 +333,8 @@ struct BufferState
     std::string poisonReason;
     uint64 generation;              //!< incremented by every write
     uint64 matGeneration;           //!< fromMat: the generation of the content copied from the Mat
+    uint64 viewHash;                //!< OPENCV_ACCEL_VALIDATE: checksum of a read-only view when it opened
+    bool viewHashed;
 };
 
 //! UMat::getMat() for buffers with accelState

@@ -64,6 +64,10 @@ Rules a backend must follow, because core relies on them for correctness:
    queued nothing (core falls back, or frees memory and retries). After any other error part
    of the work may be queued: core records a fence after it (or synchronizes the device) and
    treats everything the work writes as invalid until it is written whole.
+10. begin_cpu_access on memory flagged CV_ACCEL_MEMF_READ_ONLY returns a read-only mapping
+   where the platform allows it (a dma-buf mmap'ed PROT_READ), so that a write through a Mat
+   view faults instead of changing the memory. (Host copies of such memory are core's own
+   pages, protected the same way.)
 
 @note Preview only (no backward compatibility until ABI version 1).
 */
