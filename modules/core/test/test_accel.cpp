@@ -433,6 +433,25 @@ TEST(Core_Accel, mat_calls_inside_a_scope_run_on_its_device)
     }
 }
 
+TEST(Core_Accel, host_outputs_are_written_in_place_when_the_device_can)
+{
+    // a coherent iGPU addresses host memory: no temporary, no copy back
+    Mat src(32, 40, CV_8UC4), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 0);
+    accel::ExecutionScope scope(emulator(COHERENT));
+    accel::resetTransferStats();
+    Mat dst;
+    cv::flip(src, dst, 0);
+    EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
+    EXPECT_EQ(0u, accel::getTransferStats().transfers);
+    EXPECT_EQ(0, maxDiff(ref, dst));
+
+    Mat same = src.clone();
+    cv::flip(same, same, 0);            // output over its own input: through a temporary
+    EXPECT_EQ(0, maxDiff(ref, same));
+}
+
 TEST(Core_Accel, clone_stays_on_the_device)
 {
     accel::Device d = emulator(DISCRETE);
