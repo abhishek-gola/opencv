@@ -295,6 +295,25 @@ TEST(Core_Accel, host_mat_used_in_place_by_a_coherent_device)
     }
 }
 
+TEST(Core_Accel, mat_gets_back_what_was_written_through_its_umat)
+{
+    // coherent shared memory: the UMat holds its own copy of the Mat's bytes
+    accel::Device d = emulator(COHERENT);
+    Mat m(8, 8, CV_8UC1, Scalar(3));
+    {
+        accel::ExecutionScope scope(d);
+        UMat u = m.getUMat(ACCESS_RW);
+        u.getMat(ACCESS_WRITE).setTo(Scalar(9));    // a CPU write through the UMat
+    }
+    EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(9)), m));
+    {
+        accel::ExecutionScope scope(d);
+        UMat u = m.getUMat(ACCESS_RW);
+        Mat(8, 8, CV_8UC1, Scalar(5)).copyTo(u);    // an upload
+    }
+    EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(5)), m));
+}
+
 TEST(Core_Accel, clone_stays_on_the_device)
 {
     accel::Device d = emulator(DISCRETE);

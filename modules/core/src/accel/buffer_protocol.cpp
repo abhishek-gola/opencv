@@ -51,7 +51,8 @@ enum ShadowSource
 BufferState::BufferState(Backend* b, int device_)
     : backend(b), device(device_), shadow(0), shadowFromBackend(false),
       busy(false), pendingReaders(0), pendingWriters(0), hostMapped(false), hostAccess(0),
-      imported(false), fromMat(false), hostImport(0), idleGateHeld(false), poisoned(false), generation(0)
+      imported(false), fromMat(false), hostImport(0), idleGateHeld(false), poisoned(false), generation(0),
+      matGeneration(0)
 {
     memset(&alloc, 0, sizeof(alloc));
     memset(&shadowAlloc, 0, sizeof(shadowAlloc));
@@ -1039,14 +1040,16 @@ bool DeviceAllocator::allocate(UMatData* u, AccessFlag /*accessFlags*/, UMatUsag
     }
     else
     {
-        // memory with a CPU view: copy the content in now, the Mat keeps its own bytes
+        // memory with a CPU view: copy the content in now, the Mat keeps its own bytes and
+        // gets them back only if the UMat is written (see matGeneration)
         IdleCpuGuard idle(st);
         void* p = beginCpuAccess(st, ACCESS_WRITE);
         memcpy(p, u->origdata, u->size);
         endCpuAccess(st, ACCESS_WRITE);
-        u->markHostCopyObsolete(true);  // the CPU view must be (re)opened through the protocol
+        u->markHostCopyObsolete(false);
         u->markDeviceCopyObsolete(false);
     }
+    st->matGeneration = st->generation;
     u->prevAllocator = u->currAllocator;
     u->currAllocator = this;
     u->flags |= UMatData::TEMP_UMAT;
@@ -1067,7 +1070,11 @@ void DeviceAllocator::deallocate(UMatData* u) const
     {
         // the memory or the content belongs to a Mat: finish everything, then hand it back
         const bool deviceOk = drainForRelease(st);
-        if (!st->imported && u->hostCopyObsolete() && !u->deviceCopyObsolete())
+        // For COPY and UNCACHED memory the Mat's memory is the host copy: only a device write
+        // leaves it stale. Other memory holds its own copy of the content: any write counts.
+        const bool matStale = usesShadow(st) ? u->hostCopyObsolete() && !u->deviceCopyObsolete()
+                                             : st->generation != st->matGeneration;
+        if (!st->imported && matStale)
         {
             if (deviceOk && !st->poisoned)
                 copyBackToMat(u, st);

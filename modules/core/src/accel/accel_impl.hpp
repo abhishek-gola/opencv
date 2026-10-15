@@ -303,6 +303,7 @@ struct BufferState
     bool poisoned;                  //!< the device work that wrote the content failed
     std::string poisonReason;
     uint64 generation;              //!< incremented by every write
+    uint64 matGeneration;           //!< fromMat: the generation of the content copied from the Mat
 };
 
 //! UMat::getMat() for buffers with accelState
