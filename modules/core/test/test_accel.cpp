@@ -237,6 +237,20 @@ TEST(Core_Accel, writable_mat_view_keeps_the_device_away)
     EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
 }
 
+TEST(Core_Accel, copy_out_while_a_mat_view_is_open)
+{
+    // non-coherent memory: the view's writes sit in CPU caches until the view ends
+    accel::Device d = emulator(NONCOHERENT);
+    UMat u = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(1)));
+    Mat view = u.getMat(ACCESS_RW);
+    view.setTo(Scalar(42));
+    Mat res;
+    u.copyTo(res);
+    EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(42)), res));
+    view.release();
+    EXPECT_EQ(0, maxDiff(Mat(8, 8, CV_8UC1, Scalar(42)), u.getMat(ACCESS_READ)));   // the writes survived
+}
+
 TEST(Core_Accel, protected_memory_never_reaches_the_cpu)
 {
     accel::Device d = emulator(PROTECTED_MEM);

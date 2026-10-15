@@ -1176,6 +1176,13 @@ void DeviceAllocator::download(UMatData* u, void* dstptr, int dims, const size_t
         c.transfers++;
         return;
     }
+    if (st->hostMapped)
+    {
+        // a Mat view is open: read through its mapping. A second begin_cpu_access would
+        // invalidate CPU caches under writes the view has not flushed yet.
+        copyND((uchar*)dstptr, dststep, u->data + srcOffset, srcstep, dims, sz);
+        return;
+    }
     const void* p = beginCpuAccess(st, ACCESS_READ);
     copyND((uchar*)dstptr, dststep, (const uchar*)p + srcOffset, srcstep, dims, sz);
     endCpuAccess(st, ACCESS_READ);
