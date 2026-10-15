@@ -489,6 +489,25 @@ TEST(Core_Accel, release_while_in_flight_is_deferred)
         EXPECT_EQ(before, accel::detail::emulatorLiveAllocations());
     });
 }
+
+TEST(Core_Accel, copy_into_wrapped_memory_is_done_on_return)
+{
+    accel::Device d = emulator(COHERENT);
+    runWithDeviceDelay(20000, [&]() {
+        std::vector<uchar> storage(4096 * 2);
+        uchar* p = alignPtr(storage.data(), 4096);
+        Mat host(32, 32, CV_8UC1, p);
+        host.setTo(Scalar(0));
+        accel::ExternalMemory mem;
+        mem.type = accel::ExternalMemory::HOST_POINTER;
+        mem.handle = (int64)(intptr_t)p;
+        mem.size = host.total();
+        UMat w = accel::wrapExternalMemory(d, mem, MatShape({32, 32}), CV_8UC1);
+        UMat src = makeOn(d, Mat(32, 32, CV_8UC1, Scalar(7)));
+        src.copyTo(w);                      // a device copy into the owner's memory
+        EXPECT_EQ(0, maxDiff(Mat(32, 32, CV_8UC1, Scalar(7)), host));   // read directly, not through w
+    });
+}
 #endif
 
 // The only test that uses emulator:5: OpenCV keeps a lost device lost for the whole process.

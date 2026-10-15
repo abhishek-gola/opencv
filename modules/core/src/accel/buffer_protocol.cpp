@@ -1353,6 +1353,8 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
     Counters& c = counters();
     c.bytesD2D += totalND(sz, dims);
     c.transfers++;
+    if (src->accelState->imported || dst->accelState->imported)
+        done.wait();    // user memory: the owner may touch it once we return (as in OpCall)
 }
 
 bool DeviceAllocator::getMemoryDesc(const UMatData* u, cvAccelMemoryDesc* desc) const
