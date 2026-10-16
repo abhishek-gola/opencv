@@ -1794,6 +1794,34 @@ TEST(Core_Accel_CUDA, wrapping_a_umat_pointer_gives_a_view_of_it)
     EXPECT_EQ(4, rows.getMat(ACCESS_READ).at<uchar>(0, 0));
 }
 
+TEST(Core_Accel_CUDA, device_pointer_ranges_are_checked_against_their_allocation)
+{
+    accel::Device d = cudaDevice();
+    UMat owner = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(1)));
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = (int64)(intptr_t)owner.handle(ACCESS_READ);
+    mem.offset = 128;
+    mem.size = 1 << 20;         // runs far past the end of the cudaMalloc it starts in
+    EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({1024, 1024}), CV_8UC1), cv::Exception);
+}
+
+TEST(Core_Accel_CUDA, device_access_to_pinned_memory_gives_the_device_address)
+{
+    // mapped pinned memory: the kernel gets its device address, whatever its CPU address is
+    accel::Device d = cudaDevice();
+    UMat u;
+    u.allocator = d.allocator();
+    u.create(16, 16, CV_8UC1, USAGE_ALLOCATE_HOST_MEMORY);
+    EXPECT_EQ(accel::MEMORY_HOST_PINNED, accel::describe(u).kind);
+    {
+        accel::DeviceAccess acc(u, accel::Stream::getDefault(d), ACCESS_WRITE);
+        cuda::GpuMat g(u.rows, u.cols, u.type(), (void*)(uintptr_t)(acc.handle() + acc.offset()), u.step[0]);
+        g.setTo(Scalar(7));     // a kernel on the legacy default stream, at that address
+    }
+    EXPECT_EQ(7, u.getMat(ACCESS_READ).at<uchar>(15, 15));
+}
+
 TEST(Core_Accel_CUDA, user_kernels_on_the_default_stream_are_ordered)
 {
     accel::Device d = cudaDevice();

@@ -1022,33 +1022,38 @@ cvAccelStatus CV_API_CALL emu_stream_destroy(cvAccelStream stream) CV_ACCEL_NOEX
     return CV_ACCEL_OK;
 }
 
-//! a fence at the end of @p stream (also used by device_synchronize, which may record on any thread's stream)
-cvAccelStatus recordOn(cvAccelStream stream, cvAccelFence* out)
+/** A fence at the end of @p stream, without a message for get_last_error: device_synchronize
+    records on every thread's stream with streamsMutex held, and a thread's first use of its
+    thread-local error takes OpenCV's TLS lock, which an exiting thread holds while it destroys
+    its streams (and so waits for streamsMutex). */
+cvAccelStatus recordQuietly(cvAccelStream stream, cvAccelFence* out)
 {
-    if (!stream || !out)
-        return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
-    if (deviceLost(((EmuStream*)stream)->device))
-        return lostError();
-    if (failing(((EmuStream*)stream)->device, detail::EMU_FAIL_RECORD))
-        return injectedFailure("no fence can be recorded");
+    const int device = ((EmuStream*)stream)->device;
+    if (deviceLost(device))
+        return CV_ACCEL_DEVICE_LOST;
+    if (failing(device, detail::EMU_FAIL_RECORD))
+        return (cvAccelStatus)g_failingStatus.load();
     try
     {
-        EmuFence* f = new EmuFence(((EmuStream*)stream)->device);
+        EmuFence* f = new EmuFence(device);
         f->refs++;  // one reference for the task
         ((EmuStream*)stream)->push([f]() { f->signal(); f->release(); });
         *out = (cvAccelFence)f;
         return CV_ACCEL_OK;
     }
-    catch (const std::exception& e)
+    catch (...)
     {
-        return fail(CV_ACCEL_INTERNAL_ERROR, e.what());
+        return CV_ACCEL_OUT_OF_MEMORY;
     }
 }
 
 cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelFence* out) CV_ACCEL_NOEXCEPT
 {
+    if (!stream || !out)
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     StreamUse use(stream);
-    return recordOn(stream, out);
+    const cvAccelStatus st = recordQuietly(stream, out);
+    return st == CV_ACCEL_OK ? st : fail(st, "no fence can be recorded");
 }
 
 cvAccelStatus CV_API_CALL emu_stream_wait_fence(cvAccelStream stream, cvAccelFence fence) CV_ACCEL_NOEXCEPT
@@ -1125,6 +1130,7 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
     try
     {
         FenceList list;
+        cvAccelStatus recorded = CV_ACCEL_OK;
         std::unique_lock<std::mutex> lk(streamsMutex());
         list.fences.reserve(liveStreams().size());
         for (std::set<EmuStream*>::iterator it = liveStreams().begin(); it != liveStreams().end(); ++it)
@@ -1134,10 +1140,15 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
             // a queue whose position cannot be recorded cannot be waited for: the device is not
             // known to be idle, and saying OK would hand memory back under running work
             cvAccelFence f = 0;
-            const cvAccelStatus st = recordOn((cvAccelStream)*it, &f);
-            if (st != CV_ACCEL_OK)
-                return st;      // the fences recorded so far are released with list
+            recorded = recordQuietly((cvAccelStream)*it, &f);
+            if (recorded != CV_ACCEL_OK)
+                break;
             list.fences.push_back((EmuFence*)f);    // capacity is reserved: never throws
+        }
+        if (recorded != CV_ACCEL_OK)
+        {
+            lk.unlock();    // the error message lives in thread-local storage: see recordQuietly
+            return fail(recorded, "device_synchronize: a fence cannot be recorded");
         }
         // retired streams drain on their own; their workers leave liveStreams when done
         streamsDrained().wait(lk, [device]() {
