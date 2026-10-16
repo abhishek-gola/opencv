@@ -644,8 +644,11 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
                 continue;
             a.mode = a.isOutput ? (DEV_WRITE | (a.fullOverwrite && coversAllocation(target) ? DEV_DISCARD : 0)) : DEV_READ;
             acq.add(target.u, a.mode);
-            if (target.u->accelState->backing->borrowed)
-                needSync = borrowed = true;     // user memory: the owner may touch it once we return
+            // User memory: the owner may touch it once we return. Memory shared through implicit
+            // fences (a dma-buf) is not: its other users wait for the fence of this work.
+            const PhysicalBacking* bk = target.u->accelState->backing;
+            if (bk->borrowed && !(bk->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC))
+                needSync = borrowed = true;
         }
         std::vector<FenceRef> waits;
         if (!acq.acquire(stream, waits))

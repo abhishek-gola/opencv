@@ -892,6 +892,15 @@ int registerEmulatorBackend()
     return r.add(impl::emulatorBackendApi(), -100, "built-in (test)");
 }
 
+int registerLegacyEmulatorBackend()
+{
+    registerEmulatorBackend();
+    impl::Registry& r = impl::Registry::getInstance();
+    if (impl::Backend* b = r.find("emulator-v1"))
+        return b->id();
+    return r.add(impl::emulatorBackendApiV1(), -101, "built-in (test, API version 1)");
+}
+
 }} // namespace accel::detail
 
 //////////////////////////////////// public API ////////////////////////////////////

@@ -52,11 +52,19 @@ Rules a backend must follow, because core relies on them for correctness:
 3. Allocations with CV_ACCEL_HOST_ACCESS_NONCOHERENT start and end on coherence_granule
    boundaries, so that cache maintenance of one buffer never touches bytes of another.
 4. begin_cpu_access / end_cpu_access may widen the range (dma-buf syncs whole buffers,
-   Vulkan whole atoms) and must retry interrupted system calls (EINTR / EAGAIN).
+   Vulkan whole atoms) and must retry interrupted system calls (EINTR / EAGAIN). They nest:
+   core calls end_cpu_access once for every begin_cpu_access that succeeded, in reverse order
+   and with the same access, and a nested begin returns the address the outer one returned (a
+   backend whose API does not nest, such as AHardwareBuffer_lock, counts the levels itself).
+   After a failed end_cpu_access the CPU access counts as still open: core calls
+   end_cpu_access again before any device work may use the memory.
 5. Imported memory that carries implicit fences of other drivers (a dma-buf from a camera,
-   decoder or display) is flagged CV_ACCEL_MEMF_EXTERNAL_SYNC. Core brackets every device use
-   of it, OpenCV's and the caller's (DeviceAccess), with begin_device_access and
-   end_device_access, and begin_cpu_access waits for those fences as DMA_BUF_IOCTL_SYNC does.
+   decoder or display) is flagged CV_ACCEL_MEMF_EXTERNAL_SYNC, and every dma-buf counts as
+   such whatever the backend reports. A backend that imports such memory implements
+   begin_device_access and end_device_access; core refuses the import otherwise. Core brackets
+   every device use of it, OpenCV's and the caller's (DeviceAccess), with them; when
+   end_device_access fails, core waits on the CPU for the work before the call that queued it
+   returns. begin_cpu_access waits for those fences as DMA_BUF_IOCTL_SYNC does.
 6. A backend without CV_ACCEL_CAP_ASYNC runs work during the enqueue call and returns
    fences that are already complete.
 7. Imported host memory is never freed or reused by the backend; overlapping imports are
@@ -408,11 +416,14 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     /** Starts CPU access to [offset, offset+size) with access flags (cv::AccessFlag values).
         Called after all device work on the allocation finished. For NONCOHERENT memory this
         invalidates CPU caches when reading (dma-buf SYNC_START); for mapped APIs it maps.
-        Returns the CPU address of the allocation start. */
+        Returns the CPU address of the allocation start. Calls nest (rule 4): core asks for
+        ACCESS_READ, or for ACCESS_READ | ACCESS_WRITE, never for a write alone (a partial write
+        of a cache line must not merge with stale bytes). */
     cvAccelStatus (CV_API_CALL *begin_cpu_access)(const cvAccelAllocation* alloc, uint64_t offset,
                                                   uint64_t size, uint32_t access, void** host_ptr) CV_ACCEL_NOEXCEPT;
-    /** Ends CPU access. For NONCOHERENT memory written by the CPU this cleans (flushes) CPU
-        caches before any device may touch the memory (dma-buf SYNC_END). */
+    /** Ends one level of CPU access, with the access its begin_cpu_access had. For NONCOHERENT
+        memory written by the CPU this cleans (flushes) CPU caches before any device may touch
+        the memory (dma-buf SYNC_END). */
     cvAccelStatus (CV_API_CALL *end_cpu_access)(const cvAccelAllocation* alloc, uint64_t offset,
                                                 uint64_t size, uint32_t access) CV_ACCEL_NOEXCEPT;
     /** Enqueues a strided copy (host to device, device to host or device to device). Host
@@ -478,15 +489,17 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     cvAccelStatus (CV_API_CALL *describe_allocation)(int device, uint64_t size, uint32_t kind, uint32_t flags,
                                                      cvAccelMemoryDesc* desc) CV_ACCEL_NOEXCEPT;
 
-    /** optional, for memory flagged CV_ACCEL_MEMF_EXTERNAL_SYNC: later work on @p stream waits
-        for the fences other drivers attached to the memory (their last write for a read, every
-        use for a write), e.g. DMA_BUF_IOCTL_EXPORT_SYNC_FILE and a wait on the sync_file. Core
-        calls it before any device work touches such memory. @p access: cv::AccessFlag values. */
+    /** for memory flagged CV_ACCEL_MEMF_EXTERNAL_SYNC, required with it (rule 5): later work on
+        @p stream waits for the fences other drivers attached to the memory (their last write for
+        a read, every use for a write), e.g. DMA_BUF_IOCTL_EXPORT_SYNC_FILE and a wait on the
+        sync_file. Core calls it before any device work touches such memory. @p access:
+        cv::AccessFlag values. */
     cvAccelStatus (CV_API_CALL *begin_device_access)(const cvAccelAllocation* alloc, cvAccelStream stream,
                                                      uint32_t access) CV_ACCEL_NOEXCEPT;
-    /** optional: attaches @p fence, which completes the work begun with begin_device_access, to
-        the memory, so that other drivers wait for it (DMA_BUF_IOCTL_IMPORT_SYNC_FILE: as the
-        write fence after a write, as a read fence otherwise). */
+    /** required with begin_device_access: attaches @p fence, which completes the work begun
+        with begin_device_access, to the memory, so that other drivers wait for it
+        (DMA_BUF_IOCTL_IMPORT_SYNC_FILE: as the exclusive write fence after a write, as one more
+        shared read fence otherwise; a writer of the memory waits for all of them). */
     cvAccelStatus (CV_API_CALL *end_device_access)(const cvAccelAllocation* alloc, cvAccelFence fence,
                                                    uint32_t access) CV_ACCEL_NOEXCEPT;
 };

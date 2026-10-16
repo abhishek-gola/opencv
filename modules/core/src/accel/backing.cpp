@@ -254,6 +254,12 @@ void removeDeferredLocked(Backings& r, PhysicalBacking* b)
     its imports. Its fences completed (or its device stopped); nobody can reach it any more. */
 void destroyBacking(PhysicalBacking* b) CV_NOEXCEPT
 {
+    retryFailedCpuEndsLocked(b);    // best effort: the memory goes anyway
+    if (b->idleGateHeld)
+    {
+        b->idleGateHeld->cpuMappings--;
+        b->idleGateHeld = 0;
+    }
     for (size_t i = 0; i < b->retired.size(); i++)
         freeHostCopy(b->retired[i]);
     b->retired.clear();
@@ -902,6 +908,17 @@ static std::unique_ptr<FreshImport> importWhole(Backend* b, int device, const cv
     return whole;
 }
 
+/** Memory with implicit fences of other drivers is only usable through a backend that brackets
+    device work with them (backend rule 5): without the bracket the device would race with the
+    camera, decoder or display that shares the memory. */
+static void checkExternalSync(Backend* b, uint32_t flags)
+{
+    if ((flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) && (!b->fn().begin_device_access || !b->fn().end_device_access))
+        CV_Error_(Error::StsNotImplemented, ("accel(%s): this memory carries implicit fences of other drivers, and the "
+                                             "backend cannot wait for them or publish its own (begin_device_access, "
+                                             "end_device_access)", b->name().c_str()));
+}
+
 //! releases the imports of a backing that nobody else saw
 static void dropNewBacking(PhysicalBacking* nb) CV_NOEXCEPT
 {
@@ -961,6 +978,7 @@ static Import* importFor(PhysicalBacking* bk, Backend* b, int device, const cvAc
                                                      "cannot be shared with another device", b->name().c_str()));
         }
     }
+    checkExternalSync(b, bk->flags | d.flags);
     if (!bk->cpuLevels.empty())
         CV_Error_(Error::StsError, ("accel(%s): the CPU has this memory open (a Mat view of it is alive); release it "
                                     "before importing the memory into another device", b->name().c_str()));
@@ -1028,6 +1046,7 @@ UMatData* DeviceAllocator::wrap(const WrapRequest& req, size_t& viewOffset, bool
         // the backend attests protection; every dma-buf may carry implicit fences of other drivers
         nb->flags = (whole->alloc.desc.flags & (CV_ACCEL_MEMF_PROTECTED | CV_ACCEL_MEMF_EXTERNAL_SYNC)) |
                     (key.domain == BACKING_FILE ? CV_ACCEL_MEMF_EXTERNAL_SYNC : 0);
+        checkExternalSync(b_, nb->flags);   // the fresh import is released when this throws
         nb->imports.reserve(1);
         nb->imports.push_back(whole->commit(b_, device_, ext));
         PhysicalBacking* got = 0;

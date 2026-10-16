@@ -165,30 +165,39 @@ void poisonLastWriteLocked(PhysicalBacking* b, const std::string& failure)
 }
 
 /** Memory with implicit fences of other drivers (CV_ACCEL_MEMF_EXTERNAL_SYNC, e.g. a camera's
-    dma-buf): device work on it waits for their fences, and they wait for the work's fence. */
+    dma-buf): device work on it waits for their fences, and they wait for the work's fence. Core
+    imports such memory only through backends that bracket it (backend rule 5). */
 void beginExternal(const BufferState* v, const StreamPtr& s, int access)
 {
     Backend* b = v->backend();
-    if (!(v->backing->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) || !b->fn().begin_device_access)
+    if (!(v->backing->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC))
         return;
+    if (!b->fn().begin_device_access || !b->fn().end_device_access)
+        CV_Error_(Error::StsNotImplemented, ("accel(%s): this memory carries implicit fences of other drivers that the "
+                                             "backend cannot handle", b->name().c_str()));
     b->check(b->fn().begin_device_access(&v->imp->alloc, s->handle, (uint32_t)access), "begin_device_access", v->device());
 }
 
-//! never throws: runs when the work is already queued
+/** Never throws: runs when the work is already queued. When the work's fence cannot be handed
+    to the other drivers, they would not wait for it: the work is waited for on the CPU instead,
+    without limit (the memory is theirs as much as ours), before the call that queued it returns. */
 void endExternal(const BufferState* v, const FenceRef& f, int access) CV_NOEXCEPT
 {
     Backend* b = v->backend();
-    if (!(v->backing->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) || !b->fn().end_device_access || f.empty() || f.isUnknown())
+    if (!(v->backing->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC) || f.empty())
         return;
-    if (b->fn().end_device_access(&v->imp->alloc, f.get(), (uint32_t)access) != CV_ACCEL_OK)
+    cvAccelStatus st = CV_ACCEL_INTERNAL_ERROR;
+    if (!f.isUnknown() && b->fn().end_device_access)
+        st = b->fn().end_device_access(&v->imp->alloc, f.get(), (uint32_t)access);
+    if (st == CV_ACCEL_OK)
+        return;
+    try
     {
-        try
-        {
-            CV_LOG_ERROR(NULL, "accel(" << b->name() << "): end_device_access failed, other drivers may not wait for "
-                         "this work: " << b->fn().get_last_error());
-        }
-        catch (...) {}
+        CV_LOG_WARNING(NULL, "accel(" << b->name() << "): the fence of this work could not be attached to memory "
+                       "shared with other drivers (" << b->fn().get_last_error() << "); waiting for the work instead");
     }
+    catch (...) {}
+    f.waitNoThrow(false);
 }
 
 /** Waits on the CPU for device work that conflicts with a CPU access through @p v. Called with
@@ -591,6 +600,14 @@ private:
 
 //////////////////////////////////// CPU access to the whole backing ////////////////////////////////////
 
+//! a CPU or device access may start only once every failed end_cpu_access went through (backend rule 4)
+void requireCpuAccessEnded(PhysicalBacking* b)
+{
+    if (!retryFailedCpuEndsLocked(b))
+        CV_Error(Error::StsError, "accel: an earlier CPU access to this memory could not be ended (end_cpu_access "
+                                  "keeps failing); the memory cannot be used until it is");
+}
+
 //! the import whose mapping the CPU uses: one it may write when there is one (all of them begin and end)
 const Import* cpuImport(const PhysicalBacking* b)
 {
@@ -634,11 +651,16 @@ bool closeCpuLevels(PhysicalBacking* b, size_t from) CV_NOEXCEPT
                 continue;
             ok = false;
             if (st == CV_ACCEL_DEVICE_LOST)
+            {
                 imp->backend->markStopped(imp->device);
+                continue;   // a stopped device touches nothing: there is no CPU access to keep open
+            }
+            // the CPU access counts as open until a retry succeeds (backend rule 4)
             try
             {
+                b->failedCpuEnds.push_back(std::make_pair(imp, access));
                 CV_LOG_ERROR(NULL, "accel(" << imp->backend->name() << "): end_cpu_access failed: "
-                             << imp->backend->fn().get_last_error() << ". CPU writes may not be visible to the device.");
+                             << imp->backend->fn().get_last_error() << "; no device work uses this memory until it succeeds");
             }
             catch (...) {}
         }
@@ -662,6 +684,7 @@ uchar* openCpuLevel(PhysicalBacking* b, int access)
         return b->cpuBase;
     if (b->cpuLevels.empty())
     {
+        requireCpuAccessEnded(b);
         for (size_t i = 0; i < b->imports.size(); i++)
         {
             Import* imp = b->imports[i];
@@ -834,12 +857,43 @@ void closeCpuLocked(PhysicalBacking* b) CV_NOEXCEPT
         }
         catch (...) {}
     }
-    if (b->idleGateHeld)
+    // device-idle memory: the CPU access is over only once every end succeeded
+    if (b->idleGateHeld && b->failedCpuEnds.empty())
     {
         b->idleGateHeld->cpuMappings--;
         b->idleGateHeld = 0;
     }
 }
+
+} // namespace
+
+bool retryFailedCpuEndsLocked(PhysicalBacking* b) CV_NOEXCEPT
+{
+    for (size_t i = 0; i < b->failedCpuEnds.size(); )
+    {
+        Import* imp = b->failedCpuEnds[i].first;
+        const cvAccelStatus st = imp->backend->fn().end_cpu_access(&imp->alloc, 0, imp->alloc.size,
+                                                                   (uint32_t)b->failedCpuEnds[i].second);
+        if (st == CV_ACCEL_OK || st == CV_ACCEL_DEVICE_LOST)
+        {
+            if (st == CV_ACCEL_DEVICE_LOST)
+                imp->backend->markStopped(imp->device);
+            b->failedCpuEnds.erase(b->failedCpuEnds.begin() + i);
+            continue;
+        }
+        i++;
+    }
+    if (!b->failedCpuEnds.empty())
+        return false;
+    if (b->idleGateHeld && b->cpuLevels.empty())
+    {
+        b->idleGateHeld->cpuMappings--;     // the CPU access that held the device gate is over
+        b->idleGateHeld = 0;
+    }
+    return true;
+}
+
+namespace {
 
 //! ends the Mat mapping of a view; never throws (runs from Mat destructors)
 void endHostAccessLocked(BufferState* v, UMatData* u)
@@ -986,6 +1040,8 @@ Mat getHostView(const UMat& m, AccessFlag accessFlags)
         if (first || upgrade)
         {
             BusyScope busy(b, lk, write);
+            if (b->cpuViews == 0)
+                requireCpuAccessEnded(b);
             waitDeviceWork(b, lk, write, v);
             const bool opens = first && b->cpuViews == 0;   // the backing's CPU access starts now
             if (first)
@@ -1050,6 +1106,7 @@ void* deviceHandleBlocking(UMatData* u, AccessFlag access)
     checkOwnHolds(b, true);
     BusyScope busy(b, lk, true);
     endOrphanMappingsLocked(b);
+    requireCpuAccessEnded(b);
     // the caller's work may go to any stream at any time: no Mat view of the memory may be open
     if (v->hostMapped || cpuConflictLocked(b, v, true))
         CV_Error(Error::StsError, "UMat::handle(): a Mat view of this memory is alive");
@@ -1132,7 +1189,8 @@ bool DeviceAcquisition::acquire(const StreamPtr& stream, std::vector<FenceRef>& 
             checkOwnHolds(b, write);
             b->cond.wait(lk, [b, write]{ return !b->busy && !deviceUseInFlight(b, write); });
             endOrphanMappingsLocked(b);     // views whose last Mat is gone, whose unmap has not run yet
-            bool conflict = false;
+            // a CPU access whose end failed is still open: the device stays away until it ends
+            bool conflict = !retryFailedCpuEndsLocked(b);
             for (size_t k = g.first; k < g.first + g.count && !conflict; k++)
             {
                 const BufferState* v = uses_[k].u->accelState;
@@ -1867,8 +1925,12 @@ void DeviceAllocator::copy(UMatData* src, UMatData* dst, int dims, const size_t 
     Counters& c = counters();
     c.bytesD2D += totalND(sz, dims);
     c.transfers++;
-    if (sv->backing->borrowed || dv->backing->borrowed)
-        done.wait(false);   // user memory: the owner may touch it once we return (as in OpCall), no time limit
+    // user memory: the owner may touch it once we return (as in OpCall), no time limit; memory
+    // shared through implicit fences gets the fence of the copy instead
+    const PhysicalBacking* sb = sv->backing;
+    const PhysicalBacking* db = dv->backing;
+    if ((sb->borrowed && !(sb->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC)) || (db->borrowed && !(db->flags & CV_ACCEL_MEMF_EXTERNAL_SYNC)))
+        done.wait(false);
 }
 
 bool DeviceAllocator::getMemoryDesc(const UMatData* u, cvAccelMemoryDesc* desc) const

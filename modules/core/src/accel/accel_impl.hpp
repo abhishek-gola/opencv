@@ -474,6 +474,10 @@ struct PhysicalBacking
     std::vector<int> cpuLevels;         //!< access of each open begin_cpu_access level, outermost first
     uchar* cpuBase;                     //!< CPU address of byte 0 while levels are open
     IdleGate* idleGateHeld;             //!< DEVICE_IDLE memory: the gate the open mapping holds
+    /** end_cpu_access calls that failed: the CPU access counts as open until a retry succeeds
+        (backend rule 4), so no device work may use the memory meanwhile, and the device gate of
+        DEVICE_IDLE memory stays held */
+    std::vector<std::pair<Import*, int> > failedCpuEnds;
 };
 
 //! host copy kinds (BufferState::shadowKind)
@@ -691,6 +695,9 @@ void pruneRetiredLocked(PhysicalBacking* b) CV_NOEXCEPT;
 //! frees one host copy (fences complete, or the device stopped)
 void freeHostCopy(RetiredHostCopy& c) CV_NOEXCEPT;
 
+//! calls the failed end_cpu_access of @p b again; true when none is left (backing mutex held)
+bool retryFailedCpuEndsLocked(PhysicalBacking* b) CV_NOEXCEPT;
+
 //! poisoned bytes of @p b overlapping [begin, begin + size), NULL when there are none (backing mutex held)
 const PoisonRange* findPoison(const PhysicalBacking* b, uint64_t begin, uint64_t size);
 //! marks [begin, begin + size) of @p b as written by failed work (backing mutex held)
@@ -747,6 +754,8 @@ void onImplicitTransfer(const char* what, const char* opName);
 ///////////////////////////////////// built-in backends /////////////////////////////////////
 
 const OpenCV_Core_Accel_API* emulatorBackendApi();
+//! the emulator as a backend of API version 1 (no begin_device_access / end_device_access), for tests
+const OpenCV_Core_Accel_API* emulatorBackendApiV1();
 #ifdef HAVE_CUDA
 const OpenCV_Core_Accel_API* cudaBackendApi();
 #endif
