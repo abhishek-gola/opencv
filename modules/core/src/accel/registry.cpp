@@ -16,6 +16,7 @@
 #include <opencv2/core/utils/plugin_loader.private.hpp>
 
 #include <chrono>
+#include <limits>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -1097,6 +1098,47 @@ void resetTransferStats()
     c.implicitTransfers = 0; c.deviceOps = 0; c.cpuFallbacks = 0; c.hostWaits = 0;
 }
 
+//! a * b, false when it does not fit in 64 bits
+static bool mulFits(uint64_t a, uint64_t b, uint64_t& r)
+{
+    if (b != 0 && a > UINT64_MAX / b)
+        return false;
+    r = a * b;
+    return true;
+}
+
+/** Steps and extent (bytes from the first element to the end of the last) of an array of
+    @p shape and @p type over external memory: the caller's steps, or packed ones. Every
+    product and sum is checked, so that no shape can wrap around and look small. */
+static uint64_t externalExtent(const MatShape& shape, int type, const size_t* steps, size_t* outSteps)
+{
+    const uint64_t esz = (uint64_t)CV_ELEM_SIZE(type);
+    const int dims = shape.dims;
+    if (steps && steps[dims - 1] != esz)
+        CV_Error(Error::StsBadArg, "accel: the last step of a wrapped array must be its element size");
+    uint64_t st[CV_ACCEL_MAX_DIMS];
+    st[dims - 1] = esz;
+    for (int i = dims - 1; i >= 0; i--)
+    {
+        if (shape.p[i] <= 0)
+            CV_Error(Error::StsBadArg, "accel: a wrapped array has no empty dimension");
+        if (i < dims - 1 && !(steps ? (st[i] = steps[i], true) : mulFits(st[i + 1], (uint64_t)shape.p[i + 1], st[i])))
+            CV_Error(Error::StsBadArg, "accel: the wrapped array does not fit in the address space");
+    }
+    uint64_t extent = esz;
+    for (int i = 0; i < dims; i++)
+    {
+        uint64_t span = 0;
+        if (!mulFits((uint64_t)(shape.p[i] - 1), st[i], span) || !rangeEnd(extent, span, extent))
+            CV_Error(Error::StsBadArg, "accel: the wrapped array does not fit in the address space");
+    }
+    if (extent > (uint64_t)std::numeric_limits<size_t>::max())
+        CV_Error(Error::StsBadArg, "accel: the wrapped array does not fit in the address space");
+    for (int i = 0; i < dims; i++)
+        outSteps[i] = (size_t)st[i];
+    return extent;
+}
+
 UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
                         const MatShape& shape, int type, const size_t* steps)
 {
@@ -1105,23 +1147,29 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
     Backend* b = backendOf(device);
     DeviceAllocator* a = static_cast<DeviceAllocator*>(b->allocator(device.index(), (int)b->deviceInfo(device.index()).preferred_kind));
 
-    UMat m;
-    m.flags = UMat::MAGIC_VAL | CV_MAT_TYPE(type);
-    setSize(m, shape.dims, shape.p, steps, steps == 0);
-    // bytes covered by the view, with the steps the caller gave
-    size_t total = CV_ELEM_SIZE(type);
-    for (int i = 0; i < shape.dims; i++)
+    type = CV_MAT_TYPE(type);
+    size_t st[CV_ACCEL_MAX_DIMS];
+    const uint64_t extent = externalExtent(shape, type, steps, st);
+    uint64_t bytes = extent;
+    if (memory.layoutModifier != 0)
     {
-        CV_Assert(shape.p[i] > 0);
-        total += (size_t)(shape.p[i] - 1) * m.step.p[i];
+        // a tiled or compressed layout: its size cannot be computed from a shape and steps
+        if (memory.size == 0)
+            CV_Error(Error::StsBadArg, "accel: memory with a non-linear layout needs its size (ExternalMemory::size)");
+        bytes = memory.size;
     }
-    CV_Assert(memory.size == 0 || total <= memory.size);
+    else if (memory.size != 0 && extent > memory.size)
+        CV_Error(Error::StsBadArg, "accel: the array does not fit in the external memory");
+
+    UMat m;
+    m.flags = UMat::MAGIC_VAL | type;
+    setSize(m, shape.dims, shape.p, st, false);
 
     WrapRequest req;
     req.ext.type = (uint32_t)memory.type;
     req.ext.handle = (int64_t)memory.handle;
     req.ext.offset = memory.offset;
-    req.ext.size = total;
+    req.ext.size = bytes;
     req.ext.flags = (memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0) | (memory.protectedContent ? CV_ACCEL_MEMF_PROTECTED : 0);
     req.ext.layout_modifier = memory.layoutModifier;
     req.ext.fourcc = memory.fourcc;

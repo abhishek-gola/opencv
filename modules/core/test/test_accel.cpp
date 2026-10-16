@@ -781,7 +781,7 @@ TEST(Core_Accel, wrapped_device_memory_reads_its_content)
     }
 }
 
-TEST(Core_Accel, ranges_that_do_not_fit_in_64_bits_are_refused)
+TEST(Core_Accel, ranges_outside_the_memory_are_refused)
 {
     accel::Device d = emulator(DISCRETE);
     accel::ExternalMemory mem;
@@ -793,6 +793,20 @@ TEST(Core_Accel, ranges_that_do_not_fit_in_64_bits_are_refused)
     mem.offset = 200;                                       // inside the allocation, but runs past its end
     mem.size = 100;
     EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({1, 100}), CV_8UC1), cv::Exception);
+    // rows 2^63 bytes apart: the extent wraps around to 1 byte in 64 bits
+    mem.offset = 0;
+    mem.size = 256;
+    const size_t huge[2] = { (size_t)1 << (sizeof(size_t) * 8 - 1), 1 };
+    EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({3, 1}), CV_8UC1, huge), cv::Exception);
+    // packed steps that overflow
+    EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({INT_MAX, INT_MAX, INT_MAX}), CV_64FC4), cv::Exception);
+    // a protected allocation is checked over the whole range too, not only where it starts
+    accel::ExternalMemory secure;
+    secure.type = accel::ExternalMemory::DEVICE_POINTER;
+    secure.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64, 7, true);
+    secure.offset = 32;
+    secure.size = 64;
+    EXPECT_THROW(accel::wrapExternalMemory(d, secure, MatShape({8, 8}), CV_8UC1), cv::Exception);
 }
 
 TEST(Core_Accel, released_memory_in_flight_is_revived_with_its_fences)
