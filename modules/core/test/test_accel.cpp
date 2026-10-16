@@ -17,6 +17,8 @@
 #endif
 #include <opencv2/core/utils/accel_dispatch.private.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <thread>
 
@@ -927,10 +929,19 @@ TEST(Core_Accel, copy_into_wrapped_memory_is_done_on_return)
 }
 #endif
 
-// The only test that uses emulator:5: OpenCV keeps a lost device lost for the whole process.
-TEST(Core_Accel, device_failures_never_escape_a_destructor)
+//! emulator:5 in its normal state (tests that use it leave it failed or lost)
+static accel::Device failingDevice()
 {
     accel::Device d = emulator(FAILING);
+    accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
+    accel::detail::reviveDevices();
+    return d;
+}
+
+TEST(Core_Accel, device_failures_never_escape_a_destructor)
+{
+    accel::Device d = failingDevice();
+    const int64 base = accel::detail::emulatorLiveAllocations(FAILING);    // memory other tests leaked on purpose
     Mat src(16, 16, CV_8UC1), other(16, 16, CV_8UC1);
     randu(src, 0, 128);
     randu(other, 128, 255);
@@ -944,7 +955,7 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
         EXPECT_THROW(out.getMat(ACCESS_READ), cv::Exception);
         accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
     }
-    EXPECT_EQ(0, accel::detail::emulatorLiveAllocations(FAILING));
+    EXPECT_EQ(base, accel::detail::emulatorLiveAllocations(FAILING));
 
     // 2. a UMat made from a Mat: a failed result is not copied back, the Mat keeps its content
     {
@@ -959,12 +970,12 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
         }
         EXPECT_EQ(0, maxDiff(src, m));
     }
-    EXPECT_EQ(0, accel::detail::emulatorLiveAllocations(FAILING));
+    EXPECT_EQ(base, accel::detail::emulatorLiveAllocations(FAILING));
 
     // 3. calls that fail after queuing their work: what they write is invalid until written whole
     {
         UMat u = makeOn(d, src), out, c = makeOn(d, other);
-        accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR, true);
+        accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR, accel::detail::EMU_FAIL_CALLS);
         EXPECT_THROW(cv::flip(u, out, 1), cv::Exception);
         EXPECT_THROW(u.copyTo(c), cv::Exception);
         accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
@@ -977,7 +988,7 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
         out.copyTo(res);                    // a download into res, no host copy kept
         EXPECT_EQ(0, maxDiff(ref, res));
     }
-    EXPECT_EQ(0, accel::detail::emulatorLiveAllocations(FAILING));
+    EXPECT_EQ(base, accel::detail::emulatorLiveAllocations(FAILING));
 
     // 4. a lost device: its memory is leaked rather than freed, the other devices keep working
     {
@@ -992,6 +1003,60 @@ TEST(Core_Accel, device_failures_never_escape_a_destructor)
     accel::resetTransferStats();
     cv::flip(a, b, 1);
     EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
+    accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
+    accel::detail::reviveDevices();
+}
+
+TEST(Core_Accel, borrowed_memory_waits_until_failed_work_provably_stopped)
+{
+    // A copy into memory of "another library" queues its work and fails, and afterwards the
+    // device can neither record a fence nor be synchronized: nothing proves that the copy
+    // stopped writing. Marking the device lost does not stop its DMA, so the memory must not
+    // go back to its owner until the device can be synchronized again.
+    accel::Device d = failingDevice();
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = accel::detail::emulatorAllocateExternal(FAILING, 256, 1, false);
+    mem.size = 256;
+    UMat borrowed = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    UMat src = makeOn(d, Mat(16, 16, CV_8UC1, Scalar(9)));
+    accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR,
+                                         accel::detail::EMU_FAIL_CALLS | accel::detail::EMU_FAIL_RECORD);
+    EXPECT_THROW(src.copyTo(borrowed), cv::Exception);
+
+    std::atomic<bool> released(false);
+    std::thread owner([&]() { borrowed.release(); released = true; });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(released.load());      // device_synchronize cannot record its fences: no proof yet
+    accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR, accel::detail::EMU_FAIL_SYNC);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(released.load());      // nor when it fails outright
+    accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
+    owner.join();                       // the device can be synchronized again: handed back
+    EXPECT_TRUE(released.load());
+    accel::detail::reviveDevices();
+}
+
+TEST(Core_Accel, refused_fence_references_are_tracked_by_device_sync)
+{
+    // fence_retain fails: a buffer cannot keep the fence of the work that wrote it, and must
+    // neither hold the fence without a reference (released twice later) nor forget the work
+    accel::Device d = failingDevice();
+    const int64 fences = accel::detail::emulatorLiveFences();
+    runWithDeviceDelay(20000, [&]() {
+        Mat src(16, 16, CV_8UC1), ref;
+        randu(src, 0, 255);
+        cv::flip(src, ref, 1);
+        UMat u = makeOn(d, src), out;
+        accel::detail::emulatorInjectFailure(CV_ACCEL_INTERNAL_ERROR, accel::detail::EMU_FAIL_RETAIN);
+        cv::flip(u, out, 1);                                // still queued for 20 ms
+        EXPECT_EQ(0, maxDiff(ref, out.getMat(ACCESS_READ))); // waits by synchronizing the device
+        accel::detail::emulatorInjectFailure(CV_ACCEL_OK);
+    });
+    UMat trigger = makeOn(d, Mat(1, 1, CV_8UC1, Scalar(0)));   // releases collect finished buffers
+    trigger.release();
+    EXPECT_EQ(fences, accel::detail::emulatorLiveFences());    // every reference released once
+    accel::detail::reviveDevices();
 }
 
 #ifdef HAVE_CUDA

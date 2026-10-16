@@ -69,15 +69,27 @@ CV_EXPORTS int64 emulatorLiveAllocations(int device = -1);
 //! times device work and CPU access overlapped on "emulator:4" (a fault on real hardware)
 CV_EXPORTS int64 emulatorViolations();
 
-/** @brief Makes work on "emulator:5" fail from now on (@p status is a cvAccelStatus, 0 restores
-normal operation).
+//! where emulatorInjectFailure makes "emulator:5" fail (flags)
+enum EmulatorFailurePoint
+{
+    EMU_FAIL_FENCES = 1,    //!< work queued from now on fails later: its fences report the status
+    EMU_FAIL_CALLS = 2,     //!< operations and copies queue their work, then return the status
+    EMU_FAIL_RECORD = 4,    //!< no fence can be recorded (stream_record_fence, and inside device_synchronize)
+    EMU_FAIL_SYNC = 8,      //!< device_synchronize returns the status
+    EMU_FAIL_RETAIN = 16    //!< fence_retain returns the status and takes no reference
+};
 
-By default the work is queued and fails later: fences recorded from now on report @p status.
-With @p synchronous, operations and copies queue their work and then return @p status, like a
-backend that fails halfway through a call. CV_ACCEL_DEVICE_LOST also makes every call on the
-device fail at once; OpenCV keeps a lost device lost for the rest of the process, so only one
-test may use it, at its end. */
-CV_EXPORTS void emulatorInjectFailure(int status, bool synchronous = false);
+/** @brief Makes "emulator:5" fail from now on (@p status is a cvAccelStatus, 0 restores normal
+operation) at the @p points given (EmulatorFailurePoint flags).
+
+CV_ACCEL_DEVICE_LOST makes every call on the device fail at once, whatever @p points says, and
+stops the device: its queued kernels and copies never run (backend rule 8); the call returns
+once none runs any more. OpenCV keeps a lost device lost; tests that lose it call
+reviveDevices() and restore the emulator with status 0 afterwards. */
+CV_EXPORTS void emulatorInjectFailure(int status, int points = EMU_FAIL_FENCES);
+
+//! number of emulator fences alive right now (no reference released twice, none leaked)
+CV_EXPORTS int64 emulatorLiveFences();
 
 //! the kernels of @p device report NOT_IMPLEMENTED while @p disable holds (a device without the operation)
 CV_EXPORTS void emulatorDisableOps(int device, bool disable);

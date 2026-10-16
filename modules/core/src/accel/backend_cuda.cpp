@@ -74,7 +74,7 @@ cvAccelStatus status(cudaError_t e, const char* what)
     if (e == cudaErrorMemoryAllocation)
         return CV_ACCEL_OUT_OF_MEMORY;
     if (isStickyError(e))
-        return CV_ACCEL_DEVICE_LOST;
+        return CV_ACCEL_DEVICE_LOST;    // the driver has torn down the context's work: nothing of it runs (rule 8)
     if (e == cudaErrorNotReady)
         return CV_ACCEL_TIMEOUT;
     return CV_ACCEL_INTERNAL_ERROR;

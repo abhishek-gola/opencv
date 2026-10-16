@@ -40,20 +40,30 @@ struct StreamHolder
 };
 typedef std::shared_ptr<StreamHolder> StreamPtr;
 
-/** Counted reference to a backend fence, the stream it was recorded on and that stream's device. */
+/** Counted reference to a backend fence, the stream it was recorded on and that stream's device.
+
+An unknown fence stands for work whose end cannot be observed: a failure left no fence behind
+and the device could not be synchronized, or a backend refused a reference. It completes once
+a device_synchronize of its device that started after it succeeds, or once the backend reports
+the device lost (backend rule 8: a lost device has stopped). Until then nothing the work may
+touch is freed, and memory that belongs to someone else is not handed back. */
 class FenceRef
 {
 public:
-    FenceRef() : b_(0), f_(0), streamUid_(0), device_(-1) {}
+    FenceRef() : b_(0), f_(0), streamUid_(0), device_(-1), syncTicket_(0) {}
     //! adopts the reference returned by stream_record_fence
     FenceRef(Backend* b, cvAccelFence f, uint64 streamUid, int device)
-        : b_(b), f_(f), streamUid_(streamUid), device_(device) {}
+        : b_(b), f_(f), streamUid_(streamUid), device_(device), syncTicket_(0) {}
+    //! work on @p device that may still be running and has no fence (see above)
+    static FenceRef unknown(Backend* b, int device) CV_NOEXCEPT;
     FenceRef(const FenceRef& o);
     FenceRef& operator=(const FenceRef& o);
     ~FenceRef() { reset(); }
 
     void reset();
-    bool empty() const { return f_ == 0; }
+    //! nothing to wait for
+    bool empty() const { return f_ == 0 && syncTicket_ == 0; }
+    bool isUnknown() const { return syncTicket_ != 0; }
     Backend* backend() const { return b_; }
     cvAccelFence get() const { return f_; }
     uint64 streamUid() const { return streamUid_; }
@@ -64,27 +74,33 @@ public:
     /** CPU wait (counted in TransferStats::hostWaits); throws on device errors. With
         @p bounded false the OPENCV_ACCEL_WAIT_TIMEOUT_MS limit does not apply: for waits that
         guard memory going back to its owner (a user buffer, imported memory, a Mat's memory),
-        which must never be handed back while the device may still use it. */
+        which must never be handed back while the device may still use it. An unknown fence
+        synchronizes the device; unbounded, it retries until the device proves it is idle or
+        stopped. */
     void wait(bool bounded = true) const;
 
     enum Poll { DONE, PENDING, FAILED };
     /** Never throws: for release paths, which run from destructors. A failure is logged (and
-        DEVICE_LOST marks the device lost); the work behind the fence no longer runs, so the
-        caller may free what it used. */
+        DEVICE_LOST marks the device stopped); the work behind the fence no longer runs, so the
+        caller may free what it used. An unknown fence stays PENDING until it completes (see
+        above): whatever waits for it is leaked rather than freed under the device. */
     Poll poll() const CV_NOEXCEPT;
     //! never throws; false when the device failed (see wait() for @p bounded)
     bool waitNoThrow(bool bounded = true) const CV_NOEXCEPT;
 
 private:
+    void waitUnknown(bool bounded) const;
     Backend* b_;
     cvAccelFence f_;
     uint64 streamUid_;
     int device_;
+    uint64 syncTicket_;     //!< unknown fence: the first device_synchronize ticket that covers the work
 };
 
 /** After a failed enqueue, or a failed fence record after one: the backend may have queued part
-    of the work. Returns a fence after it, or an empty fence once the device is idle (or lost,
-    when even that fails). Never throws. */
+    of the work. Returns a fence after it, an empty fence once the device is idle or stopped,
+    and an unknown fence (the device is then marked lost) when neither can be established.
+    Never throws. */
 FenceRef fenceAfterFailure(const StreamPtr& s) CV_NOEXCEPT;
 
 //! the message of the exception being handled (call inside a catch block)
@@ -170,8 +186,21 @@ public:
     //! frees deferred buffers whose fences completed; with @p waitAll, waits for all of them
     void collectDeferred(bool waitAll);
 
-    /** A device stays lost once lost; a failure without a known device loses the whole backend.
-        Lock-free and never throws: called from release paths and from check(). */
+    /** device_synchronize, counted per device: an unknown fence completes once a
+        synchronization that started after it succeeded. DEVICE_LOST marks the device stopped.
+        Never throws. */
+    cvAccelStatus synchronize(int device) CV_NOEXCEPT;
+    //! the ticket the next synchronize() of @p device gets
+    uint64 nextSyncTicket(int device) const CV_NOEXCEPT
+    {
+        return syncIssued_[slot(device)].load() + 1;
+    }
+    //! a synchronize() with a ticket of at least @p ticket succeeded
+    bool syncedSince(int device, uint64 ticket) const CV_NOEXCEPT
+    {
+        return syncDone_[slot(device)].load() >= ticket;
+    }
+
     /** Live buffers by the identity of their physical memory (cvAccelAllocation::backing_id),
         so that aliases of one memory share one buffer and one synchronization state. */
     void registerBacking(BufferState* st, UMatData* u);
@@ -187,19 +216,41 @@ public:
     void revive() CV_NOEXCEPT
     {
         lost_.store(false);
+        stopped_.store(false);
         for (int i = 0; i < MAX_TRACKED_DEVICES; i++)
+        {
             lostDevices_[i].store(false);
+            stoppedDevices_[i].store(false);
+        }
     }
+    /** A lost device gets no new work and none of its memory is freed through it (a call may
+        fail or block). A device stays lost once lost; a failure without a known device loses
+        the whole backend. Lock-free and never throws: called from release paths and check(). */
     bool isLost(int device) const CV_NOEXCEPT
     {
         return lost_.load() || (device >= 0 && device < MAX_TRACKED_DEVICES && lostDevices_[device].load());
     }
+    //! core gave up on the device (a timed-out wait, a failure it could not recover from)
     void markLost(int device) CV_NOEXCEPT
     {
         if (device >= 0 && device < MAX_TRACKED_DEVICES)
             lostDevices_[device].store(true);
         else
             lost_.store(true);
+    }
+    //! the backend reported CV_ACCEL_DEVICE_LOST: the device is lost and has stopped (backend rule 8)
+    void markStopped(int device) CV_NOEXCEPT
+    {
+        markLost(device);
+        if (device >= 0 && device < MAX_TRACKED_DEVICES)
+            stoppedDevices_[device].store(true);
+        else
+            stopped_.store(true);
+    }
+    //! nothing of the device runs or touches memory any more
+    bool isStopped(int device) const CV_NOEXCEPT
+    {
+        return stopped_.load() || (device >= 0 && device < MAX_TRACKED_DEVICES && stoppedDevices_[device].load());
     }
 
     IdleGate& idleGate(int device);
@@ -246,9 +297,13 @@ private:
     std::map<std::pair<int, int>, MatAllocator*> allocators_;
     std::vector<BufferState*> deferred_;
     enum { MAX_TRACKED_DEVICES = 64 };  //!< devices past this are tracked together, as the backend
-    std::atomic<bool> lost_;
+    static int slot(int device) { return device >= 0 && device < MAX_TRACKED_DEVICES ? device : MAX_TRACKED_DEVICES; }
+    std::atomic<bool> lost_, stopped_;
     std::atomic<bool> lostDevices_[MAX_TRACKED_DEVICES];
+    std::atomic<bool> stoppedDevices_[MAX_TRACKED_DEVICES];
     std::atomic<bool> noPinnedShadow_[MAX_TRACKED_DEVICES];
+    std::atomic<uint64> syncIssued_[MAX_TRACKED_DEVICES + 1];  //!< synchronize() tickets handed out
+    std::atomic<uint64> syncDone_[MAX_TRACKED_DEVICES + 1];    //!< highest ticket whose synchronize() succeeded
     struct BackingEntry
     {
         BufferState* st;

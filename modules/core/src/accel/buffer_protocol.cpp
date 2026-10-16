@@ -557,7 +557,7 @@ void* beginCpuAccess(BufferState* st, int access)
 {
     Backend* b = st->backend;
     if (hostAccessClass(st) == CV_ACCEL_HOST_ACCESS_DEVICE_IDLE)
-        b->check(b->fn().device_synchronize(st->device), "device_synchronize", st->device);
+        b->check(b->synchronize(st->device), "device_synchronize", st->device);
     void* p = 0;
     cvAccelStatus status = b->fn().begin_cpu_access(&st->alloc, 0, st->alloc.size, (uint32_t)access, &p);
     if (status == CV_ACCEL_OK && !p)

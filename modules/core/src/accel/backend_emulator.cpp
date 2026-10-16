@@ -77,25 +77,34 @@ std::atomic<bool> g_opsDisabled[EMU_DEVICES];
 //! one-shot (emulatorFailNextCpuFlush): the next end_cpu_access after a CPU write fails
 std::atomic<bool> g_failNextFlush(false);
 
-// EMU_FAILING: the status its work reports (emulatorInjectFailure)
+// EMU_FAILING: the status its work reports, and where (emulatorInjectFailure)
 std::atomic<int> g_failingStatus(CV_ACCEL_OK);
-std::atomic<bool> g_failSynchronously(false);
+std::atomic<int> g_failPoints(0);
+
+//! the injected failure applies to @p point of @p device
+bool failing(int device, int point)
+{
+    return device == EMU_FAILING && g_failingStatus.load() != CV_ACCEL_OK && (g_failPoints.load() & point) != 0;
+}
+
+cvAccelStatus injectedFailure(const char* what)
+{
+    return fail((cvAccelStatus)g_failingStatus.load(), cv::format("emulated failure: %s", what));
+}
 
 //! what a fence recorded now on @p device reports once the work before it is done
 cvAccelStatus asyncFailure(int device)
 {
-    return device == EMU_FAILING && !g_failSynchronously.load() ? (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK;
+    return failing(device, detail::EMU_FAIL_FENCES) ? (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK;
 }
 
 //! what a call on @p device returns after queuing its work (a backend failing halfway through)
 cvAccelStatus syncFailure(int device)
 {
-    const cvAccelStatus st = device == EMU_FAILING && g_failSynchronously.load() ?
-                             (cvAccelStatus)g_failingStatus.load() : CV_ACCEL_OK;
-    return st == CV_ACCEL_OK ? st : fail(st, "emulated failure after queuing the work");
+    return failing(device, detail::EMU_FAIL_CALLS) ? injectedFailure("after queuing the work") : CV_ACCEL_OK;
 }
 
-//! a lost device rejects every call and never makes anyone wait (backend rule 8)
+//! a lost device has stopped (backend rule 8): it rejects every call and runs no work
 bool deviceLost(int device)
 {
     return device == EMU_FAILING && g_failingStatus.load() == CV_ACCEL_DEVICE_LOST;
@@ -105,6 +114,12 @@ cvAccelStatus lostError()
 {
     return fail(CV_ACCEL_DEVICE_LOST, "emulator:5 is lost");
 }
+
+//! device work (kernels, copies) running right now, per device: a lost device waits for it to stop
+std::atomic<int> g_running[EMU_DEVICES];
+
+//! fences alive (tests check that no reference is released twice or leaked)
+std::atomic<long long> g_liveFences(0);
 
 struct FakeDmaBuf;
 
@@ -168,7 +183,8 @@ bool isScrambled(const cvAccelAllocation* a)
 struct EmuFence
 {
     explicit EmuFence(int device_)
-        : done(false), refs(1), device(device_), status(asyncFailure(device_)) {}
+        : done(false), refs(1), device(device_), status(asyncFailure(device_)) { g_liveFences++; }
+    ~EmuFence() { g_liveFences--; }
     std::mutex m;
     std::condition_variable cv;
     bool done;
@@ -294,6 +310,17 @@ struct EmuStream
             }
             if (delayUs)
                 std::this_thread::sleep_for(std::chrono::microseconds(delayUs));
+            if (task.second)
+            {
+                // a lost device has stopped: its kernels and copies never run (backend rule 8).
+                // Counted first, so that emulatorInjectFailure sees every task that got past the check.
+                g_running[device]++;
+                if (deviceLost(device))
+                {
+                    g_running[device]--;
+                    continue;
+                }
+            }
             const bool managedWork = task.second && device == EMU_MANAGED;
             if (managedWork)
             {
@@ -311,6 +338,8 @@ struct EmuStream
             }
             if (managedWork)
                 g_managedDeviceWork--;
+            if (task.second)
+                g_running[device]--;
         }
     }
 
@@ -603,7 +632,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             return fail(CV_ACCEL_INTERNAL_ERROR, e.what());
         }
     }
-    if (device == EMU_DISCRETE && ext->type == CV_ACCEL_EXTMEM_DEVICE_POINTER)
+    if ((device == EMU_DISCRETE || device == EMU_FAILING) && ext->type == CV_ACCEL_EXTMEM_DEVICE_POINTER)
     {
         // memory of another emulator allocation on this device, like a cudaMalloc pointer
         // from another library: stored scrambled, reached by the CPU only through copies
@@ -834,6 +863,8 @@ cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelF
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     if (deviceLost(((EmuStream*)stream)->device))
         return lostError();
+    if (failing(((EmuStream*)stream)->device, detail::EMU_FAIL_RECORD))
+        return injectedFailure("no fence can be recorded");
     try
     {
         EmuFence* f = new EmuFence(((EmuStream*)stream)->device);
@@ -879,8 +910,11 @@ cvAccelStatus CV_API_CALL emu_fence_wait(cvAccelFence fence, uint64_t timeout_ns
 
 cvAccelStatus CV_API_CALL emu_fence_retain(cvAccelFence fence) CV_ACCEL_NOEXCEPT
 {
-    if (fence)
-        ((EmuFence*)fence)->refs++;
+    if (!fence)
+        return CV_ACCEL_OK;
+    if (failing(((EmuFence*)fence)->device, detail::EMU_FAIL_RETAIN))
+        return injectedFailure("fence_retain");     // no reference taken
+    ((EmuFence*)fence)->refs++;
     return CV_ACCEL_OK;
 }
 
@@ -906,6 +940,8 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
 {
     if (deviceLost(device))
         return lostError();
+    if (failing(device, detail::EMU_FAIL_SYNC))
+        return injectedFailure("device_synchronize");
     try
     {
         FenceList list;
@@ -915,9 +951,13 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
         {
             if ((*it)->device != device || (*it)->retired)
                 continue;
+            // a queue whose position cannot be recorded cannot be waited for: the device is not
+            // known to be idle, and saying OK would hand memory back under running work
             cvAccelFence f = 0;
-            if (emu_stream_record_fence((cvAccelStream)*it, &f) == CV_ACCEL_OK)
-                list.fences.push_back((EmuFence*)f);    // capacity is reserved: never throws
+            const cvAccelStatus st = emu_stream_record_fence((cvAccelStream)*it, &f);
+            if (st != CV_ACCEL_OK)
+                return st;      // the fences recorded so far are released with list
+            list.fences.push_back((EmuFence*)f);    // capacity is reserved: never throws
         }
         // retired streams drain on their own; their workers leave liveStreams when done
         streamsDrained().wait(lk, [device]() {
@@ -927,9 +967,16 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
             return true;
         });
         lk.unlock();
+        // Every queue has passed its fence: the work queued before this call has finished. A
+        // fence whose work failed still counts (the work no longer runs; its own fences report
+        // the failure to whoever waits for them), a device that was lost meanwhile does not.
         for (size_t i = 0; i < list.fences.size(); i++)
+        {
             list.fences[i]->wait(CV_ACCEL_INFINITE);
-        return CV_ACCEL_OK;
+            if (list.fences[i]->status == CV_ACCEL_DEVICE_LOST)
+                return fail(CV_ACCEL_DEVICE_LOST, "emulated device loss");
+        }
+        return deviceLost(device) ? lostError() : CV_ACCEL_OK;
     }
     catch (const std::bad_alloc&)
     {
@@ -1198,10 +1245,22 @@ void emulatorFailNextCpuFlush()
     impl::g_failNextFlush.store(true);
 }
 
-void emulatorInjectFailure(int status, bool synchronous)
+void emulatorInjectFailure(int status, int points)
 {
-    impl::g_failSynchronously.store(synchronous);
+    impl::g_failPoints.store(points);
     impl::g_failingStatus.store(status);
+    if (status == CV_ACCEL_DEVICE_LOST)
+    {
+        // a lost device has stopped (backend rule 8): wait for the kernels and copies that got
+        // past their check before reporting the loss to anyone
+        while (impl::g_running[impl::EMU_FAILING].load() != 0)
+            std::this_thread::yield();
+    }
+}
+
+int64 emulatorLiveFences()
+{
+    return (int64)impl::g_liveFences.load();
 }
 
 }} // namespace accel::detail

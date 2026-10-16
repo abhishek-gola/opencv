@@ -55,11 +55,16 @@ Rules a backend must follow, because core relies on them for correctness:
    fences that are already complete.
 7. Imported host memory is never freed or reused by the backend; overlapping imports are
    refused by core, which falls back to a copy.
-8. Once a call has returned CV_ACCEL_DEVICE_LOST for a device, waits on its fences return
-   promptly with an error instead of blocking, and fence_release / stream_destroy still
-   succeed. Core then frees no more allocations of that device (they are leaked, as after a
-   timed-out wait, see OPENCV_ACCEL_WAIT_TIMEOUT_MS) but keeps releasing its own host-side
-   state, so that destroying a UMat never blocks or throws.
+8. CV_ACCEL_DEVICE_LOST means that the device has stopped: no work of it runs and none of
+   its DMA touches memory any more (a backend resets or tears down the device context before
+   it reports the status). From then on waits on its fences return promptly with an error,
+   and fence_release / stream_destroy still succeed. Core frees no more device allocations of
+   that device and keeps releasing its own host-side state, so that destroying a UMat never
+   blocks or throws. When core cannot establish that work stopped (a fence cannot be
+   recorded after a failure and device_synchronize fails with another status, or a wait timed
+   out, see OPENCV_ACCEL_WAIT_TIMEOUT_MS), it leaks every byte that work may touch, and memory
+   that belongs to someone else is not handed back until device_synchronize reports OK or
+   CV_ACCEL_DEVICE_LOST.
 9. An operation or copy that returns CV_ACCEL_NOT_IMPLEMENTED or CV_ACCEL_OUT_OF_MEMORY has
    queued nothing (core falls back, or frees memory and retries). After any other error part
    of the work may be queued: core records a fence after it (or synchronizes the device) and
@@ -411,15 +416,22 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
         and TIMEOUT means the work behind the fence failed and is no longer running: core then
         frees the memory that work used. */
     cvAccelStatus (CV_API_CALL *fence_wait)(cvAccelFence fence, uint64_t timeout_ns) CV_ACCEL_NOEXCEPT;
+    /** Takes one more reference. When it fails, the caller holds no new reference (core then
+        tracks that work by synchronizing the device instead). */
     cvAccelStatus (CV_API_CALL *fence_retain)(cvAccelFence fence) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *fence_release)(cvAccelFence fence) CV_ACCEL_NOEXCEPT;
     //! optional (CV_ACCEL_CAP_EXTERNAL_FENCE): a new handle (e.g. sync_file fd) owned by the caller
     cvAccelStatus (CV_API_CALL *fence_export)(cvAccelFence fence, uint32_t type, int64_t* handle) CV_ACCEL_NOEXCEPT;
     //! optional: later work on @p stream waits for an external fence; takes ownership of @p handle even on failure
     cvAccelStatus (CV_API_CALL *stream_wait_external)(cvAccelStream stream, uint32_t type, int64_t handle) CV_ACCEL_NOEXCEPT;
-    /** Waits for all work on the device. Before CPU access to DEVICE_IDLE memory core calls
-        this and holds back new work on the device until the CPU access ends (on Jetson
-        before Thor, the CPU faults on any managed allocation while any kernel runs). */
+    /** Waits for all work on the device. Returns OK once every piece of work queued on the
+        device before the call has finished, successfully or not (failures are reported by the
+        fences of that work), and CV_ACCEL_DEVICE_LOST when the device has stopped (rule 8).
+        Any other status means that the backend could not establish either (a fence could not
+        be recorded, say), and core treats the device's work as possibly still running. Before
+        CPU access to DEVICE_IDLE memory core calls this and holds back new work on the device
+        until the CPU access ends (on Jetson before Thor, the CPU faults on any managed
+        allocation while any kernel runs). */
     cvAccelStatus (CV_API_CALL *device_synchronize)(int device) CV_ACCEL_NOEXCEPT;
     //! @}
 

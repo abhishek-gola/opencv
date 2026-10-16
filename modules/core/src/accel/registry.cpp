@@ -15,6 +15,8 @@
 #include <opencv2/core/utils/tls.hpp>
 #include <opencv2/core/utils/plugin_loader.private.hpp>
 
+#include <chrono>
+
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -109,23 +111,56 @@ StreamHolder::~StreamHolder()
     }
 }
 
-FenceRef::FenceRef(const FenceRef& o) : b_(o.b_), f_(o.f_), streamUid_(o.streamUid_), device_(o.device_)
+FenceRef FenceRef::unknown(Backend* b, int device) CV_NOEXCEPT
 {
-    if (f_)
-        b_->fn().fence_retain(f_);
+    FenceRef r;
+    r.b_ = b;
+    r.device_ = device;
+    r.syncTicket_ = b->nextSyncTicket(device);  // a synchronization that starts from now on covers the work
+    return r;
+}
+
+//! takes a reference to @p f for a copy; when the backend refuses one, the copy tracks the work as unknown
+static void retainOrForget(Backend* b, cvAccelFence f, int device, cvAccelFence& outFence, uint64& outTicket) CV_NOEXCEPT
+{
+    outFence = 0;
+    outTicket = 0;
+    if (b->fn().fence_retain(f) == CV_ACCEL_OK)
+    {
+        outFence = f;
+        return;
+    }
+    // holding the pointer without a reference would release it twice later
+    outTicket = b->nextSyncTicket(device);
+    try
+    {
+        CV_LOG_ERROR(NULL, "accel(" << b->name() << "): fence_retain failed: " << b->fn().get_last_error()
+                     << "; the work is tracked by synchronizing device " << device);
+    }
+    catch (...) {}
+}
+
+FenceRef::FenceRef(const FenceRef& o)
+    : b_(o.b_), f_(0), streamUid_(o.streamUid_), device_(o.device_), syncTicket_(o.syncTicket_)
+{
+    if (o.f_)
+        retainOrForget(b_, o.f_, device_, f_, syncTicket_);
 }
 
 FenceRef& FenceRef::operator=(const FenceRef& o)
 {
     if (this != &o)
     {
+        cvAccelFence f = 0;
+        uint64 ticket = o.syncTicket_;
         if (o.f_)
-            o.b_->fn().fence_retain(o.f_);
+            retainOrForget(o.b_, o.f_, o.device_, f, ticket);
         reset();
         b_ = o.b_;
-        f_ = o.f_;
+        f_ = f;
         streamUid_ = o.streamUid_;
         device_ = o.device_;
+        syncTicket_ = ticket;
     }
     return *this;
 }
@@ -138,10 +173,13 @@ void FenceRef::reset()
     f_ = 0;
     streamUid_ = 0;
     device_ = -1;
+    syncTicket_ = 0;
 }
 
 bool FenceRef::isComplete() const
 {
+    if (syncTicket_)
+        return poll() == DONE;
     if (!f_)
         return true;
     cvAccelStatus st = b_->fn().fence_wait(f_, 0);
@@ -160,8 +198,47 @@ static std::atomic<uint64_t>& waitTimeoutNs()
     return ns;
 }
 
+void FenceRef::waitUnknown(bool bounded) const
+{
+    // Nothing tells when the work ends but a synchronization of the whole device. Memory that
+    // goes back to its owner is never handed back on a guess: retry until the device is idle or
+    // reports that it stopped, however long that takes.
+    unsigned sleepMs = 1;
+    bool logged = false;
+    for (;;)
+    {
+        if (poll() == DONE)
+            return;
+        const cvAccelStatus st = b_->synchronize(device_);
+        if (st == CV_ACCEL_OK || st == CV_ACCEL_DEVICE_LOST)
+            return;     // idle, or stopped (backend rule 8)
+        if (bounded)
+        {
+            b_->markLost(device_);
+            CV_Error_(Error::StsError, ("accel(%s): device %d failed and could not be synchronized (status %d): %s; "
+                                        "the device is considered lost", b_->name().c_str(), device_, (int)st,
+                                        b_->fn().get_last_error()));
+        }
+        if (!logged)
+        {
+            CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): device " << device_ << " failed and cannot be synchronized "
+                         "(status " << (int)st << "): " << b_->fn().get_last_error() << "; memory that goes back "
+                         "to its owner waits until the device is idle or stopped");
+            logged = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        sleepMs = std::min(sleepMs * 2, 1000u);
+    }
+}
+
 void FenceRef::wait(bool bounded) const
 {
+    if (syncTicket_)
+    {
+        counters().hostWaits++;
+        waitUnknown(bounded);
+        return;
+    }
     if (!f_)
         return;
     counters().hostWaits++;
@@ -179,6 +256,8 @@ void FenceRef::wait(bool bounded) const
 
 FenceRef::Poll FenceRef::poll() const CV_NOEXCEPT
 {
+    if (syncTicket_)
+        return b_->isStopped(device_) || b_->syncedSince(device_, syncTicket_) ? DONE : PENDING;
     if (!f_)
         return DONE;
     const cvAccelStatus st = b_->fn().fence_wait(f_, 0);
@@ -188,7 +267,7 @@ FenceRef::Poll FenceRef::poll() const CV_NOEXCEPT
         return PENDING;
     // the work behind the fence failed and is no longer running (see fence_wait)
     if (st == CV_ACCEL_DEVICE_LOST)
-        b_->markLost(device_);
+        b_->markStopped(device_);
     try
     {
         CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): device " << device_ << " failed (status " << (int)st
@@ -219,9 +298,20 @@ FenceRef fenceAfterFailure(const StreamPtr& s) CV_NOEXCEPT
     cvAccelFence f = 0;
     if (b->fn().stream_record_fence(s->handle, &f) == CV_ACCEL_OK && f)
         return FenceRef(b, f, s->uid, s->device);
-    if (b->fn().device_synchronize(s->device) != CV_ACCEL_OK)
-        b->markLost(s->device);     // nothing more can be known about what still runs there
-    return FenceRef();
+    const cvAccelStatus st = b->synchronize(s->device);
+    if (st == CV_ACCEL_OK || st == CV_ACCEL_DEVICE_LOST)
+        return FenceRef();      // idle, or stopped (backend rule 8): nothing of the work runs any more
+    // Marking the device lost does not stop its DMA: the work counts as running until a later
+    // synchronization succeeds, and nothing it may touch is freed or handed back before that.
+    b->markLost(s->device);
+    try
+    {
+        CV_LOG_ERROR(NULL, "accel(" << b->name() << "): device " << s->device << " failed and could not be "
+                     "synchronized (status " << (int)st << "): " << b->fn().get_last_error()
+                     << "; the device is considered lost and the memory of the failed work is kept");
+    }
+    catch (...) {}
+    return FenceRef::unknown(b, s->device);
 }
 
 std::string currentExceptionMessage()
@@ -253,6 +343,11 @@ FenceRef recordFence(const StreamPtr& s)
 
 void streamWait(const StreamPtr& s, const FenceRef& f)
 {
+    if (f.isUnknown())
+    {
+        f.wait();   // no device-side handle: only a synchronization of its device orders it
+        return;
+    }
     if (f.empty() || f.streamUid() == s->uid)
         return;     // in-order stream: earlier work is already ordered
     if (f.backend() == s->backend)
@@ -280,7 +375,7 @@ void streamWait(const StreamPtr& s, const FenceRef& f)
 Backend::Backend(int id, const OpenCV_Core_Accel_API* api, int priority, const std::string& origin)
     : id_(id), api_(api), priority_(priority),
       name_(api->v0.backend_name ? api->v0.backend_name : "unnamed"), origin_(origin),
-      enumerated_(false), lost_(false), pinnedCacheBytes_(0)
+      enumerated_(false), lost_(false), stopped_(false), pinnedCacheBytes_(0)
 {
     // a backend built against an older header has a shorter table: what it lacks reads as NULL
     memset(&fn_, 0, sizeof(fn_));
@@ -289,8 +384,32 @@ Backend::Backend(int id, const OpenCV_Core_Accel_API* api, int priority, const s
     for (int i = 0; i < MAX_TRACKED_DEVICES; i++)
     {
         lostDevices_[i].store(false);
+        stoppedDevices_[i].store(false);
         noPinnedShadow_[i].store(false);
     }
+    for (int i = 0; i <= MAX_TRACKED_DEVICES; i++)
+    {
+        syncIssued_[i].store(0);
+        syncDone_[i].store(0);
+    }
+}
+
+cvAccelStatus Backend::synchronize(int device) CV_NOEXCEPT
+{
+    const int k = slot(device);
+    const uint64 ticket = ++syncIssued_[k];
+    const cvAccelStatus st = fn().device_synchronize(device);
+    if (st == CV_ACCEL_OK)
+    {
+        // everything queued before this call has finished: so has the work of every unknown
+        // fence created before the ticket was taken
+        uint64 done = syncDone_[k].load();
+        while (done < ticket && !syncDone_[k].compare_exchange_weak(done, ticket))
+            ;
+    }
+    else if (st == CV_ACCEL_DEVICE_LOST)
+        markStopped(device);
+    return st;
 }
 
 static uint64_t pinnedCacheLimit()
@@ -378,7 +497,7 @@ void Backend::check(cvAccelStatus st, const char* what, int device) const
     if (st == CV_ACCEL_OK)
         return;
     if (st == CV_ACCEL_DEVICE_LOST)
-        const_cast<Backend*>(this)->markLost(device);
+        const_cast<Backend*>(this)->markStopped(device);     // backend rule 8
     const char* msg = fn().get_last_error ? fn().get_last_error() : "";
     const Error::Code code = st == CV_ACCEL_NOT_IMPLEMENTED ? Error::StsNotImplemented :
                              st == CV_ACCEL_OUT_OF_MEMORY ? Error::StsNoMem : Error::StsError;
