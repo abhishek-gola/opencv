@@ -106,8 +106,10 @@ CV_EXPORTS void emulatorFailNextCpuFlush();
 CV_EXPORTS void setWaitTimeout(uint64 ms);
 //! tests only: forgets that devices were lost (a lost device otherwise stays lost for the process)
 CV_EXPORTS void reviveDevices();
-//! turns OPENCV_ACCEL_VALIDATE on or off at run time (read-only Mat views are checksummed)
+//! turns OPENCV_ACCEL_VALIDATE on or off at run time (every Mat view opened for reading is mapped read-only)
 CV_EXPORTS void setValidation(bool on);
+//! tests: the page protection call after @p after successful ones fails, once (-1: none)
+CV_EXPORTS void injectPageProtectionFailure(int after);
 
 /** @brief Device memory of "another library" (not held by OpenCV), filled with @p value; returns
 its device pointer for ExternalMemory::DEVICE_POINTER. With @p protectedContent the emulator

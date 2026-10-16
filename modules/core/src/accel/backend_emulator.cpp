@@ -229,9 +229,10 @@ struct EmuFence
     writer, a simulated camera or OpenCV, leaves an implicit fence that the next user waits for. */
 struct FakeDmaBuf
 {
-    FakeDmaBuf() : size(0), mem(0), fence(0), attached(0) {}
+    FakeDmaBuf() : size(0), mem(0), ro(0), fence(0), attached(0) {}
     size_t size;
     uchar* mem;         //!< mapping of the whole buffer, shared with the "other drivers"
+    uchar* ro;          //!< a second mapping of it, PROT_READ: what read-only imports give the CPU
     std::mutex m;
     EmuFence* fence;    //!< last write, one reference held here; NULL if none
     int attached;       //!< fences attached by end_device_access
@@ -604,8 +605,8 @@ cvAccelStatus CV_API_CALL emu_deallocate(cvAccelAllocation* alloc) CV_ACCEL_NOEX
     if (!alloc || !alloc->backend_data)
         return CV_ACCEL_OK;
     EmuAlloc* a = (EmuAlloc*)alloc->backend_data;
-    if (a->cpuView != a->mem)
-        fastFree(a->cpuView);
+    if (a->cpuView != a->mem && !a->dmabuf)
+        fastFree(a->cpuView);   // the stand-in for CPU caches of non-coherent memory
     if (a->owned)
     {
         {
@@ -639,7 +640,10 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->device = device;
             a->kind = CV_ACCEL_MEM_SHARED;
             a->size = (size_t)ext->size;
-            a->mem = a->cpuView = buf->mem + ext->offset;
+            // a read-only import maps the buffer read-only for the CPU, like a dma-buf mmap'ed PROT_READ
+            const bool readOnly = (ext->flags & CV_ACCEL_MEMF_READ_ONLY) != 0;
+            a->mem = buf->mem + ext->offset;
+            a->cpuView = (readOnly ? buf->ro : buf->mem) + ext->offset;
             a->dmabuf = buf;
             // a tiled or compressed layout has no linear CPU view
             const uint64_t modifier = ext->struct_size >= offsetof(cvAccelExternalMemory, layout_modifier) + sizeof(uint64_t)
@@ -650,7 +654,8 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             out->desc.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
             out->desc.layout_modifier = modifier;
             // dma-bufs are coherent here (an I/O-coherent NPU on emulator:2)
-            out->desc.flags = CV_ACCEL_MEMF_IMPORTED | CV_ACCEL_MEMF_EXTERNAL_SYNC | (ext->flags & CV_ACCEL_MEMF_READ_ONLY);
+            out->desc.flags = CV_ACCEL_MEMF_IMPORTED | CV_ACCEL_MEMF_EXTERNAL_SYNC |
+                              (readOnly ? CV_ACCEL_MEMF_READ_ONLY | CV_ACCEL_MEMF_CPU_MAPPING_READ_ONLY : 0);
             out->handle = (uint64_t)(uintptr_t)a->mem;
             out->size = ext->size;
             out->backend_data = a;
@@ -782,6 +787,11 @@ cvAccelStatus CV_API_CALL emu_begin_cpu_access(const cvAccelAllocation* alloc, u
         if (g_managedDeviceWork.load() > 0)
             g_violations++;     // real hardware would fault here
         *host_ptr = a->mem;
+        return CV_ACCEL_OK;
+    }
+    if (a->dmabuf)
+    {
+        *host_ptr = a->cpuView;     // the buffer's CPU mapping (read-only for read-only imports)
         return CV_ACCEL_OK;
     }
     if (a->kind == CV_ACCEL_MEM_HOST_PINNED || !a->owned || a->device == EMU_COHERENT)
@@ -1249,11 +1259,14 @@ int64 emulatorCreateDmaBuf(size_t size)
     CV_Assert(ftruncate(fd, (off_t)size) == 0);
     void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     CV_Assert(p != MAP_FAILED);
+    void* ro = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    CV_Assert(ro != MAP_FAILED);
     std::pair<uint64_t, uint64_t> id;
     CV_Assert(impl::fileIdentity(fd, id));
     impl::FakeDmaBuf* buf = new impl::FakeDmaBuf();
     buf->size = size;
     buf->mem = (uchar*)p;
+    buf->ro = (uchar*)ro;
     std::lock_guard<std::mutex> lk(impl::dmaBufsMutex());
     impl::dmaBufs()[id] = buf;
     return fd;  // like a buffer from a camera: never freed (test hooks only)

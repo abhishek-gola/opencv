@@ -76,9 +76,11 @@ Rules a backend must follow, because core relies on them for correctness:
    of the work may be queued: core records a fence after it (or synchronizes the device) and
    treats everything the work writes as invalid until it is written whole.
 10. begin_cpu_access on memory flagged CV_ACCEL_MEMF_READ_ONLY returns a read-only mapping
-   where the platform allows it (a dma-buf mmap'ed PROT_READ), so that a write through a Mat
-   view faults instead of changing the memory. (Host copies of such memory are core's own
-   pages, protected the same way.)
+   where the platform allows it (a dma-buf mmap'ed PROT_READ), and then flags the memory
+   CV_ACCEL_MEMF_CPU_MAPPING_READ_ONLY. Core gives every other CPU view of read-only memory
+   through a copy in pages it maps read-only itself (host copies of such memory are such
+   pages), and refuses CPU access when it cannot protect them: a write through a Mat view of
+   read-only memory always faults.
 
 @note Preview only (no backward compatibility until ABI version 1).
 */
@@ -188,7 +190,10 @@ enum
     CV_ACCEL_MEMF_IMPORTED = 1 << 0,    //!< memory is owned outside of OpenCV (user pointer, dma-buf, ...)
     CV_ACCEL_MEMF_READ_ONLY = 1 << 1,   //!< writes are not allowed (e.g. imported read-only memory)
     CV_ACCEL_MEMF_PROTECTED = 1 << 2,   //!< protected content: never readable by the CPU
-    CV_ACCEL_MEMF_EXTERNAL_SYNC = 1 << 3 //!< carries implicit fences of other drivers (dma-buf): see begin_device_access
+    CV_ACCEL_MEMF_EXTERNAL_SYNC = 1 << 3, //!< carries implicit fences of other drivers (dma-buf): see begin_device_access
+    /** begin_cpu_access returns a mapping that the CPU cannot write (writes fault), e.g. a
+        dma-buf mapped PROT_READ (rule 10) */
+    CV_ACCEL_MEMF_CPU_MAPPING_READ_ONLY = 1 << 4
 };
 
 /** @brief Where an allocation lives and how it can be accessed.

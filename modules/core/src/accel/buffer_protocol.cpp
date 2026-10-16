@@ -299,8 +299,28 @@ void freePages(uchar* p, size_t size)
 #endif
 }
 
+//! tests: the page protection call after this many successful ones fails (detail::injectPageProtectionFailure)
+std::atomic<int>& pageFailureCountdown()
+{
+    static std::atomic<int>* c = new std::atomic<int>(-1);
+    return *c;
+}
+
+bool injectedPageFailure()
+{
+    int n = pageFailureCountdown().load();
+    while (n >= 0)
+    {
+        if (pageFailureCountdown().compare_exchange_weak(n, n - 1))
+            return n == 0;
+    }
+    return false;
+}
+
 bool protectPages(uchar* p, size_t size, bool writable)
 {
+    if (injectedPageFailure())
+        return false;
 #ifdef _WIN32
     DWORD old = 0;
     return VirtualProtect(p, size, writable ? PAGE_READWRITE : PAGE_READONLY, &old) != 0;
@@ -309,44 +329,31 @@ bool protectPages(uchar* p, size_t size, bool writable)
 #endif
 }
 
-//! lets a download write core's read-only host copy, for the duration of the scope
-struct WritablePages
+/** A copy of @p size bytes at @p src in pages mapped read-only, so that a write through a Mat
+    view of it faults. Fails closed: a copy that cannot be protected is never handed out. */
+uchar* protectedCopy(const uchar* src, size_t size, size_t& pages)
 {
-    explicit WritablePages(BufferState* v_) : v(v_->shadowKind == SHADOW_PAGES ? v_ : NULL)
+    pages = pageRounded(size ? size : 1);
+    uchar* p = allocPages(pages);
+    if (!p)
+        CV_Error(Error::StsNoMem, "accel: no pages for a read-only CPU view");
+    memcpy(p, src, size);
+    if (!protectPages(p, pages, false))
     {
-        if (v && !protectPages(v->shadow, v->shadowPages, true))
-            CV_Error(Error::StsError, "accel: cannot unprotect the host copy of read-only memory for a download");
+        freePages(p, pages);
+        CV_Error(Error::StsError, "accel: a read-only CPU view cannot be protected against writes; refused");
     }
-    ~WritablePages()
-    {
-        if (v)
-            protectPages(v->shadow, v->shadowPages, false);
-    }
-    BufferState* v;
-};
+    return p;
+}
 
 //////////////////////////////////// validation mode ////////////////////////////////////
 
-//! OPENCV_ACCEL_VALIDATE: read-only Mat views are checksummed, and a write through one is reported
+/** OPENCV_ACCEL_VALIDATE: every Mat view opened with ACCESS_READ is mapped read-only (a copy in
+    protected pages where the memory is not), so that a write through one faults at once. */
 std::atomic<bool>& validating()
 {
     static std::atomic<bool> v(utils::getConfigurationParameterBool("OPENCV_ACCEL_VALIDATE", false));
     return v;
-}
-
-uint64 hashBytes(const uchar* p, size_t n)
-{
-    uint64 h = 0xcbf29ce484222325ull;
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8)
-    {
-        uint64 w;
-        memcpy(&w, p + i, 8);
-        h = (h ^ w) * 0x100000001b3ull;
-    }
-    for (; i < n; i++)
-        h = (h ^ p[i]) * 0x100000001b3ull;
-    return h;
 }
 
 void ensureShadow(BufferState* v)
@@ -357,20 +364,22 @@ void ensureShadow(BufferState* v)
     if (v->readOnly)
     {
         // Read-only memory: the host copy is mapped read-only, so a write through a Mat view
-        // faults instead of corrupting it. Only downloads lift the protection, for their duration.
-        const size_t pages = pageRounded(size);
-        if (uchar* p = allocPages(pages))
+        // faults instead of corrupting it. Only downloads lift the protection, for their
+        // duration. No protection, no host copy: the CPU access is refused.
+        const size_t pages = pageRounded(size ? size : 1);
+        uchar* p = allocPages(pages);
+        if (!p)
+            CV_Error(Error::StsNoMem, "accel: no pages for the host copy of read-only memory");
+        if (!protectPages(p, pages, false))
         {
-            if (protectPages(p, pages, false))
-            {
-                v->shadow = p;
-                v->shadowPages = pages;
-                v->shadowKind = SHADOW_PAGES;
-                return;
-            }
             freePages(p, pages);
+            CV_Error(Error::StsError, "accel: the host copy of read-only memory cannot be protected against writes; "
+                                      "CPU access refused");
         }
-        CV_LOG_WARNING(NULL, "accel: no page-protected host copy for read-only memory; writes through its Mat views go undetected");
+        v->shadow = p;
+        v->shadowPages = pages;
+        v->shadowKind = SHADOW_PAGES;
+        return;
     }
     Backend* b = v->backend();
     const int device = v->device();
@@ -417,6 +426,17 @@ void fillRegion1D(cvAccelCopyRegion& r, uint64_t bytes)
     r.size[0] = bytes;
 }
 
+//! forgets the page-protected host copy of a read-only view whose protection could not be restored
+void dropProtectedShadow(BufferState* v)
+{
+    freePages(v->shadow, v->shadowPages);   // unmapped: a stale pointer into it faults
+    v->shadow = 0;
+    v->shadowPages = 0;
+    v->shadowKind = SHADOW_NONE;
+    if (v->u)
+        v->u->markHostCopyObsolete(true);
+}
+
 //! whole-view device -> host copy into the host copy; waits for completion
 void downloadWhole(BufferState* v)
 {
@@ -430,7 +450,10 @@ void downloadWhole(BufferState* v)
     if (v->shadowKind == SHADOW_BACKEND)
         r.flags |= CV_ACCEL_COPY_HOST_PINNED;
     FenceRef f;
-    WritablePages writable(v);  // read-only memory: its protected host copy takes the download
+    // read-only memory: its protected host copy takes the download, writable for its duration
+    const bool pages = v->shadowKind == SHADOW_PAGES;
+    if (pages && !protectPages(v->shadow, v->shadowPages, true))
+        CV_Error(Error::StsError, "accel: cannot unprotect the host copy of read-only memory for a download");
     try
     {
         beginExternal(v, s, ACCESS_READ);
@@ -443,7 +466,16 @@ void downloadWhole(BufferState* v)
     {
         if (f.empty())
             fenceAfterFailure(s).waitNoThrow(false);    // part of the copy may be queued, writing the host copy
+        if (pages && !protectPages(v->shadow, v->shadowPages, false))
+            dropProtectedShadow(v);
         throw;
+    }
+    if (pages && !protectPages(v->shadow, v->shadowPages, false))
+    {
+        // fails closed: pages that stay writable are never shown; no Mat views them yet
+        dropProtectedShadow(v);
+        CV_Error(Error::StsError, "accel: the host copy of read-only memory cannot be protected again after a "
+                                  "download; CPU access refused");
     }
     Counters& c = counters();
     c.bytesD2H += v->size;
@@ -559,6 +591,23 @@ private:
 
 //////////////////////////////////// CPU access to the whole backing ////////////////////////////////////
 
+//! the import whose mapping the CPU uses: one it may write when there is one (all of them begin and end)
+const Import* cpuImport(const PhysicalBacking* b)
+{
+    const Import* first = 0;
+    for (size_t i = 0; i < b->imports.size(); i++)
+    {
+        const Import* imp = b->imports[i];
+        if (!directClass((int)imp->alloc.desc.host_access) || imp->modifier != 0)
+            continue;
+        if (!(imp->alloc.desc.flags & CV_ACCEL_MEMF_CPU_MAPPING_READ_ONLY))
+            return imp;
+        if (!first)
+            first = imp;
+    }
+    return first;
+}
+
 //! access of every level the backing has open
 int openCpuAccess(const PhysicalBacking* b)
 {
@@ -621,6 +670,8 @@ uchar* openCpuLevel(PhysicalBacking* b, int access)
         }
     }
     b->cpuLevels.reserve(b->cpuLevels.size() + 1);
+    // the CPU reaches the memory through a mapping it may write, when an import has one
+    const Import* through = cpuImport(b);
     uchar* base = 0;
     std::vector<Import*> begun;
     begun.reserve(b->imports.size());
@@ -634,7 +685,7 @@ uchar* openCpuLevel(PhysicalBacking* b, int access)
         if (st == CV_ACCEL_OK && !p)
             st = CV_ACCEL_INTERNAL_ERROR;
         // a nested level must return the address the outer one returned (backend rule 4)
-        const bool moved = st == CV_ACCEL_OK && !base && !b->cpuLevels.empty() && (uchar*)p != b->cpuBase;
+        const bool moved = st == CV_ACCEL_OK && imp == through && !b->cpuLevels.empty() && (uchar*)p != b->cpuBase;
         if (st != CV_ACCEL_OK || moved)
         {
             if (st == CV_ACCEL_OK)
@@ -651,7 +702,7 @@ uchar* openCpuLevel(PhysicalBacking* b, int access)
                                                imp->backend->name().c_str()));
             imp->backend->check(st, "begin_cpu_access", imp->device);
         }
-        if (!base)
+        if (imp == through)
             base = (uchar*)p;
         begun.push_back(imp);
     }
@@ -711,11 +762,13 @@ bool cpuConflictLocked(const PhysicalBacking* b, const BufferState* v, bool writ
 
 void beginHostAccessLocked(BufferState* v, UMatData* u, int access)
 {
+    // the bytes the CPU sees: the host copy, or the memory itself
+    uchar* content = 0;
+    bool protectedInPlace = false;
     if (usesShadow(v))
     {
         const bool fresh = !v->shadow;  // a new host copy holds nothing yet, whatever the flags say
         ensureShadow(v);
-        u->data = v->shadow;
         if ((u->hostCopyObsolete() || fresh) && !u->deviceCopyObsolete())
         {
             downloadWhole(v);
@@ -726,23 +779,46 @@ void beginHostAccessLocked(BufferState* v, UMatData* u, int access)
             // nothing to fetch: from now on the host copy is the content
             u->markHostCopyObsolete(false);
         }
-        return;
+        content = v->shadow;
+        protectedInPlace = v->shadowKind == SHADOW_PAGES;
     }
-    u->data = openCpuLevel(v->backing, access) + v->start;
-    u->markHostCopyObsolete(false);
+    else
+    {
+        PhysicalBacking* b = v->backing;
+        content = openCpuLevel(b, access) + v->start;
+        const Import* through = cpuImport(b);
+        protectedInPlace = through && (through->alloc.desc.flags & CV_ACCEL_MEMF_CPU_MAPPING_READ_ONLY);
+        u->markHostCopyObsolete(false);
+    }
+    // A write through a view that may not write must fault: read-only memory always, any view
+    // opened for reading under OPENCV_ACCEL_VALIDATE. Where the bytes are not mapped read-only
+    // already, the view shows a copy in pages that are.
+    const bool mustFault = !(access & ACCESS_WRITE) && (v->readOnly || validating().load());
+    if (mustFault && !protectedInPlace)
+        u->data = v->cpuCopy = protectedCopy(content, (size_t)v->size, v->cpuCopyPages);
+    else
+        u->data = content;
+    v->cpuCopyWriteBack = false;
 }
 
 void upgradeHostAccessLocked(BufferState* v, UMatData* u)
 {
-    if (usesShadow(v))
+    if (!usesShadow(v))
     {
-        if (isUninitialized(u))
-            u->markHostCopyObsolete(false);
-        return;
+        // a nested level for the write, ended together with the outer one when the backing closes
+        uchar* p = openCpuLevel(v->backing, ACCESS_RW) + v->start;
+        CV_Assert(v->cpuCopy || p == u->data);
     }
-    // a nested level for the write, ended together with the outer one when the backing closes
-    uchar* p = openCpuLevel(v->backing, ACCESS_RW) + v->start;
-    CV_Assert(p == u->data);
+    else if (isUninitialized(u))
+        u->markHostCopyObsolete(false);
+    if (v->cpuCopy)
+    {
+        // a read view under OPENCV_ACCEL_VALIDATE turns into a write view: its copy takes the
+        // writes, and goes back to the memory when the mapping ends
+        if (!protectPages(v->cpuCopy, v->cpuCopyPages, true))
+            CV_Error(Error::StsError, "accel: cannot make the CPU view writable");
+        v->cpuCopyWriteBack = true;
+    }
 }
 
 //! the backing's last Mat mapping ended: ends CPU access to all of it; never throws
@@ -770,19 +846,20 @@ void endHostAccessLocked(BufferState* v, UMatData* u)
 {
     PhysicalBacking* b = v->backing;
     const int access = v->hostAccess;
-    if (v->viewHashed)
+    if (v->cpuCopy)
     {
-        // OPENCV_ACCEL_VALIDATE: a view opened with ACCESS_READ must come back unchanged
-        v->viewHashed = false;
-        if (u->data && hashBytes(u->data, u->size) != v->viewHash)
+        if (v->cpuCopyWriteBack)
         {
-            try
-            {
-                addPoison(b, v->start, v->size, "a Mat view opened with ACCESS_READ was written (OPENCV_ACCEL_VALIDATE)");
-                CV_LOG_ERROR(NULL, "accel: a Mat view opened with ACCESS_READ was written (OPENCV_ACCEL_VALIDATE)");
-            }
-            catch (...) {}
+            // the writes go where the content lives: the host copy, or the memory (still open
+            // with a write level)
+            uchar* content = usesShadow(v) ? v->shadow : b->cpuBase + v->start;
+            if (content)
+                memcpy(content, v->cpuCopy, (size_t)v->size);
         }
+        freePages(v->cpuCopy, v->cpuCopyPages);
+        v->cpuCopy = 0;
+        v->cpuCopyPages = 0;
+        v->cpuCopyWriteBack = false;
     }
     if (access & ACCESS_WRITE)
     {
@@ -912,12 +989,21 @@ Mat getHostView(const UMat& m, AccessFlag accessFlags)
             waitDeviceWork(b, lk, write, v);
             const bool opens = first && b->cpuViews == 0;   // the backing's CPU access starts now
             if (first)
-                beginHostAccessLocked(v, u, access);
+            {
+                try
+                {
+                    beginHostAccessLocked(v, u, access);
+                }
+                catch (...)
+                {
+                    // the levels this view opened go with it: the backing's other views keep theirs
+                    if (b->cpuViews == 0)
+                        closeCpuLocked(b);
+                    throw;
+                }
+            }
             else
                 upgradeHostAccessLocked(v, u);
-            v->viewHashed = first && !(access & ACCESS_WRITE) && validating().load();
-            if (v->viewHashed)
-                v->viewHash = hashBytes(u->data, u->size);
             if (first)
             {
                 v->hostMapped = true;
@@ -1806,6 +1892,11 @@ namespace cv { namespace accel { namespace detail {
 void setValidation(bool on)
 {
     impl::validating().store(on);
+}
+
+void injectPageProtectionFailure(int after)
+{
+    impl::pageFailureCountdown().store(after);
 }
 
 }}} // namespace cv::accel::detail

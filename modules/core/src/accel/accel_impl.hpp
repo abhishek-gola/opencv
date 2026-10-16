@@ -382,14 +382,16 @@ struct BackingKey
 };
 
 /** One backend's import of a whole backing, or the allocation that a backing is. Byte 0 of
-    alloc is byte 0 of the backing. A backing has one import per backend, device and layout;
-    views of the backing use ranges of it. Imports live as long as their backing. */
+    alloc is byte 0 of the backing. A backing has one import per backend, device, layout and
+    access (read-only or not); views of the backing use ranges of it. Imports live as long as
+    their backing. */
 struct Import
 {
     Import();
     Backend* backend;
     int device;
     uint64_t modifier;              //!< the layout it was imported with
+    bool readOnly;                  //!< imported for reading only (CV_ACCEL_MEMF_READ_ONLY asked for)
     cvAccelAllocation alloc;        //!< desc.backend_id and desc.device_index are set by core
     const void* hostReservation;    //!< host pages reserved with Backend::reserveHostImport, or NULL
 };
@@ -521,10 +523,14 @@ struct BufferState
 
     bool hostMapped;                //!< Mat views may exist (UMatData::refcount was > 0)
     int hostAccess;                 //!< union of AccessFlag over the current mapping
+    /** The current mapping shows a copy of the content in pages core maps read-only, so that a
+        write through it faults: a read-only view of memory without a read-only CPU mapping, and
+        every view opened for reading under OPENCV_ACCEL_VALIDATE. */
+    uchar* cpuCopy;
+    size_t cpuCopyPages;
+    bool cpuCopyWriteBack;          //!< the mapping was opened for writing since: the copy goes back at its end
     bool dying;                     //!< no UMat refers to the view any more: it is being released
     uint64 matGeneration;           //!< fromMat: the backing generation of the content copied from the Mat
-    uint64 viewHash;                //!< OPENCV_ACCEL_VALIDATE: checksum of a read-only view when it opened
-    bool viewHashed;
 };
 
 //! UMat::getMat() for buffers with accelState

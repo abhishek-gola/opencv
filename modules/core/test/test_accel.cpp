@@ -340,19 +340,91 @@ TEST(Core_Accel, read_only_memory_has_a_read_only_cpu_view)
     EXPECT_EQ('r', perms[0]);
     EXPECT_EQ('-', perms[1]);
 }
-#endif
 
-TEST(Core_Accel, validation_mode_catches_writes_through_read_views)
+
+TEST(Core_Accel, read_only_views_of_shared_memory_fault_on_writes)
+{
+    // host memory the coherent device uses in place, wrapped read-only: the CPU addresses the
+    // bytes directly, but the Mat view must not let it write them
+    accel::Device d = emulator(COHERENT);
+    std::vector<uchar> storage(4096 * 2, 5);
+    uchar* p = alignPtr(storage.data(), 4096);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::HOST_POINTER;
+    mem.handle = (int64)(intptr_t)p;
+    mem.size = 4096;
+    mem.readOnly = true;
+    UMat ro = accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1);
+    EXPECT_THROW(ro.getMat(ACCESS_WRITE), cv::Exception);
+    Mat view = ro.getMat(ACCESS_READ);
+    EXPECT_EQ(5, view.at<uchar>(63, 63));
+    const std::string perms = mappingPermissions(view.data);
+    ASSERT_EQ(4u, perms.size());
+    EXPECT_EQ('-', perms[1]);
+}
+
+TEST(Core_Accel, read_only_dma_buf_is_mapped_read_only_without_a_copy)
+{
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(256);
+    accel::detail::emulatorDmaBufProduce(fd, 6, 0);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DMABUF_FD;
+    mem.handle = fd;
+    mem.size = 256;
+    mem.readOnly = true;
+    UMat ro = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    Mat view = ro.getMat(ACCESS_READ);
+    EXPECT_EQ(6, view.at<uchar>(0, 0));
+    const std::string perms = mappingPermissions(view.data);
+    ASSERT_EQ(4u, perms.size());
+    EXPECT_EQ("r--s", perms);   // the buffer's own read-only shared mapping: no copy
+}
+
+TEST(Core_Accel, read_only_views_fail_closed)
+{
+    // read-only device memory: its host copy lives in pages that must be protected, and
+    // protected again after every download; when that fails, the CPU gets no view at all
+    accel::Device d = emulator(DISCRETE);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DEVICE_POINTER;
+    mem.handle = accel::detail::emulatorAllocateExternal(DISCRETE, 64 * 64, 3, false);
+    mem.size = 64 * 64;
+    mem.readOnly = true;
+    {
+        UMat ro = accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1);
+        accel::detail::injectPageProtectionFailure(0);     // the host copy cannot be protected
+        EXPECT_THROW(ro.getMat(ACCESS_READ), cv::Exception);
+    }
+    {
+        UMat ro = accel::wrapExternalMemory(d, mem, MatShape({64, 64}), CV_8UC1);
+        accel::detail::injectPageProtectionFailure(2);     // protected, unprotected for the download, then not again
+        EXPECT_THROW(ro.getMat(ACCESS_READ), cv::Exception);
+        Mat view = ro.getMat(ACCESS_READ);                 // a new host copy, protected
+        EXPECT_EQ(3, view.at<uchar>(10, 10));
+        EXPECT_EQ('-', mappingPermissions(view.data)[1]);
+    }
+}
+
+TEST(Core_Accel, validation_mode_maps_read_views_read_only)
 {
     accel::detail::setValidation(true);
-    UMat u = makeOn(emulator(COHERENT), Mat(8, 8, CV_8UC1, Scalar(1)));
+    for (int dev : {COHERENT, DISCRETE})
     {
-        Mat view = u.getMat(ACCESS_READ);
-        view.at<uchar>(0, 0) = 9;           // a write the protocol never hears about
+        UMat u = makeOn(emulator(dev), Mat(8, 8, CV_8UC1, Scalar(1)));
+        {
+            Mat r = u.getMat(ACCESS_READ);              // a write through it faults right away
+            EXPECT_EQ('-', mappingPermissions(r.data)[1]) << "device " << dev;
+            Mat w = u.getMat(ACCESS_WRITE);             // the same mapping, opened for writing too
+            w.at<uchar>(0, 0) = 9;
+            EXPECT_EQ(9, r.at<uchar>(0, 0)) << "device " << dev;
+        }
+        EXPECT_EQ(9, u.getMat(ACCESS_READ).at<uchar>(0, 0)) << "device " << dev;   // the write reached the UMat
     }
-    EXPECT_THROW(u.getMat(ACCESS_READ), cv::Exception);    // the buffer is no longer trusted
     accel::detail::setValidation(false);
 }
+#endif
+
 
 TEST(Core_Accel, protected_memory_never_reaches_the_cpu)
 {

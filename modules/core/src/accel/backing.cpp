@@ -33,7 +33,7 @@
 
 namespace cv { namespace accel { namespace impl {
 
-Import::Import() : backend(0), device(-1), modifier(0), hostReservation(0)
+Import::Import() : backend(0), device(-1), modifier(0), readOnly(false), hostReservation(0)
 {
     memset(&alloc, 0, sizeof(alloc));
 }
@@ -57,8 +57,8 @@ PhysicalBacking::~PhysicalBacking()
 
 BufferState::BufferState(PhysicalBacking* b, Import* imp_, uint64_t start_, uint64_t size_)
     : backing(b), imp(imp_), u(0), start(start_), size(size_), readOnly(false), fromMat(false),
-      shadow(0), shadowKind(SHADOW_NONE), shadowPages(0), hostMapped(false), hostAccess(0), dying(false),
-      matGeneration(0), viewHash(0), viewHashed(false)
+      shadow(0), shadowKind(SHADOW_NONE), shadowPages(0), hostMapped(false), hostAccess(0),
+      cpuCopy(0), cpuCopyPages(0), cpuCopyWriteBack(false), dying(false), matGeneration(0)
 {
     memset(&shadowAlloc, 0, sizeof(shadowAlloc));
 }
@@ -742,12 +742,13 @@ struct FreshImport
     MemoryGuard guard;
     bool committed;
 
-    Import* commit(Backend* b, int device, uint64_t modifier)
+    Import* commit(Backend* b, int device, const cvAccelExternalMemory& ext)
     {
         std::unique_ptr<Import> imp(new Import());
         imp->backend = b;
         imp->device = device;
-        imp->modifier = modifier;
+        imp->modifier = ext.layout_modifier;
+        imp->readOnly = (ext.flags & CV_ACCEL_MEMF_READ_ONLY) != 0;
         imp->alloc = alloc;
         imp->hostReservation = guard.reservation;
         guard.armed = false;
@@ -916,28 +917,29 @@ static void dropNewBacking(PhysicalBacking* nb) CV_NOEXCEPT
     delete nb;
 }
 
-//! the import of all of @p bk for this backend, device and layout; made now if there is none
+//! an import of the memory for this backend, device, layout and access
+static bool sameImport(const Import* imp, Backend* b, int device, const cvAccelExternalMemory& ext)
+{
+    return imp->backend == b && imp->device == device && imp->modifier == ext.layout_modifier &&
+           imp->readOnly == ((ext.flags & CV_ACCEL_MEMF_READ_ONLY) != 0);
+}
+
+//! the import of all of @p bk for this backend, device, layout and access; made now if there is none
 static Import* importFor(PhysicalBacking* bk, Backend* b, int device, const cvAccelExternalMemory& ext,
                          uint64_t reqStart, std::unique_ptr<FreshImport>& candidate)
 {
     {
         std::lock_guard<std::mutex> lk(bk->mutex);
         for (size_t i = 0; i < bk->imports.size(); i++)
-        {
-            Import* imp = bk->imports[i];
-            if (imp->backend == b && imp->device == device && imp->modifier == ext.layout_modifier)
-                return imp;
-        }
+            if (sameImport(bk->imports[i], b, device, ext))
+                return bk->imports[i];
     }
     // outside of the lock: importing may be slow
     std::unique_ptr<FreshImport> fresh = importWhole(b, device, ext, reqStart, bk->start, bk->size, candidate);
     std::lock_guard<std::mutex> lk(bk->mutex);
     for (size_t i = 0; i < bk->imports.size(); i++)
-    {
-        Import* imp = bk->imports[i];
-        if (imp->backend == b && imp->device == device && imp->modifier == ext.layout_modifier)
-            return imp;     // another thread was faster; ours is released
-    }
+        if (sameImport(bk->imports[i], b, device, ext))
+            return bk->imports[i];  // another thread was faster; ours is released
     const cvAccelMemoryDesc& d = fresh->alloc.desc;
     // protection is attested by the backend: every import of one memory must say the same
     if ((d.flags & CV_ACCEL_MEMF_PROTECTED) != (bk->flags & CV_ACCEL_MEMF_PROTECTED))
@@ -963,7 +965,7 @@ static Import* importFor(PhysicalBacking* bk, Backend* b, int device, const cvAc
         CV_Error_(Error::StsError, ("accel(%s): the CPU has this memory open (a Mat view of it is alive); release it "
                                     "before importing the memory into another device", b->name().c_str()));
     bk->imports.reserve(bk->imports.size() + 1);
-    Import* imp = fresh->commit(b, device, ext.layout_modifier);
+    Import* imp = fresh->commit(b, device, ext);
     bk->imports.push_back(imp);     // capacity is reserved
     bk->flags |= d.flags & CV_ACCEL_MEMF_EXTERNAL_SYNC;
     if (d.host_access == CV_ACCEL_HOST_ACCESS_DEVICE_IDLE)
@@ -1027,7 +1029,7 @@ UMatData* DeviceAllocator::wrap(const WrapRequest& req, size_t& viewOffset, bool
         nb->flags = (whole->alloc.desc.flags & (CV_ACCEL_MEMF_PROTECTED | CV_ACCEL_MEMF_EXTERNAL_SYNC)) |
                     (key.domain == BACKING_FILE ? CV_ACCEL_MEMF_EXTERNAL_SYNC : 0);
         nb->imports.reserve(1);
-        nb->imports.push_back(whole->commit(b_, device_, ext.layout_modifier));
+        nb->imports.push_back(whole->commit(b_, device_, ext));
         PhysicalBacking* got = 0;
         try
         {
@@ -1080,18 +1082,22 @@ UMatData* DeviceAllocator::wrap(const WrapRequest& req, size_t& viewOffset, bool
             bool wait = false;
             for (size_t i = 0; hostCopy && i < bk->views.size(); i++)
             {
+                // any import: views of one memory with host copies overlap only as one view
                 BufferState* w = bk->views[i];
-                if (w->imp != imp || !rangesOverlap(w->start, w->size, vStart, ext.size))
+                const uint32_t wc = w->imp->alloc.desc.host_access;
+                if ((wc != CV_ACCEL_HOST_ACCESS_COPY && wc != CV_ACCEL_HOST_ACCESS_UNCACHED) ||
+                    !rangesOverlap(w->start, w->size, vStart, ext.size))
                     continue;
                 if (w->dying)
                 {
                     wait = true;
                     break;
                 }
-                if (!req.allowExistingView || !rangeInside(w->start, w->size, vStart, ext.size) || w->readOnly != readOnly)
+                const bool compatible = w->imp == imp && w->readOnly == readOnly;
+                if (!req.allowExistingView || !rangeInside(w->start, w->size, vStart, ext.size) || !compatible)
                     CV_Error_(Error::StsBadArg, ("accel(%s): these bytes are already wrapped as another buffer with its own "
                                                  "host copy%s; wrap the whole memory once and take views of it",
-                                                 b_->name().c_str(), w->readOnly != readOnly ? " and other access rights" : ""));
+                                                 b_->name().c_str(), compatible ? "" : " and other access rights"));
                 holder = w;
                 break;
             }
