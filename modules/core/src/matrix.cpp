@@ -4,6 +4,7 @@
 
 #include "precomp.hpp"
 #include "bufferpool.impl.hpp"
+#include "opencv2/core/llapi/accel_hal.h"
 
 namespace cv {
 
@@ -699,6 +700,11 @@ BufferPoolController* MatAllocator::getBufferPoolController(const char* id) cons
     return &dummy;
 }
 
+bool MatAllocator::getMemoryDesc(const UMatData*, cvAccelMemoryDesc*) const
+{
+    return false;   // unknown: callers keep their behaviour from before getMemoryDesc existed
+}
+
 class StdMatAllocator CV_FINAL : public MatAllocator
 {
 public:
@@ -749,6 +755,17 @@ public:
             u->origdata = 0;
         }
         delete u;
+    }
+
+    bool getMemoryDesc(const UMatData*, cvAccelMemoryDesc* desc) const CV_OVERRIDE
+    {
+        if (!desc)
+            return false;
+        memset(desc, 0, sizeof(*desc));
+        desc->kind = CV_ACCEL_MEM_HOST;
+        desc->host_access = CV_ACCEL_HOST_ACCESS_COHERENT;
+        desc->handle_kind = CV_ACCEL_HANDLE_HOST_POINTER;
+        return true;
     }
 };
 
@@ -1145,9 +1162,7 @@ void Mat::fit(Size _sz, int _type)
 
 void Mat::fitSameSize(InputArray m, int _type)
 {
-    int _sizes[CV_MAX_DIM];
-    int _dims = m.sizend(_sizes);
-    fit(_dims, _sizes, _type);
+    fit(m.shape(), _type);
 }
 
 void Mat::addref()
