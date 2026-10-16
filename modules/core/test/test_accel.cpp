@@ -1084,6 +1084,112 @@ TEST(Core_Accel, multi_plane_images_in_one_or_several_buffers)
     EXPECT_EQ(Vec2b(3, 3), planes[1].getMat(ACCESS_READ).at<Vec2b>(0, 0));
 }
 
+static const unsigned FOURCC_NV12 = 'N' | ('V' << 8) | ('1' << 16) | ('2' << 24);
+
+//! NV12 16x16 in one dma-buf: luma rows of 16 bytes at 0, chroma (8x8 pairs) at @p uvOffset
+static accel::ExternalImage nv12Image(int64 fd, size_t uvOffset)
+{
+    accel::ExternalImage img;
+    img.type = accel::ExternalMemory::DMABUF_FD;
+    img.fourcc = FOURCC_NV12;
+    accel::ExternalPlane y, uv;
+    y.handle = uv.handle = fd;
+    y.rows = y.cols = 16;
+    y.type = CV_8UC1;
+    uv.offset = uvOffset;
+    uv.rows = uv.cols = 8;
+    uv.type = CV_8UC2;
+    img.planes.push_back(y);
+    img.planes.push_back(uv);
+    return img;
+}
+
+TEST(Core_Accel, image_planes_carry_their_image_to_the_backend)
+{
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(256 + 128);
+    accel::detail::emulatorDmaBufProduce(fd, 5, 0);
+    accel::ExternalImage img = nv12Image(fd, 256);
+    img.color.model = accel::COLOR_MODEL_BT709;
+    img.color.range = accel::COLOR_RANGE_LIMITED;
+    img.color.chromaSitingX = accel::CHROMA_SITING_COSITED;
+    img.color.chromaSitingY = accel::CHROMA_SITING_MIDPOINT;
+    std::vector<UMat> planes = accel::wrapExternalImage(d, img);
+    const accel::ImagePlaneInfo info = accel::describePlane(planes[1]);
+    EXPECT_NE(0u, info.imageId);
+    EXPECT_EQ(accel::describePlane(planes[0]).imageId, info.imageId);
+    EXPECT_EQ(1, info.plane);
+    EXPECT_EQ(2, info.planeCount);
+    EXPECT_EQ(FOURCC_NV12, info.fourcc);
+    EXPECT_EQ(accel::COLOR_RANGE_LIMITED, info.color.range);
+
+    // an operation on both planes: QUERY and EXECUTE see one image, its format and its colours
+    UMat out;
+    int calls = 0;
+    bool seen = true;
+    accel::detail::OpCall call("test.nv12_luma", CV_ACCEL_OPS_CORE, CV_ACCEL_OPS_CORE_VERSION);
+    call.input(planes[0]);
+    call.input(planes[1]);
+    call.output(out, planes[0].shape(), CV_8UC1);
+    EXPECT_EQ(accel::detail::HANDLED, call.run([&](const void* t, const cvAccelCall* c, const cvAccelView* v) {
+        calls++;
+        seen = seen && v[0].image && v[0].image == v[1].image && v[0].plane == 0 && v[1].plane == 1 &&
+               v[0].image->fourcc == FOURCC_NV12 && v[0].image->plane_count == 2 &&
+               v[0].image->planes[1].type == CV_8UC2 && v[0].image->planes[1].offset == 256 &&
+               v[0].image->color_model == CV_ACCEL_COLOR_MODEL_BT709 &&
+               v[0].image->chroma_siting_y == CV_ACCEL_CHROMA_SITING_MIDPOINT && v[2].image == NULL;
+        return ((const cvAccelOpsCore_v0*)t)->flip(c, &v[0], &v[2], 1);
+    }));
+    EXPECT_EQ(2, calls);
+    EXPECT_TRUE(seen);
+    EXPECT_EQ(5, out.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
+TEST(Core_Accel, image_planes_are_checked)
+{
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(1024);
+    const accel::ExternalImage img = nv12Image(fd, 256);
+    EXPECT_NO_THROW(accel::wrapExternalImage(d, img));
+    accel::ExternalImage bad = img;
+    bad.planes[1].cols = 16;                    // NV12 chroma is subsampled horizontally
+    EXPECT_THROW(accel::wrapExternalImage(d, bad), cv::Exception);
+    bad = img;
+    bad.planes[1].type = CV_8UC1;               // and interleaved
+    EXPECT_THROW(accel::wrapExternalImage(d, bad), cv::Exception);
+    bad = img;
+    bad.planes.pop_back();                      // and has two planes
+    EXPECT_THROW(accel::wrapExternalImage(d, bad), cv::Exception);
+    bad = img;
+    bad.planes[1].offset = 128;                 // over the luma plane
+    EXPECT_THROW(accel::wrapExternalImage(d, bad), cv::Exception);
+    bad = img;
+    bad.planes[0].pitch = std::numeric_limits<size_t>::max() / 4;   // pitch * rows does not fit
+    EXPECT_THROW(accel::wrapExternalImage(d, bad), cv::Exception);
+    accel::ExternalImage other = img;
+    other.fourcc = 0;                           // a format OpenCV does not know: only the generic checks
+    other.planes[1].cols = 16;
+    EXPECT_NO_THROW(accel::wrapExternalImage(d, other));
+}
+
+TEST(Core_Accel, image_planes_have_their_own_layouts)
+{
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(4096);
+    const uint64 tiled = 0x0100000000000002ull;
+    accel::ExternalImage img = nv12Image(fd, 1024);
+    img.planes[1].layoutModifier = tiled;       // the chroma plane is tiled, the luma plane linear
+    img.planes[1].size = 512;                   // tiles padded past 8 rows of 16 bytes
+    std::vector<UMat> planes = accel::wrapExternalImage(d, img);
+    EXPECT_EQ(0u, accel::describePlane(planes[0]).layoutModifier);
+    EXPECT_EQ(tiled, accel::describePlane(planes[1]).layoutModifier);
+    EXPECT_NO_THROW(planes[0].getMat(ACCESS_READ));             // linear: the CPU reads it
+    EXPECT_THROW(planes[1].getMat(ACCESS_READ), cv::Exception); // tiled: no CPU view
+    accel::ExternalImage noSize = img;
+    noSize.planes[1].size = 0;                  // the size of a tiled plane cannot be computed
+    EXPECT_THROW(accel::wrapExternalImage(d, noSize), cv::Exception);
+}
+
 TEST(Core_Accel, tiled_layouts_never_reach_linear_code)
 {
     accel::Device d = emulator(COHERENT);

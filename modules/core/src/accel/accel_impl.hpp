@@ -480,6 +480,12 @@ struct PhysicalBacking
     std::vector<std::pair<Import*, int> > failedCpuEnds;
 };
 
+//! an image wrapped by wrapExternalImage: what operations see of its planes (cvAccelView::image)
+struct ImageRecord
+{
+    cvAccelImageDesc desc;
+};
+
 //! host copy kinds (BufferState::shadowKind)
 enum ShadowKind
 {
@@ -514,6 +520,8 @@ struct BufferState
     uint64_t size;                  //!< bytes, UMatData::size
     bool readOnly;                  //!< writes refused: read-only memory, or the wrap asked for it
     bool fromMat;                   //!< created by Mat::getUMat: the content goes back to the Mat
+    std::shared_ptr<const ImageRecord> image;   //!< the image the view is a plane of (wrapExternalImage), or none
+    int plane;                      //!< index of that plane
 
     Backend* backend() const { return imp->backend; }
     int device() const { return imp->device; }
@@ -611,7 +619,7 @@ private:
 //! what a wrap of external memory asks for (DeviceAllocator::wrap)
 struct WrapRequest
 {
-    WrapRequest() : readOnly(false), protectedRequired(false), allowExistingView(false)
+    WrapRequest() : readOnly(false), protectedRequired(false), allowExistingView(false), plane(-1)
     {
         memset(&ext, 0, sizeof(ext));
         ext.struct_size = (uint32_t)sizeof(ext);
@@ -622,6 +630,8 @@ struct WrapRequest
     /** the result may be a UMat over a view that already covers the bytes with a host copy
         (otherwise such a wrap is refused, see BufferState) */
     bool allowExistingView;
+    std::shared_ptr<const ImageRecord> image;   //!< the view is plane @p plane of this image
+    int plane;
 };
 
 /** The allocator for one (backend, device, memory kind). It owns no state of its own: the

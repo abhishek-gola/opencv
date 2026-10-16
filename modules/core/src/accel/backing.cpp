@@ -56,7 +56,7 @@ PhysicalBacking::~PhysicalBacking()
 }
 
 BufferState::BufferState(PhysicalBacking* b, Import* imp_, uint64_t start_, uint64_t size_)
-    : backing(b), imp(imp_), u(0), start(start_), size(size_), readOnly(false), fromMat(false),
+    : backing(b), imp(imp_), u(0), start(start_), size(size_), readOnly(false), fromMat(false), plane(-1),
       shadow(0), shadowKind(SHADOW_NONE), shadowPages(0), hostMapped(false), hostAccess(0),
       cpuCopy(0), cpuCopyPages(0), cpuCopyWriteBack(false), dying(false), matGeneration(0)
 {
@@ -1112,7 +1112,8 @@ UMatData* DeviceAllocator::wrap(const WrapRequest& req, size_t& viewOffset, bool
                     wait = true;
                     break;
                 }
-                const bool compatible = w->imp == imp && w->readOnly == readOnly;
+                // a plane of an image is a view of its own
+                const bool compatible = w->imp == imp && w->readOnly == readOnly && !req.image && !w->image;
                 if (!req.allowExistingView || !rangeInside(w->start, w->size, vStart, ext.size) || !compatible)
                     CV_Error_(Error::StsBadArg, ("accel(%s): these bytes are already wrapped as another buffer with its own "
                                                  "host copy%s; wrap the whole memory once and take views of it",
@@ -1144,6 +1145,8 @@ UMatData* DeviceAllocator::wrap(const WrapRequest& req, size_t& viewOffset, bool
         nu->flags |= UMatData::USER_ALLOCATED;
         BufferState* v = addViewLocked(bk, imp, nu.get(), vStart, ext.size);
         v->readOnly = readOnly;
+        v->image = req.image;
+        v->plane = req.plane;
         // The content belongs to the owner and lives in the memory, which the device addresses.
         // Memory with a CPU view is also the host copy; COPY and UNCACHED memory get their host
         // copy on the first CPU access, memory without CPU access never.

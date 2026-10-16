@@ -111,11 +111,15 @@ extern "C" {
 
 #define CV_ACCEL_ABI_VERSION 0
 /** 1: describe_allocation; 2: begin_device_access / end_device_access; 3: cvAccelAllocation
-    reports the size of the memory it lies in, and has reserved space */
+    reports the size of the memory it lies in and has reserved space, views carry the image
+    they are a plane of */
 #define CV_ACCEL_API_VERSION 3
 
 //! same as cv::MatShape::MAX_DIMS
 #define CV_ACCEL_MAX_DIMS 10
+
+//! planes of one image (cvAccelImageDesc)
+#define CV_ACCEL_MAX_PLANES 4
 
 //! timeout value meaning "wait forever"
 #define CV_ACCEL_INFINITE ((uint64_t)-1)
@@ -247,12 +251,91 @@ typedef struct cvAccelAllocation
     uint64_t reserved[5];       //!< zero; room for new fields (the size stays)
 } cvAccelAllocation;
 
+/** @brief Colour interpretation of an image (cvAccelImageDesc, cv::accel::ColorInfo). 0 is "unknown". */
+typedef enum cvAccelColorModel
+{
+    CV_ACCEL_COLOR_MODEL_UNKNOWN = 0,
+    CV_ACCEL_COLOR_MODEL_RGB = 1,       //!< no YCbCr matrix (RGB or grey data)
+    CV_ACCEL_COLOR_MODEL_BT601 = 2,
+    CV_ACCEL_COLOR_MODEL_BT709 = 3,
+    CV_ACCEL_COLOR_MODEL_BT2020 = 4     //!< non-constant luminance
+} cvAccelColorModel;
+
+typedef enum cvAccelColorRange
+{
+    CV_ACCEL_COLOR_RANGE_UNKNOWN = 0,
+    CV_ACCEL_COLOR_RANGE_LIMITED = 1,   //!< 16..235 for 8-bit luma ("studio", "TV")
+    CV_ACCEL_COLOR_RANGE_FULL = 2       //!< 0..255 for 8-bit luma ("PC", JPEG)
+} cvAccelColorRange;
+
+typedef enum cvAccelColorPrimaries
+{
+    CV_ACCEL_PRIMARIES_UNKNOWN = 0,
+    CV_ACCEL_PRIMARIES_BT709 = 1,       //!< also sRGB
+    CV_ACCEL_PRIMARIES_BT601_625 = 2,   //!< BT.470 B/G (PAL)
+    CV_ACCEL_PRIMARIES_BT601_525 = 3,   //!< SMPTE 170M (NTSC)
+    CV_ACCEL_PRIMARIES_BT2020 = 4,
+    CV_ACCEL_PRIMARIES_DCI_P3 = 5,
+    CV_ACCEL_PRIMARIES_DISPLAY_P3 = 6
+} cvAccelColorPrimaries;
+
+typedef enum cvAccelTransfer
+{
+    CV_ACCEL_TRANSFER_UNKNOWN = 0,
+    CV_ACCEL_TRANSFER_LINEAR = 1,
+    CV_ACCEL_TRANSFER_SRGB = 2,
+    CV_ACCEL_TRANSFER_BT709 = 3,        //!< also BT.601 and BT.2020 for SDR
+    CV_ACCEL_TRANSFER_PQ = 4,           //!< SMPTE ST 2084
+    CV_ACCEL_TRANSFER_HLG = 5           //!< ARIB STD-B67
+} cvAccelTransfer;
+
+typedef enum cvAccelChromaSiting
+{
+    CV_ACCEL_CHROMA_SITING_UNKNOWN = 0,
+    CV_ACCEL_CHROMA_SITING_COSITED = 1, //!< chroma samples sit on the first luma sample of their block
+    CV_ACCEL_CHROMA_SITING_MIDPOINT = 2 //!< halfway between the luma samples of their block
+} cvAccelChromaSiting;
+
+/** @brief One plane of an image. */
+typedef struct cvAccelImagePlane
+{
+    uint64_t offset;            //!< bytes from the start of the plane's buffer to the plane
+    uint64_t size;              //!< bytes the plane covers in its buffer (given by the producer for non-linear layouts)
+    uint64_t pitch;             //!< bytes from one row to the next (its meaning is layout-specific for non-linear layouts)
+    uint64_t layout_modifier;   //!< DRM format modifier of this plane: 0 = linear
+    int32_t rows, cols, type;   //!< the plane as a matrix: NV12 has 8UC1 luma and 8UC2 chroma at half size
+    uint32_t buffer;            //!< planes with the same index lie in the same buffer (one dma-buf, one allocation)
+} cvAccelImagePlane;
+
+/** @brief An image whose planes are arguments of operations (cvAccelView::image).
+
+Every plane of one wrapped image refers to the same object, so that a backend can tell from
+the views alone which arguments form one image, its format, how its planes lie and how its
+colours are encoded. When core knows the fourcc it has checked the planes against it. */
+typedef struct cvAccelImageDesc
+{
+    uint32_t struct_size;
+    uint32_t fourcc;            //!< DRM fourcc (NV12, P010, ...), 0 if not given
+    uint64_t id;                //!< unique in the process for every wrapped image
+    uint32_t plane_count;
+    uint32_t color_model;       //!< cvAccelColorModel: the YCbCr matrix
+    uint32_t color_range;       //!< cvAccelColorRange
+    uint32_t color_primaries;   //!< cvAccelColorPrimaries
+    uint32_t transfer;          //!< cvAccelTransfer
+    uint32_t chroma_siting_x;   //!< cvAccelChromaSiting
+    uint32_t chroma_siting_y;   //!< cvAccelChromaSiting
+    uint32_t reserved32;
+    cvAccelImagePlane planes[CV_ACCEL_MAX_PLANES];
+} cvAccelImageDesc;
+
 /** @brief An n-dimensional strided view into an allocation (an argument of an operation).
 
 In QUERY mode alloc->handle is 0 and backend_data is NULL; only the description is valid.
 Core checks before every EXECUTE call that the bytes covered by the view lie inside the
-allocation, so a backend never receives a view that would make the device access memory
-outside of the buffer.
+allocation and inside the range of it that the argument may use, so a backend never receives
+a view that would make the device access memory outside of the buffer. For a non-linear
+layout (alloc->desc.layout_modifier != 0) the steps are informational: the view is a whole
+plane, image->planes[plane].size bytes from offset.
 */
 typedef struct cvAccelView
 {
@@ -262,7 +345,12 @@ typedef struct cvAccelView
     int32_t dims;
     int32_t size[CV_ACCEL_MAX_DIMS];
     uint64_t step[CV_ACCEL_MAX_DIMS];   //!< bytes; step[dims-1] is the element size
-    uint64_t reserved[2];               //!< zero; room for new fields (views are passed in arrays)
+    /** the image this view is a plane (or a part of a plane) of, NULL otherwise. Valid during
+        the call; the same pointer for every plane of one image. offset and size still say
+        which bytes the argument is. */
+    const cvAccelImageDesc* image;
+    uint32_t plane;                     //!< index of this view's plane in image->planes
+    uint32_t reserved;                  //!< zero (views are passed in arrays: the size stays)
 } cvAccelView;
 
 typedef struct cvAccelStream_t* cvAccelStream; //!< in-order queue, owned by the backend
@@ -336,7 +424,7 @@ typedef struct cvAccelExternalMemory
         core refuses an import whose backend reports another layout (one that predates this
         field reports linear). */
     uint64_t layout_modifier;
-    uint32_t fourcc;        //!< DRM fourcc of the image the memory holds (NV12, P010, ...), 0 if none; informational
+    uint32_t fourcc;        //!< DRM fourcc of the image the memory holds, 0 if none; operations see the image in cvAccelView
 } cvAccelExternalMemory;
 
 /** @brief External fence types for cross-device synchronization without a CPU wait. */
