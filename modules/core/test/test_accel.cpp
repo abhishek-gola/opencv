@@ -1249,6 +1249,88 @@ TEST(Core_Accel, aliases_of_one_memory_share_one_buffer)
     EXPECT_THROW(accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1), cv::Exception);
 }
 
+TEST(Core_Accel, results_of_functions_without_a_hook_stay_on_the_device)
+{
+    // shape-changing functions create their outputs with UMat::create, not after an input's shape
+    accel::Device d = emulator(DISCRETE);
+    UMat src = makeOn(d, Mat(4, 6, CV_8UC1, Scalar(3)));
+    UMat rep, red;
+    cv::repeat(src, 2, 3, rep);
+    EXPECT_TRUE(d == accel::describe(rep).device);
+    EXPECT_EQ(Size(18, 8), rep.size());
+    EXPECT_EQ(3, rep.getMat(ACCESS_READ).at<uchar>(7, 17));
+    cv::reduce(src, red, 0, REDUCE_SUM, CV_32S);
+    EXPECT_TRUE(d == accel::describe(red).device);
+    EXPECT_EQ(12, red.getMat(ACCESS_READ).at<int>(0, 5));
+
+    // an output on the device stays there when the function gives it another shape
+    UMat out = makeOn(d, Mat(2, 2, CV_8UC1, Scalar(0)));
+    cv::repeat(Mat(4, 6, CV_8UC1, Scalar(5)), 1, 2, out);
+    EXPECT_TRUE(d == accel::describe(out).device);
+    EXPECT_EQ(5, out.getMat(ACCESS_READ).at<uchar>(3, 11));
+
+    // without device data, host memory as before
+    UMat plain;
+    cv::repeat(Mat(2, 2, CV_8UC1, Scalar(1)), 2, 2, plain);
+    EXPECT_TRUE(accel::describe(plain).device.empty());
+}
+
+TEST(Core_Accel, a_device_scope_decides_even_when_its_device_declines)
+{
+    accel::Device d = emulator(COHERENT);
+    Mat src(8, 8, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 0);
+    accel::detail::emulatorDisableOps(COHERENT, true);
+    {
+        accel::ExecutionScope scope(d);
+        accel::resetTransferStats();
+        UMat out;
+        cv::flip(src, out, 0);      // only host arguments, and the device declines
+        EXPECT_EQ(1u, accel::getTransferStats().cpuFallbacks);     // a fallback, counted
+        EXPECT_TRUE(d == accel::describe(out).device);              // the result on the scope's device
+        EXPECT_EQ(0, maxDiff(ref, out.getMat(ACCESS_READ)));
+    }
+    accel::detail::emulatorDisableOps(COHERENT, false);
+}
+
+TEST(Core_Accel, device_choice_counts_host_copies_that_must_move)
+{
+    // the large input sits on the discrete device, but the CPU wrote it last: using it there in
+    // place costs an upload of all of it, more than copying the small input to the other device
+    UMat large = makeOn(emulator(DISCRETE), Mat(64, 64, CV_8UC1, Scalar(1)));
+    large.getMat(ACCESS_WRITE).setTo(Scalar(2));                   // the host copy is newer now
+    UMat small = makeOn(emulator(COHERENT), Mat(32, 32, CV_8UC1, Scalar(5)));
+    UMat out;
+    accel::detail::OpCall call("test.two_inputs", CV_ACCEL_OPS_CORE, CV_ACCEL_OPS_CORE_VERSION);
+    call.input(large);
+    call.input(small);
+    call.output(out, large.shape(), large.type());
+    EXPECT_EQ(accel::detail::HANDLED, call.run([](const void* t, const cvAccelCall* c, const cvAccelView* v) {
+        return ((const cvAccelOpsCore_v0*)t)->flip(c, &v[0], &v[2], 1);    // the small input is only read
+    }));
+    EXPECT_TRUE(emulator(COHERENT) == accel::describe(out).device);   // 4096 bytes moved instead of 5120
+    EXPECT_EQ(2, out.getMat(ACCESS_READ).at<uchar>(0, 0));
+}
+
+TEST(Core_Accel, device_access_gives_the_address_kernels_use)
+{
+    // host memory a device addresses at another address than the CPU (no unified addressing)
+    accel::Device d = emulator(COHERENT);
+    std::vector<uchar> storage(4096 * 2);
+    uchar* p = alignPtr(storage.data(), 4096);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::HOST_POINTER;
+    mem.handle = (int64)(intptr_t)p;
+    mem.size = 1024;
+    UMat w = accel::wrapExternalMemory(d, mem, MatShape({32, 32}), CV_8UC1);
+    UMat part = w(Rect(0, 16, 32, 16));
+    accel::DeviceAccess acc(part, accel::Stream::getDefault(d), ACCESS_READ);
+    EXPECT_NE((uint64)(uintptr_t)p, acc.handle());                  // not the CPU address
+    EXPECT_EQ((uint64)(uintptr_t)p | (1ull << 62), acc.handle());   // the emulator's device address of it
+    EXPECT_EQ(16u * 32u, acc.offset());
+}
+
 TEST(Core_Accel, functions_without_a_hook_still_work)
 {
     // cv::add has no accelerator hook: OpenCL (if active) must decline the device memory

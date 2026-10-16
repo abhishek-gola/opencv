@@ -404,6 +404,7 @@ cvAccelStatus CV_API_CALL cu_allocate(int device, uint64_t size, uint32_t kind, 
     out->backend_data = a;
     out->backing_id = out->handle;  // its own base address: a later wrap of it is found (see backing_id)
     out->backing_size = size;
+    out->device_address = (uint64_t)(uintptr_t)a->devPtr;  // mapped host memory: not necessarily its CPU address
     return CV_ACCEL_OK;
 }
 
@@ -474,6 +475,7 @@ cvAccelStatus CV_API_CALL cu_import_memory(int device, const cvAccelExternalMemo
         out->desc.host_access = devices()[device].sharedHostAccess;
         out->desc.handle_kind = CV_ACCEL_HANDLE_HOST_POINTER;
         out->handle = (uint64_t)(uintptr_t)ptr;
+        out->device_address = (uint64_t)(uintptr_t)a->devPtr;
         out->backend_data = a;
     }
     else if (ext->type == CV_ACCEL_EXTMEM_DEVICE_POINTER)
@@ -511,6 +513,7 @@ cvAccelStatus CV_API_CALL cu_import_memory(int device, const cvAccelExternalMemo
         out->backing_id = (uint64_t)base;
         out->backing_offset = offset;
         out->backing_size = range;
+        out->device_address = (uint64_t)(uintptr_t)ptr;
     }
     else
         return CV_ACCEL_NOT_IMPLEMENTED;    // TODO: cudaImportExternalMemory for dma-buf / opaque fds

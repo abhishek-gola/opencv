@@ -335,6 +335,13 @@ const ScopeEntry* currentScope();
 //! allocator of the innermost scope's device, NULL when there is none (used by UMat::getStdAllocator)
 MatAllocator* scopeAllocator();
 
+/** Where UMat::create puts new data that has no allocator of its own, outside of an
+    ExecutionScope (which decides itself): on the device of @p previous, the data the UMat held
+    before (a reallocation keeps its device), or on the device that the device arguments of the
+    calls running on this thread agree on (see accel::detail::enterDeviceArgument). NULL: the
+    default allocator. */
+const MatAllocator* placementFor(const UMatData* previous);
+
 //////////////////////////////// physical memory ////////////////////////////////
 
 //! overflow-safe end of [begin, begin + size): false when it does not fit in 64 bits

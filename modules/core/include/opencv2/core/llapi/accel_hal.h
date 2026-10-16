@@ -111,8 +111,8 @@ extern "C" {
 
 #define CV_ACCEL_ABI_VERSION 0
 /** 1: describe_allocation; 2: begin_device_access / end_device_access; 3: cvAccelAllocation
-    reports the size of the memory it lies in and has reserved space, views carry the image
-    they are a plane of */
+    reports the size of the memory it lies in and its device address, and has reserved space;
+    views carry the image they are a plane of */
 #define CV_ACCEL_API_VERSION 3
 
 //! same as cv::MatShape::MAX_DIMS
@@ -248,7 +248,11 @@ typedef struct cvAccelAllocation
     uint64_t backing_id;
     uint64_t backing_offset;    //!< where byte 0 of this allocation lies in that memory
     uint64_t backing_size;      //!< size of that memory (cuMemGetAddressRange, ...), 0 when not known
-    uint64_t reserved[5];       //!< zero; room for new fields (the size stays)
+    /** the flat address kernels of the owning device use for byte 0, which for mapped host
+        memory may differ from its CPU address (cudaHostGetDevicePointer); 0 when the memory
+        has no flat device address (an opaque handle). DeviceAccess::handle() returns it. */
+    uint64_t device_address;
+    uint64_t reserved[4];       //!< zero; room for new fields (the size stays)
 } cvAccelAllocation;
 
 /** @brief Colour interpretation of an image (cvAccelImageDesc, cv::accel::ColorInfo). 0 is "unknown". */

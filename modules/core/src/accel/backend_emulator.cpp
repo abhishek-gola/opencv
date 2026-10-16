@@ -186,6 +186,16 @@ bool ownedAllocation(uintptr_t p, uint64_t size, uintptr_t& base, uint64_t& allo
     return true;
 }
 
+/** The address emulated kernels would use. Host memory gets another one than its CPU address,
+    as on a device without unified addressing, so that code that hands a CPU address to a device
+    shows up; the emulator's own kernels reach memory through backend_data instead. */
+uint64_t deviceAddress(uint64_t handle, uint32_t handleKind)
+{
+    if (handleKind == CV_ACCEL_HANDLE_HOST_POINTER)
+        return handle | (1ull << 62);
+    return handleKind == CV_ACCEL_HANDLE_DEVICE_POINTER ? handle : 0;
+}
+
 bool isScrambledDesc(const cvAccelMemoryDesc& d, int device)
 {
     if (d.kind == CV_ACCEL_MEM_HOST || d.kind == CV_ACCEL_MEM_HOST_PINNED || d.handle_kind == CV_ACCEL_HANDLE_HOST_POINTER)
@@ -622,6 +632,7 @@ cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind,
         out->backend_data = a;
         out->backing_id = out->handle;  // its own base address (see backing_id)
         out->backing_size = size;
+        out->device_address = deviceAddress(out->handle, d.handle_kind);
         a->protectedMem = (d.flags & CV_ACCEL_MEMF_PROTECTED) != 0;
         {
             std::lock_guard<std::mutex> lk(ownedMutex());
@@ -705,6 +716,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             out->handle = (uint64_t)(uintptr_t)a->mem;
             out->size = ext->size;
             out->backend_data = a;
+            out->device_address = deviceAddress(out->handle, out->desc.handle_kind);
             // core identifies a dma-buf by its inode: no backing fields needed
             countAllocation(device, 1);
             return CV_ACCEL_OK;
@@ -754,6 +766,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             out->backing_id = (uint64_t)base;   // the allocation it lies in
             out->backing_offset = (uint64_t)((uintptr_t)a->mem - base);
             out->backing_size = allocSize;
+            out->device_address = deviceAddress(out->handle, out->desc.handle_kind);
             countAllocation(device, 1);
             return CV_ACCEL_OK;
         }
@@ -782,6 +795,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
         out->handle = (uint64_t)(uintptr_t)a->mem;
         out->size = ext->size;
         out->backend_data = a;
+        out->device_address = deviceAddress(out->handle, out->desc.handle_kind);
         countAllocation(device, 1);
         return CV_ACCEL_OK;
     }

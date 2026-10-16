@@ -1119,9 +1119,11 @@ void* deviceHandleBlocking(UMatData* u, AccessFlag access)
         u->markDeviceCopyObsolete(false);
         b->generation++;
     }
-    const uint32_t kind = v->imp->alloc.desc.handle_kind;
+    // the address kernels use: for mapped host memory not necessarily the CPU address
+    const cvAccelAllocation& a = v->imp->alloc;
+    const uint32_t kind = a.desc.handle_kind;
     if (kind == CV_ACCEL_HANDLE_DEVICE_POINTER || kind == CV_ACCEL_HANDLE_HOST_POINTER)
-        return (void*)(uintptr_t)(v->imp->alloc.handle + v->start);
+        return (void*)(uintptr_t)((a.device_address ? a.device_address : a.handle) + v->start);
     if (v->start != 0)
         CV_Error(Error::StsNotImplemented, "UMat::handle(): this memory has no flat address and the UMat starts inside "
                                            "it; use cv::accel::DeviceAccess, which gives the offset");
