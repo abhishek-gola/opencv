@@ -45,7 +45,14 @@ namespace cv { namespace accel { namespace impl {
 namespace {
 
 enum { EMU_DISCRETE = 0, EMU_COHERENT = 1, EMU_NONCOHERENT = 2, EMU_PROTECTED = 3, EMU_MANAGED = 4,
-       EMU_FAILING = 5, EMU_DEVICES = 6 };
+       EMU_FAILING = 5, EMU_PEER = 6, EMU_DEVICES = 7 };
+
+//! devices whose streams must not be used by two threads at once (no CV_ACCEL_CAP_STREAMS_THREAD_SAFE)
+inline bool streamsThreadSafe(int device) { return device != EMU_NONCOHERENT; }
+//! devices that wait for fences of other devices on the device (CV_ACCEL_CAP_CROSS_DEVICE_FENCES)
+inline bool crossDeviceFences(int device) { return device != EMU_DISCRETE && device != EMU_PEER; }
+//! emulator:0 and emulator:6 reach each other's memory (peer access), and nothing else does
+inline bool peers(int a, int b) { return (a == EMU_DISCRETE && b == EMU_PEER) || (a == EMU_PEER && b == EMU_DISCRETE); }
 
 const uchar SCRAMBLE = 0x5A;
 const uchar POISON = 0xCD;
@@ -200,7 +207,7 @@ bool isScrambledDesc(const cvAccelMemoryDesc& d, int device)
 {
     if (d.kind == CV_ACCEL_MEM_HOST || d.kind == CV_ACCEL_MEM_HOST_PINNED || d.handle_kind == CV_ACCEL_HANDLE_HOST_POINTER)
         return false;
-    return device == EMU_DISCRETE || device == EMU_PROTECTED || device == EMU_FAILING;
+    return device == EMU_DISCRETE || device == EMU_PROTECTED || device == EMU_FAILING || device == EMU_PEER;
 }
 
 uchar* devicePtr(const cvAccelAllocation* a)
@@ -353,7 +360,7 @@ void runStream(EmuStream* s);
 
 struct EmuStream
 {
-    explicit EmuStream(int device_) : device(device_), stop(false), retired(false)
+    explicit EmuStream(int device_) : device(device_), stop(false), retired(false), users(0)
     {
         delayUs = utils::getConfigurationParameterSizeT("OPENCV_ACCEL_EMULATOR_DELAY_US", 0);
     }
@@ -433,6 +440,30 @@ struct EmuStream
     std::deque<Task> q;
     bool stop;
     bool retired;   //!< destroyed by its owner, still draining (under streamsMutex)
+    std::atomic<int> users;     //!< calls with this stream in progress (see StreamUse)
+};
+
+/** Wraps an entry point that takes a stream. On a device whose streams are not thread-safe,
+    two of them at once is a violation (backend rule 11); the call lasts a little longer there,
+    so that callers that do not serialize meet. */
+class StreamUse
+{
+public:
+    explicit StreamUse(cvAccelStream s) : s_(s && !streamsThreadSafe(((EmuStream*)s)->device) ? (EmuStream*)s : 0)
+    {
+        if (!s_)
+            return;
+        if (s_->users.fetch_add(1) != 0)
+            violation(detail::EMU_VIOLATION_STREAM);
+        std::this_thread::sleep_for(std::chrono::microseconds(20));
+    }
+    ~StreamUse()
+    {
+        if (s_)
+            s_->users--;
+    }
+private:
+    EmuStream* s_;
 };
 
 std::mutex& streamsMutex()
@@ -497,21 +528,31 @@ cvAccelStatus CV_API_CALL emu_get_device_info(int device, cvAccelDeviceInfo* inf
 {
     if (!info || device < 0 || device >= EMU_DEVICES)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad device");
+    // every field is from version 0 of the struct: a shorter one cannot take them
+    if (info->struct_size < sizeof(cvAccelDeviceInfo))
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "cvAccelDeviceInfo::struct_size is too small");
     static const char* names[EMU_DEVICES] = {
         "emulated discrete GPU", "emulated coherent shared memory",
         "emulated non-coherent shared memory", "emulated protected memory",
-        "emulated managed memory without concurrent access", "emulated discrete GPU for failure tests" };
+        "emulated managed memory without concurrent access", "emulated discrete GPU for failure tests",
+        "emulated second discrete GPU (peer of emulator:0)" };
     static const uint32_t types[EMU_DEVICES] = {
         CV_ACCEL_DEVICE_GPU_DISCRETE, CV_ACCEL_DEVICE_GPU_INTEGRATED, CV_ACCEL_DEVICE_NPU, CV_ACCEL_DEVICE_OTHER,
-        CV_ACCEL_DEVICE_GPU_INTEGRATED, CV_ACCEL_DEVICE_GPU_DISCRETE };
+        CV_ACCEL_DEVICE_GPU_INTEGRATED, CV_ACCEL_DEVICE_GPU_DISCRETE, CV_ACCEL_DEVICE_GPU_DISCRETE };
     static const uint32_t preferred[EMU_DEVICES] = {
         CV_ACCEL_MEM_DEVICE, CV_ACCEL_MEM_SHARED, CV_ACCEL_MEM_SHARED, CV_ACCEL_MEM_DEVICE, CV_ACCEL_MEM_MANAGED,
-        CV_ACCEL_MEM_DEVICE };
+        CV_ACCEL_MEM_DEVICE, CV_ACCEL_MEM_DEVICE };
     cvAccelDeviceInfo d;
     memset(&d, 0, sizeof(d));
     d.device_type = types[device];
     strncpy(d.name, names[device], sizeof(d.name) - 1);
-    d.caps = CV_ACCEL_CAP_ASYNC | CV_ACCEL_CAP_HOST_PINNED | CV_ACCEL_CAP_STREAMS_THREAD_SAFE;
+    d.caps = CV_ACCEL_CAP_ASYNC | CV_ACCEL_CAP_HOST_PINNED;
+    if (streamsThreadSafe(device))
+        d.caps |= CV_ACCEL_CAP_STREAMS_THREAD_SAFE;
+    if (crossDeviceFences(device))
+        d.caps |= CV_ACCEL_CAP_CROSS_DEVICE_FENCES;
+    if (device == EMU_DISCRETE || device == EMU_PEER)
+        d.caps |= CV_ACCEL_CAP_PEER_ACCESS;
     if (device == EMU_COHERENT || device == EMU_NONCOHERENT)
         d.caps |= CV_ACCEL_CAP_SHARED;
     if (device == EMU_MANAGED)
@@ -523,10 +564,10 @@ cvAccelStatus CV_API_CALL emu_get_device_info(int device, cvAccelDeviceInfo* inf
     }
     d.total_memory = (uint64_t)1 << 32;
     d.preferred_kind = preferred[device];
-    // the caller's struct may be older (smaller) than ours: write what it has room for
+    // a newer caller's struct may be longer than ours: what lies past ours is left alone
     const uint32_t size = info->struct_size;
-    memcpy(info, &d, std::min<size_t>(size, sizeof(d)));
-    info->struct_size = size;
+    d.struct_size = size;
+    memcpy(info, &d, sizeof(d));
     return CV_ACCEL_OK;
 }
 
@@ -559,6 +600,7 @@ bool describeKind(int device, uint32_t kind, uint32_t flags, cvAccelMemoryDesc& 
     {
     case EMU_DISCRETE:
     case EMU_FAILING:
+    case EMU_PEER:
         d.kind = CV_ACCEL_MEM_DEVICE;
         d.host_access = CV_ACCEL_HOST_ACCESS_COPY;
         d.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
@@ -682,7 +724,8 @@ cvAccelStatus CV_API_CALL emu_deallocate(cvAccelAllocation* alloc) CV_ACCEL_NOEX
 cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMemory* ext,
                                             cvAccelAllocation* out) CV_ACCEL_NOEXCEPT
 {
-    if (!ext || !out)
+    // version 0 of the struct ends with flags; later fields are read where present
+    if (!ext || !out || ext->struct_size < offsetof(cvAccelExternalMemory, flags) + sizeof(ext->flags))
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     if ((device == EMU_COHERENT || device == EMU_NONCOHERENT) && ext->type == CV_ACCEL_EXTMEM_DMABUF_FD)
     {
@@ -703,8 +746,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->cpuView = (readOnly ? buf->ro : buf->mem) + ext->offset;
             a->dmabuf = buf;
             // a tiled or compressed layout has no linear CPU view
-            const uint64_t modifier = ext->struct_size >= offsetof(cvAccelExternalMemory, layout_modifier) + sizeof(uint64_t)
-                                      ? ext->layout_modifier : 0;
+            const uint64_t modifier = CV_ACCEL_HAS_FIELD(cvAccelExternalMemory, ext, layout_modifier) ? ext->layout_modifier : 0;
             out->desc.device_index = (uint32_t)device;
             out->desc.kind = CV_ACCEL_MEM_SHARED;
             out->desc.host_access = modifier ? CV_ACCEL_HOST_ACCESS_NONE : CV_ACCEL_HOST_ACCESS_COHERENT;
@@ -810,7 +852,7 @@ cvAccelStatus CV_API_CALL emu_can_access(int device, const cvAccelMemoryDesc* de
     if (!desc)
         return CV_ACCEL_INVALID_ARGUMENT;
     if (own_device >= 0)
-        return CV_ACCEL_NOT_IMPLEMENTED;    // no peer access between emulated devices
+        return peers(device, own_device) && desc->layout_modifier == 0 ? CV_ACCEL_OK : CV_ACCEL_NOT_IMPLEMENTED;
     // like a unified-memory GPU, the coherent device addresses ordinary host memory
     if (device == EMU_COHERENT && desc->handle_kind == CV_ACCEL_HANDLE_HOST_POINTER &&
         (desc->kind == CV_ACCEL_MEM_HOST || desc->kind == CV_ACCEL_MEM_HOST_PINNED))
@@ -906,8 +948,9 @@ cvAccelStatus CV_API_CALL emu_end_cpu_access(const cvAccelAllocation* alloc, uin
 
 cvAccelStatus CV_API_CALL emu_copy(int device, cvAccelStream stream, const cvAccelCopyRegion* r) CV_ACCEL_NOEXCEPT
 {
-    if (!stream || !r || r->dims <= 0 || r->dims > CV_ACCEL_MAX_DIMS)
+    if (!stream || !r || r->struct_size < sizeof(cvAccelCopyRegion) || r->dims <= 0 || r->dims > CV_ACCEL_MAX_DIMS)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
+    StreamUse use(stream);
     if (deviceLost(device))
         return lostError();
     if ((!r->src.alloc && !r->src.host) || (!r->dst.alloc && !r->dst.host))
@@ -979,7 +1022,8 @@ cvAccelStatus CV_API_CALL emu_stream_destroy(cvAccelStream stream) CV_ACCEL_NOEX
     return CV_ACCEL_OK;
 }
 
-cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelFence* out) CV_ACCEL_NOEXCEPT
+//! a fence at the end of @p stream (also used by device_synchronize, which may record on any thread's stream)
+cvAccelStatus recordOn(cvAccelStream stream, cvAccelFence* out)
 {
     if (!stream || !out)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
@@ -1001,10 +1045,24 @@ cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelF
     }
 }
 
+cvAccelStatus CV_API_CALL emu_stream_record_fence(cvAccelStream stream, cvAccelFence* out) CV_ACCEL_NOEXCEPT
+{
+    StreamUse use(stream);
+    return recordOn(stream, out);
+}
+
 cvAccelStatus CV_API_CALL emu_stream_wait_fence(cvAccelStream stream, cvAccelFence fence) CV_ACCEL_NOEXCEPT
 {
     if (!stream || !fence)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
+    StreamUse use(stream);
+    const int device = ((EmuStream*)stream)->device;
+    if (((EmuFence*)fence)->device != device && !crossDeviceFences(device))
+    {
+        // like an event API whose events are bound to their device or context
+        violation(detail::EMU_VIOLATION_FENCE);
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "a fence of another device");
+    }
     try
     {
         EmuFence* f = (EmuFence*)fence;
@@ -1076,7 +1134,7 @@ cvAccelStatus CV_API_CALL emu_device_synchronize(int device) CV_ACCEL_NOEXCEPT
             // a queue whose position cannot be recorded cannot be waited for: the device is not
             // known to be idle, and saying OK would hand memory back under running work
             cvAccelFence f = 0;
-            const cvAccelStatus st = emu_stream_record_fence((cvAccelStream)*it, &f);
+            const cvAccelStatus st = recordOn((cvAccelStream)*it, &f);
             if (st != CV_ACCEL_OK)
                 return st;      // the fences recorded so far are released with list
             list.fences.push_back((EmuFence*)f);    // capacity is reserved: never throws
@@ -1118,6 +1176,7 @@ cvAccelStatus CV_API_CALL emu_begin_device_access(const cvAccelAllocation* alloc
     FakeDmaBuf* buf = ((EmuAlloc*)alloc->backend_data)->dmabuf;
     if (!buf)
         return CV_ACCEL_OK;
+    StreamUse use(stream);
     std::vector<EmuFence*> list;
     try
     {
@@ -1187,8 +1246,11 @@ Mat viewToMat(const cvAccelView* v)
 cvAccelStatus CV_API_CALL emu_flip(const cvAccelCall* call, const cvAccelView* src, const cvAccelView* dst,
                                    int flipMode) CV_ACCEL_NOEXCEPT
 {
+    if (!call || call->struct_size < sizeof(cvAccelCall) || !src || !dst)
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     if (deviceLost(call->device))
         return lostError();
+    StreamUse use(call->mode == CV_ACCEL_EXECUTE ? call->stream : NULL);
     if (call->device >= 0 && call->device < EMU_DEVICES && g_opsDisabled[call->device].load())
         return CV_ACCEL_NOT_IMPLEMENTED;
     try
@@ -1213,8 +1275,11 @@ cvAccelStatus CV_API_CALL emu_flip(const cvAccelCall* call, const cvAccelView* s
 
 cvAccelStatus CV_API_CALL emu_transpose(const cvAccelCall* call, const cvAccelView* src, const cvAccelView* dst) CV_ACCEL_NOEXCEPT
 {
+    if (!call || call->struct_size < sizeof(cvAccelCall) || !src || !dst)
+        return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
     if (deviceLost(call->device))
         return lostError();
+    StreamUse use(call->mode == CV_ACCEL_EXECUTE ? call->stream : NULL);
     if (call->device >= 0 && call->device < EMU_DEVICES && g_opsDisabled[call->device].load())
         return CV_ACCEL_NOT_IMPLEMENTED;
     try
@@ -1447,6 +1512,11 @@ void emulatorInjectFailure(int status, int points)
 int64 emulatorLiveFences()
 {
     return (int64)impl::g_liveFences.load();
+}
+
+const OpenCV_Core_Accel_API* emulatorBackendTable()
+{
+    return impl::emulatorBackendApi();
 }
 
 }} // namespace accel::detail

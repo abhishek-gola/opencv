@@ -742,11 +742,15 @@ RunResult OpCall::Impl::run(Invoker fn, void* userdata)
 
             call.mode = CV_ACCEL_EXECUTE;
             call.stream = stream->handle;
-            status = fn(table, &call, views.data(), userdata);
+            {
+                StreamCall one(stream);
+                status = fn(table, &call, views.data(), userdata);
+            }
             if (status == CV_ACCEL_OUT_OF_MEMORY)
             {
                 // nothing was queued (backend rule 9): free what finished work left behind, retry once
                 collectRetired(true);
+                StreamCall one(stream);
                 status = fn(table, &call, views.data(), userdata);
             }
             if (status == CV_ACCEL_NOT_IMPLEMENTED)

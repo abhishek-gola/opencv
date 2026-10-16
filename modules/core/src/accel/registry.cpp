@@ -100,7 +100,7 @@ static std::atomic<uint64>& streamUids()
 }
 
 StreamHolder::StreamHolder(Backend* b, int device_, cvAccelStream handle_)
-    : backend(b), device(device_), handle(handle_), uid(++streamUids())
+    : backend(b), device(device_), handle(handle_), uid(++streamUids()), caps(b->deviceInfo(device_).caps)
 {}
 
 StreamHolder::~StreamHolder()
@@ -299,7 +299,14 @@ FenceRef fenceAfterFailure(const StreamPtr& s) CV_NOEXCEPT
 {
     Backend* b = s->backend;
     cvAccelFence f = 0;
-    if (b->fn().stream_record_fence(s->handle, &f) == CV_ACCEL_OK && f)
+    cvAccelStatus recorded = CV_ACCEL_INTERNAL_ERROR;
+    try
+    {
+        StreamCall one(s);
+        recorded = b->fn().stream_record_fence(s->handle, &f);
+    }
+    catch (...) {}
+    if (recorded == CV_ACCEL_OK && f)
         return FenceRef(b, f, s->uid, s->device);
     const cvAccelStatus st = b->synchronize(s->device);
     if (st == CV_ACCEL_OK || st == CV_ACCEL_DEVICE_LOST)
@@ -340,7 +347,12 @@ std::string currentExceptionMessage()
 FenceRef recordFence(const StreamPtr& s)
 {
     cvAccelFence f = 0;
-    s->backend->check(s->backend->fn().stream_record_fence(s->handle, &f), "stream_record_fence", s->device);
+    cvAccelStatus st;
+    {
+        StreamCall one(s);
+        st = s->backend->fn().stream_record_fence(s->handle, &f);
+    }
+    s->backend->check(st, "stream_record_fence", s->device);
     return FenceRef(s->backend, f, s->uid, s->device);
 }
 
@@ -353,22 +365,33 @@ void streamWait(const StreamPtr& s, const FenceRef& f)
     }
     if (f.empty() || f.streamUid() == s->uid)
         return;     // in-order stream: earlier work is already ordered
-    if (f.backend() == s->backend)
+    // a device-side wait where the stream's device takes the fence: its own, or any device of the
+    // backend with CV_ACCEL_CAP_CROSS_DEVICE_FENCES (peer access does not imply it, rule 11)
+    if (f.backend() == s->backend && (f.device() == s->device || (s->caps & CV_ACCEL_CAP_CROSS_DEVICE_FENCES)))
     {
-        s->backend->check(s->backend->fn().stream_wait_fence(s->handle, f.get()), "stream_wait_fence", s->device);
+        cvAccelStatus st;
+        {
+            StreamCall one(s);
+            st = s->backend->fn().stream_wait_fence(s->handle, f.get());
+        }
+        s->backend->check(st, "stream_wait_fence", s->device);
         return;
     }
     if (f.isComplete())
         return;
-    // two backends: pass the fence as a sync_file when both can, otherwise wait on the CPU
+    // pass the fence as a sync_file when both sides can, otherwise wait on the CPU
     Backend* fb = f.backend();
     Backend* sb = s->backend;
     if (fb->fn().fence_export && sb->fn().stream_wait_external)
     {
         int64_t h = -1;
-        if (fb->fn().fence_export(f.get(), CV_ACCEL_EXTFENCE_SYNC_FD, &h) == CV_ACCEL_OK &&
-            sb->fn().stream_wait_external(s->handle, CV_ACCEL_EXTFENCE_SYNC_FD, h) == CV_ACCEL_OK)
-            return;
+        if (fb->fn().fence_export(f.get(), CV_ACCEL_EXTFENCE_SYNC_FD, &h) == CV_ACCEL_OK)
+        {
+            StreamCall one(s);
+            // takes ownership of h whatever it returns
+            if (sb->fn().stream_wait_external(s->handle, CV_ACCEL_EXTFENCE_SYNC_FD, h) == CV_ACCEL_OK)
+                return;
+        }
     }
     f.wait();
 }

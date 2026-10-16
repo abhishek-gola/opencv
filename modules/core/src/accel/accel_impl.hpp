@@ -37,8 +37,25 @@ struct StreamHolder
     int device;
     cvAccelStream handle;
     uint64 uid;
+    uint32_t caps;          //!< CV_ACCEL_CAP_* of the device
+    std::mutex calls;       //!< held around every backend call with the stream where streams are not thread-safe
 };
 typedef std::shared_ptr<StreamHolder> StreamPtr;
+
+/** Held around a backend call that takes @p s: one thread at a time on devices without
+    CV_ACCEL_CAP_STREAMS_THREAD_SAFE (backend rule 11), so that a stream shared by threads (an
+    explicit Stream in several ExecutionScopes) is never used from two of them at once. */
+class StreamCall
+{
+public:
+    explicit StreamCall(const StreamPtr& s) : lk_(s->calls, std::defer_lock)
+    {
+        if (!(s->caps & CV_ACCEL_CAP_STREAMS_THREAD_SAFE))
+            lk_.lock();
+    }
+private:
+    std::unique_lock<std::mutex> lk_;
+};
 
 /** Counted reference to a backend fence, the stream it was recorded on and that stream's device.
 

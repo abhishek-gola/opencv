@@ -24,11 +24,12 @@
 #include <thread>
 #ifdef __linux__
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace opencv_test { namespace {
 
-enum { DISCRETE = 0, COHERENT = 1, NONCOHERENT = 2, PROTECTED_MEM = 3, MANAGED = 4, FAILING = 5 };
+enum { DISCRETE = 0, COHERENT = 1, NONCOHERENT = 2, PROTECTED_MEM = 3, MANAGED = 4, FAILING = 5, PEER = 6 };
 
 static accel::Device emulator(int index)
 {
@@ -1330,6 +1331,88 @@ TEST(Core_Accel, device_access_gives_the_address_kernels_use)
     EXPECT_EQ((uint64)(uintptr_t)p | (1ull << 62), acc.handle());   // the emulator's device address of it
     EXPECT_EQ(16u * 32u, acc.offset());
 }
+
+TEST(Core_Accel, a_stream_shared_by_threads_is_used_by_one_at_a_time)
+{
+    // emulator:2's streams are not thread-safe: two threads in ExecutionScopes of one explicit
+    // stream must never be inside the backend with it at the same time
+    accel::Device d = emulator(NONCOHERENT);
+    accel::Stream shared(d);
+    const int64 races = accel::detail::emulatorViolations(accel::detail::EMU_VIOLATION_STREAM);
+    auto work = [&](int value) {
+        accel::ExecutionScope scope(shared);
+        UMat u = makeOn(d, Mat(8, 8, CV_8UC1, Scalar(value))), out;
+        for (int i = 0; i < 100; i++)
+            cv::flip(u, out, i & 1);
+        EXPECT_EQ(value, out.getMat(ACCESS_READ).at<uchar>(7, 7));
+    };
+    std::thread t1(work, 1), t2(work, 2);
+    t1.join();
+    t2.join();
+    EXPECT_EQ(races, accel::detail::emulatorViolations(accel::detail::EMU_VIOLATION_STREAM));
+}
+
+TEST(Core_Accel, fences_of_another_device_are_waited_for_where_the_device_cannot)
+{
+    // emulator:6 reaches emulator:0's memory (peer access) but cannot wait for its fences on
+    // the device: the wait for the queued upload into the output happens on the CPU instead
+    const int64 foreign = accel::detail::emulatorViolations(accel::detail::EMU_VIOLATION_FENCE);
+    Mat src(8, 8, CV_8UC1), ref;
+    randu(src, 0, 255);
+    cv::flip(src, ref, 1);
+    runWithDeviceDelay(20000, [&]() {
+        UMat in = makeOn(emulator(PEER), src);
+        UMat out = makeOn(emulator(DISCRETE), Mat::zeros(8, 8, CV_8UC1));     // still being uploaded
+        accel::resetTransferStats();
+        cv::flip(in, out, 1);           // on emulator:6, writing emulator:0's memory in place
+        EXPECT_EQ(1u, accel::getTransferStats().deviceOps);
+        EXPECT_EQ(0, maxDiff(ref, out.getMat(ACCESS_READ)));
+    });
+    EXPECT_EQ(foreign, accel::detail::emulatorViolations(accel::detail::EMU_VIOLATION_FENCE));
+}
+
+TEST(Core_Accel, structs_too_short_for_their_fields_are_refused)
+{
+    const OpenCV_Core_Accel_API* api = accel::detail::emulatorBackendTable();
+    struct
+    {
+        cvAccelDeviceInfo info;
+        uchar canary[16];
+    } buf;
+    memset(&buf, 0xAB, sizeof(buf));
+    buf.info.struct_size = 2;   // not even room for the struct_size field
+    EXPECT_EQ(CV_ACCEL_INVALID_ARGUMENT, api->v0.get_device_info(0, &buf.info));
+    for (size_t i = sizeof(uint32_t); i < sizeof(buf); i++)
+        ASSERT_EQ(0xAB, ((const uchar*)&buf)[i]) << "byte " << i << " was written";
+    cvAccelExternalMemory ext;
+    memset(&ext, 0, sizeof(ext));
+    ext.struct_size = 8;        // ends before the fields of version 0
+    cvAccelAllocation out;
+    memset(&out, 0, sizeof(out));
+    EXPECT_EQ(CV_ACCEL_INVALID_ARGUMENT, api->v0.import_memory(1, &ext, &out));
+}
+
+#ifdef __linux__
+TEST(Core_Accel, wrapped_dma_buf_outlives_the_descriptor)
+{
+    // the descriptor is borrowed: the caller may close it once the wrap returned
+    accel::Device d = emulator(COHERENT);
+    const int64 fd = accel::detail::emulatorCreateDmaBuf(256);
+    accel::detail::emulatorDmaBufProduce(fd, 8, 0);
+    accel::ExternalMemory mem;
+    mem.type = accel::ExternalMemory::DMABUF_FD;
+    mem.handle = dup((int)fd);
+    mem.size = 256;
+    UMat frame = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    close((int)mem.handle);
+    UMat out;
+    cv::flip(frame, out, 0);
+    EXPECT_EQ(8, out.getMat(ACCESS_READ).at<uchar>(15, 15));
+    mem.handle = fd;            // another descriptor of the same buffer: the same memory
+    UMat again = accel::wrapExternalMemory(d, mem, MatShape({16, 16}), CV_8UC1);
+    EXPECT_EQ(accel::detail::backingId(frame), accel::detail::backingId(again));
+}
+#endif
 
 TEST(Core_Accel, functions_without_a_hook_still_work)
 {
