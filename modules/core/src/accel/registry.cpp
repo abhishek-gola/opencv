@@ -254,7 +254,7 @@ void FenceRef::wait(bool bounded) const
     b_->check(st, "fence_wait", device_);
 }
 
-FenceRef::Poll FenceRef::poll() const CV_NOEXCEPT
+FenceRef::Poll FenceRef::poll(bool logFailure) const CV_NOEXCEPT
 {
     if (syncTicket_)
         return b_->isStopped(device_) || b_->syncedSince(device_, syncTicket_) ? DONE : PENDING;
@@ -268,6 +268,8 @@ FenceRef::Poll FenceRef::poll() const CV_NOEXCEPT
     // the work behind the fence failed and is no longer running (see fence_wait)
     if (st == CV_ACCEL_DEVICE_LOST)
         b_->markStopped(device_);
+    if (!logFailure)
+        return FAILED;
     try
     {
         CV_LOG_ERROR(NULL, "accel(" << b_->name() << "): device " << device_ << " failed (status " << (int)st
@@ -520,83 +522,6 @@ const void* Backend::opTable(const char* module, uint32_t version)
     return table;
 }
 
-//! takes one more reference unless the count already dropped to zero (the owner is releasing)
-static bool addRefIfAlive(int* counter)
-{
-#if defined(_MSC_VER)
-    long cur = *(volatile long*)counter;
-    while (cur > 0)
-    {
-        const long prev = _InterlockedCompareExchange((volatile long*)counter, cur + 1, cur);
-        if (prev == cur)
-            return true;
-        cur = prev;
-    }
-    return false;
-#else
-    int cur = __atomic_load_n(counter, __ATOMIC_ACQUIRE);
-    while (cur > 0)
-        if (__atomic_compare_exchange_n(counter, &cur, cur + 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            return true;
-    return false;
-#endif
-}
-
-void Backend::registerBacking(BufferState* st, UMatData* u)
-{
-    if (!st->alloc.backing_id)
-        return;
-    BackingEntry e;
-    e.st = st;
-    e.u = u;
-    e.offset = st->alloc.backing_offset;
-    e.size = u->size;
-    std::lock_guard<std::mutex> lk(backingsMutex_);
-    backings_.insert(std::make_pair(st->alloc.backing_id, e));
-}
-
-void Backend::unregisterBacking(const BufferState* st)
-{
-    if (!st->alloc.backing_id)
-        return;
-    std::lock_guard<std::mutex> lk(backingsMutex_);
-    std::pair<std::multimap<uint64_t, BackingEntry>::iterator, std::multimap<uint64_t, BackingEntry>::iterator> r =
-            backings_.equal_range(st->alloc.backing_id);
-    for (std::multimap<uint64_t, BackingEntry>::iterator it = r.first; it != r.second; ++it)
-    {
-        if (it->second.st == st)
-        {
-            backings_.erase(it);
-            return;
-        }
-    }
-}
-
-UMatData* Backend::findBacking(uint64_t id, uint64_t offset, uint64_t size, uint32_t requiredFlags, bool reference,
-                               size_t& viewOffset)
-{
-    std::lock_guard<std::mutex> lk(backingsMutex_);
-    std::pair<std::multimap<uint64_t, BackingEntry>::iterator, std::multimap<uint64_t, BackingEntry>::iterator> r =
-            backings_.equal_range(id);
-    for (std::multimap<uint64_t, BackingEntry>::iterator it = r.first; it != r.second; ++it)
-    {
-        const BackingEntry& e = it->second;
-        if (offset + size <= e.offset || e.offset + e.size <= offset)
-            continue;   // another part of the same memory
-        if (offset < e.offset || offset + size > e.offset + e.size)
-            CV_Error_(Error::StsBadArg, ("accel(%s): this memory overlaps a buffer that is already held, but is "
-                                         "not inside it; wrap the whole memory once and take views of it", name_.c_str()));
-        if ((e.st->alloc.desc.flags & requiredFlags) != requiredFlags)
-            CV_Error_(Error::StsBadArg, ("accel(%s): this memory is already held as a writable or unprotected "
-                                         "buffer; it cannot also be wrapped read-only or protected", name_.c_str()));
-        if (reference ? !addRefIfAlive(&e.u->urefcount) : e.u->urefcount <= 0)
-            continue;   // being released right now: a new buffer for it is fine
-        viewOffset = (size_t)(offset - e.offset);
-        return e.u;
-    }
-    return NULL;
-}
-
 bool Backend::canAccess(int device, const cvAccelMemoryDesc& desc)
 {
     if (desc.backend_id == (uint32_t)id_ && (int)desc.device_index == device)
@@ -719,53 +644,6 @@ void Backend::releaseHostImport(int device, const void* ptr)
     const uintptr_t begin = (uintptr_t)ptr & ~(page - 1);
     std::lock_guard<std::mutex> lk(mutex_);
     hostImports_.erase(std::make_pair(device, begin));
-}
-
-void Backend::deferRelease(BufferState* st)
-{
-    std::lock_guard<std::mutex> lk(mutex_);
-    deferred_.push_back(st);
-}
-
-void Backend::collectDeferred(bool waitAll)
-{
-    std::vector<BufferState*> pending;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        if (deferred_.empty())
-            return;
-        pending.swap(deferred_);
-    }
-    // No UMat refers to these buffers any more, so no other thread touches them. This runs
-    // at the end of every release, from destructors: it must not throw, and a failed device
-    // counts as done (nothing will run there any more; host-side state is freed regardless).
-    std::vector<BufferState*> keep;
-    for (size_t i = 0; i < pending.size(); i++)
-    {
-        BufferState* st = pending[i];
-        if (waitAll)
-        {
-            st->writeFence.waitNoThrow();
-            for (size_t j = 0; j < st->readFences.size(); j++)
-                st->readFences[j].waitNoThrow();
-        }
-        bool done = st->writeFence.poll() != FenceRef::PENDING;
-        for (size_t j = 0; done && j < st->readFences.size(); j++)
-            done = st->readFences[j].poll() != FenceRef::PENDING;
-        if (done)
-        {
-            st->writeFence.reset();
-            st->readFences.clear();
-            destroyBufferState(st);
-        }
-        else
-            keep.push_back(st);
-    }
-    if (!keep.empty())
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        deferred_.insert(deferred_.end(), keep.begin(), keep.end());
-    }
 }
 
 //////////////////////////////////// Registry ////////////////////////////////////
@@ -1230,25 +1108,24 @@ UMat wrapExternalMemory(const Device& device, const ExternalMemory& memory,
     }
     CV_Assert(memory.size == 0 || total <= memory.size);
 
-    cvAccelExternalMemory ext;
-    memset(&ext, 0, sizeof(ext));
-    ext.struct_size = (uint32_t)sizeof(ext);
-    ext.type = (uint32_t)memory.type;
-    ext.handle = (int64_t)memory.handle;
-    ext.offset = memory.offset;
-    ext.size = memory.size ? memory.size : total;
-    ext.flags = (memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0) | (memory.protectedContent ? CV_ACCEL_MEMF_PROTECTED : 0);
-    ext.layout_modifier = memory.layoutModifier;
-    ext.fourcc = memory.fourcc;
+    WrapRequest req;
+    req.ext.type = (uint32_t)memory.type;
+    req.ext.handle = (int64_t)memory.handle;
+    req.ext.offset = memory.offset;
+    req.ext.size = total;
+    req.ext.flags = (memory.readOnly ? CV_ACCEL_MEMF_READ_ONLY : 0) | (memory.protectedContent ? CV_ACCEL_MEMF_PROTECTED : 0);
+    req.ext.layout_modifier = memory.layoutModifier;
+    req.ext.fourcc = memory.fourcc;
+    req.readOnly = memory.readOnly;
+    req.protectedRequired = memory.protectedContent;
+    req.allowExistingView = true;
     size_t viewOffset = 0;
-    m.u = a->wrap(ext, total, &viewOffset);
-    const bool shared = viewOffset != (size_t)-1;   // a view of a buffer core already holds (referenced)
-    if (!shared && memory.readOnly)
-        m.u->accelState->alloc.desc.flags |= CV_ACCEL_MEMF_READ_ONLY;   // a restriction the caller sets on itself
-    m.offset = shared ? viewOffset : 0;
+    bool referenced = false;
+    m.u = a->wrap(req, viewOffset, referenced);
+    m.offset = viewOffset;
     finalizeHdr(m);
-    if (!shared)
-        m.addref();
+    if (!referenced)
+        m.addref();     // a new view; an existing one was referenced by wrap
     return m;
 }
 
@@ -1321,14 +1198,16 @@ DeviceAccess::DeviceAccess(const UMat& m, const Stream& stream, AccessFlag acces
     CV_Assert(m.u && m.u->accelState && "accel: DeviceAccess needs a UMat allocated on a device");
     CV_Assert(!stream.empty());
     // the caller's work runs on that stream with this memory's handle
-    const BufferState* st = m.u->accelState;
+    const BufferState* v = m.u->accelState;
     const StreamPtr& sp = stream.impl->s;
-    if (sp->backend != st->backend)
+    if (sp->backend != v->backend())
         CV_Error_(Error::StsBadArg, ("accel: DeviceAccess: the stream belongs to backend '%s', the UMat to '%s'",
-                                     sp->backend->name().c_str(), st->backend->name().c_str()));
-    if (sp->device != st->device && !sp->backend->canAccess(sp->device, st->alloc.desc))
+                                     sp->backend->name().c_str(), v->backend()->name().c_str()));
+    cvAccelMemoryDesc desc;
+    CV_Assert(queryMemoryDesc(m.u, desc));
+    if (sp->device != v->device() && !sp->backend->canAccess(sp->device, desc))
         CV_Error_(Error::StsBadArg, ("accel: DeviceAccess: device %d cannot reach the UMat's memory on device %d",
-                                     sp->device, st->device));
+                                     sp->device, v->device()));
     std::unique_ptr<Impl> impl_(new Impl());
     impl_->m = m;
     impl_->s = stream.impl->s;
@@ -1384,12 +1263,13 @@ void reviveDevices()
 
 uint64 DeviceAccess::handle() const
 {
-    return p->m.u->accelState->alloc.handle;
+    return p->m.u->accelState->imp->alloc.handle;
 }
 
 size_t DeviceAccess::offset() const
 {
-    return p->m.offset;
+    // the UMat's data is a view of a range of the import that handle() refers to
+    return (size_t)(p->m.u->accelState->start + p->m.offset);
 }
 
 } // namespace accel

@@ -84,7 +84,7 @@ public:
         DEVICE_LOST marks the device stopped); the work behind the fence no longer runs, so the
         caller may free what it used. An unknown fence stays PENDING until it completes (see
         above): whatever waits for it is leaked rather than freed under the device. */
-    Poll poll() const CV_NOEXCEPT;
+    Poll poll(bool logFailure = true) const CV_NOEXCEPT;
     //! never throws; false when the device failed (see wait() for @p bounded)
     bool waitNoThrow(bool bounded = true) const CV_NOEXCEPT;
 
@@ -181,11 +181,6 @@ public:
     //! @p protectedMem: allocations for results computed from protected content
     MatAllocator* allocator(int device, int kind, bool protectedMem = false);
 
-    //! takes ownership of a released buffer whose device work may still be running
-    void deferRelease(BufferState* st);
-    //! frees deferred buffers whose fences completed; with @p waitAll, waits for all of them
-    void collectDeferred(bool waitAll);
-
     /** device_synchronize, counted per device: an unknown fence completes once a
         synchronization that started after it succeeded. DEVICE_LOST marks the device stopped.
         Never throws. */
@@ -200,17 +195,6 @@ public:
     {
         return syncDone_[slot(device)].load() >= ticket;
     }
-
-    /** Live buffers by the identity of their physical memory (cvAccelAllocation::backing_id),
-        so that aliases of one memory share one buffer and one synchronization state. */
-    void registerBacking(BufferState* st, UMatData* u);
-    //! runs while @p st's UMatData is still alive (deallocate), before anything is freed
-    void unregisterBacking(const BufferState* st);
-    /** The live buffer whose range holds [offset, offset+size) of @p id, or NULL; with
-        @p reference, one more UMat reference is taken on it. Throws when the range overlaps a
-        live buffer only partly, or when the buffer lacks @p requiredFlags (read-only, protected). */
-    UMatData* findBacking(uint64_t id, uint64_t offset, uint64_t size, uint32_t requiredFlags, bool reference,
-                          size_t& viewOffset);
 
     //! tests only: forgets that devices were lost (accel::detail::reviveDevices)
     void revive() CV_NOEXCEPT
@@ -295,7 +279,6 @@ private:
     std::vector<cvAccelDeviceInfo> devices_;
     std::map<std::string, const void*> opTables_;
     std::map<std::pair<int, int>, MatAllocator*> allocators_;
-    std::vector<BufferState*> deferred_;
     enum { MAX_TRACKED_DEVICES = 64 };  //!< devices past this are tracked together, as the backend
     static int slot(int device) { return device >= 0 && device < MAX_TRACKED_DEVICES ? device : MAX_TRACKED_DEVICES; }
     std::atomic<bool> lost_, stopped_;
@@ -304,15 +287,6 @@ private:
     std::atomic<bool> noPinnedShadow_[MAX_TRACKED_DEVICES];
     std::atomic<uint64> syncIssued_[MAX_TRACKED_DEVICES + 1];  //!< synchronize() tickets handed out
     std::atomic<uint64> syncDone_[MAX_TRACKED_DEVICES + 1];    //!< highest ticket whose synchronize() succeeded
-    struct BackingEntry
-    {
-        BufferState* st;
-        UMatData* u;
-        uint64_t offset;
-        uint64_t size;
-    };
-    std::mutex backingsMutex_;
-    std::multimap<uint64_t, BackingEntry> backings_;
     std::vector<std::unique_ptr<IdleGate> > idleGates_;
     std::map<std::pair<int, uintptr_t>, uintptr_t> hostImports_;   //!< (device, first page) -> end
     std::multimap<std::pair<int, uint64_t>, cvAccelAllocation> pinnedCache_;
@@ -361,53 +335,194 @@ const ScopeEntry* currentScope();
 //! allocator of the innermost scope's device, NULL when there is none (used by UMat::getStdAllocator)
 MatAllocator* scopeAllocator();
 
-//////////////////////////////// buffer state and protocol ////////////////////////////////
+//////////////////////////////// physical memory ////////////////////////////////
 
-/** State that core keeps for every UMatData created by a DeviceAllocator.
-
-Which copy is current is kept in UMatData::flags as for other allocators:
-HOST_COPY_OBSOLETE (the CPU view is stale) and DEVICE_COPY_OBSOLETE (the device copy is
-stale). Both set means the content is uninitialized and no transfer is ever needed.
-For memory with a single physical copy (COHERENT, NONCOHERENT, ...), HOST_COPY_OBSOLETE
-means the CPU must wait and invalidate before reading. */
-struct BufferState
+//! overflow-safe end of [begin, begin + size): false when it does not fit in 64 bits
+inline bool rangeEnd(uint64_t begin, uint64_t size, uint64_t& end)
 {
-    BufferState(Backend* b, int device);
+    if (size > UINT64_MAX - begin)
+        return false;
+    end = begin + size;
+    return true;
+}
 
+//! [b0, b0 + s0) and [b1, b1 + s1) share a byte (ranges known to fit, see rangeEnd)
+inline bool rangesOverlap(uint64_t b0, uint64_t s0, uint64_t b1, uint64_t s1)
+{
+    return s0 != 0 && s1 != 0 && b0 < b1 + s1 && b1 < b0 + s0;
+}
+
+//! [b1, b1 + s1) lies inside [b0, b0 + s0) (ranges known to fit, see rangeEnd)
+inline bool rangeInside(uint64_t b0, uint64_t s0, uint64_t b1, uint64_t s1)
+{
+    return b1 >= b0 && b1 - b0 <= s0 && s1 <= s0 - (b1 - b0);
+}
+
+/** Where the identity of a piece of physical memory comes from. Core identifies host memory
+    and file-backed memory (dma-bufs) itself, so that every backend that imports them meets the
+    same state; other memory is identified by the backend that reaches it. */
+enum BackingDomain
+{
+    BACKING_ANONYMOUS = 0,  //!< not known: the memory is reached through one allocation only
+    BACKING_HOST = 1,       //!< host memory: virtual addresses of this process
+    BACKING_FILE = 2,       //!< a dma-buf or another file-backed object: (st_dev, st_ino)
+    BACKING_BACKEND = 3     //!< reported by one backend: (backend id, cvAccelAllocation::backing_id)
+};
+
+struct BackingKey
+{
+    BackingKey() : domain(BACKING_ANONYMOUS), a(0), b(0) {}
+    BackingKey(int d, uint64_t a_, uint64_t b_) : domain(d), a(a_), b(b_) {}
+    int domain;
+    uint64_t a, b;
+    bool operator<(const BackingKey& o) const
+    {
+        return domain != o.domain ? domain < o.domain : a != o.a ? a < o.a : b < o.b;
+    }
+};
+
+/** One backend's import of a whole backing, or the allocation that a backing is. Byte 0 of
+    alloc is byte 0 of the backing. A backing has one import per backend, device and layout;
+    views of the backing use ranges of it. Imports live as long as their backing. */
+struct Import
+{
+    Import();
     Backend* backend;
     int device;
-    cvAccelAllocation alloc;        //!< the memory UMat::handle() refers to
+    uint64_t modifier;              //!< the layout it was imported with
+    cvAccelAllocation alloc;        //!< desc.backend_id and desc.device_index are set by core
+    const void* hostReservation;    //!< host pages reserved with Backend::reserveHostImport, or NULL
+};
 
-    //! host copy for HOST_ACCESS_COPY and HOST_ACCESS_UNCACHED memory; pinned when the backend can
+//! bytes of a backing that failed device work may have written: readers get its error
+struct PoisonRange
+{
+    uint64_t begin, end;
+    std::string reason;
+};
+
+//! host memory of a released view, freed once the device work that may touch it completed
+struct RetiredHostCopy
+{
+    RetiredHostCopy() : shadow(0), kind(0), pages(0), backend(0), device(-1) { memset(&alloc, 0, sizeof(alloc)); }
     uchar* shadow;
-    cvAccelAllocation shadowAlloc;  //!< valid when the shadow came from the backend (pinned)
-    bool shadowFromBackend;
-    size_t shadowPages;             //!< > 0: the shadow is core's own page mapping of that size (read-only memory)
+    int kind;                   //!< ShadowKind
+    size_t pages;
+    cvAccelAllocation alloc;    //!< pinned memory from the backend
+    Backend* backend;
+    int device;
+    FenceRef writeFence;
+    std::vector<FenceRef> readFences;
+};
 
+/** Everything core knows about one piece of physical memory, whoever allocated or imported it
+    and however many UMatData objects view it: the order of device work on it, which of its
+    bytes failed work may have written, who uses it right now (device operations, Mat views,
+    DeviceAccess), its imports, and its lifetime. Two planes of one dma-buf, the same dma-buf
+    imported by a GPU and an NPU backend, and a UMat's memory wrapped again through its device
+    pointer are all one backing.
+
+    Ordering is per backing, not per byte: device work on one plane waits for conflicting
+    work on another plane of the same memory, as with the implicit fences of a dma-buf, which
+    cover the whole buffer. */
+struct PhysicalBacking
+{
+    PhysicalBacking();
+    ~PhysicalBacking();
+
+    // identity, fixed before the backing is shared
+    uint64 id;              //!< unique in the process (diagnostics and tests)
+    BackingKey key;
+    uint64_t start;         //!< first byte in the key's address space (a host address, an offset in the file, ...)
+    uint64_t size;
+    uint32_t flags;         //!< attested by its imports: CV_ACCEL_MEMF_PROTECTED, CV_ACCEL_MEMF_EXTERNAL_SYNC
+    bool borrowed;          //!< memory of someone else: its last release waits for the device without limit
+
+    // under the mutex of the registry of backings (see backing.cpp)
+    int refs;               //!< live views, and lookups in progress
+    bool registered;        //!< findable through its key
+    bool retiring;          //!< no reference left, being freed: lookups wait until it is gone
+    bool deferred;          //!< no reference left, waiting for its fences
+
+    // everything below is protected by mutex
     std::mutex mutex;
     std::condition_variable cond;
-    bool busy;                      //!< a host transition that waits outside of the mutex is running
-    int pendingReaders;             //!< device operations between acquire and record that only read
-    int pendingWriters;             //!< ... that write; a writer excludes everyone, a reader excludes writers
+    bool busy;              //!< a host transition that waits outside of the mutex is running
+    int pendingReaders;     //!< device operations between acquire and record that only read
+    int pendingWriters;     //!< ... that write; a writer excludes everyone, a reader excludes writers
     struct Hold
     {
         std::thread::id thread;
         int mode;
     };
-    std::vector<Hold> longHolds;    //!< open DeviceAccess objects, to report same-thread conflicts
+    std::vector<Hold> longHolds;        //!< open DeviceAccess objects, to report same-thread conflicts
+    FenceRef writeFence;                //!< last device write
+    std::vector<std::pair<uint64_t, uint64_t> > writeRanges;   //!< [begin, end) it covers: poisoned if it fails
+    std::vector<FenceRef> readFences;   //!< device reads after the last write, one per stream
+    std::vector<PoisonRange> poison;    //!< bytes that failed work may have written, until written whole
+    uint64 generation;                  //!< incremented by every write
+    std::vector<Import*> imports;       //!< owned
+    std::vector<BufferState*> views;    //!< live views
+    std::vector<RetiredHostCopy> retired;
+    // CPU access. Memory that the CPU addresses directly is opened once for all of its views:
+    // begin_cpu_access on every import that has a CPU view, nested for wider access, all ended
+    // when the last view closes. Cache maintenance then never runs under another view's
+    // unflushed writes (a dma-buf sync covers the whole buffer).
+    int cpuViews;                       //!< views with an open Mat mapping
+    std::vector<int> cpuLevels;         //!< access of each open begin_cpu_access level, outermost first
+    uchar* cpuBase;                     //!< CPU address of byte 0 while levels are open
+    IdleGate* idleGateHeld;             //!< DEVICE_IDLE memory: the gate the open mapping holds
+};
+
+//! host copy kinds (BufferState::shadowKind)
+enum ShadowKind
+{
+    SHADOW_NONE = 0,
+    SHADOW_FASTMALLOC = 1,
+    SHADOW_BACKEND = 2,     //!< pinned host memory from the backend: one DMA per transfer
+    SHADOW_USER = 3,        //!< the Mat that the UMat was created from (Mat::getUMat)
+    SHADOW_PAGES = 4        //!< core's own pages, read-only except during downloads (read-only memory)
+};
+
+/** A view: the state of one UMatData, a range of a backing reached through one import.
+
+Which copy is current is kept in UMatData::flags as for other allocators:
+HOST_COPY_OBSOLETE (the CPU view is stale) and DEVICE_COPY_OBSOLETE (the device copy is
+stale). Both set means the content is uninitialized and no transfer is ever needed. For
+memory with a single physical copy (COHERENT, NONCOHERENT, ...), HOST_COPY_OBSOLETE means the
+CPU must wait and invalidate before reading.
+
+A host copy (COPY and UNCACHED memory) belongs to one view. Views of one import with host
+copies never overlap: a wrap of bytes that a view with a host copy already covers becomes a
+UMat over that view, so no byte has two host copies. Views of memory that the CPU addresses
+directly may overlap freely. Everything here but the identity fields is protected by
+backing->mutex. */
+struct BufferState
+{
+    BufferState(PhysicalBacking* b, Import* imp, uint64_t start, uint64_t size);
+
+    PhysicalBacking* backing;
+    Import* imp;
+    UMatData* u;                    //!< the UMatData of the view
+    uint64_t start;                 //!< first byte in the backing (and in imp->alloc)
+    uint64_t size;                  //!< bytes, UMatData::size
+    bool readOnly;                  //!< writes refused: read-only memory, or the wrap asked for it
+    bool fromMat;                   //!< created by Mat::getUMat: the content goes back to the Mat
+
+    Backend* backend() const { return imp->backend; }
+    int device() const { return imp->device; }
+    const cvAccelAllocation& alloc() const { return imp->alloc; }
+
+    //! host copy for HOST_ACCESS_COPY and HOST_ACCESS_UNCACHED memory; pinned when the backend can
+    uchar* shadow;
+    int shadowKind;                 //!< ShadowKind
+    cvAccelAllocation shadowAlloc;  //!< valid for SHADOW_BACKEND
+    size_t shadowPages;             //!< SHADOW_PAGES: size of the page mapping
+
     bool hostMapped;                //!< Mat views may exist (UMatData::refcount was > 0)
     int hostAccess;                 //!< union of AccessFlag over the current mapping
-    FenceRef writeFence;            //!< last device write
-    std::vector<FenceRef> readFences; //!< device reads after the last write, one per stream
-
-    bool imported;                  //!< memory belongs to the user: releasing waits for the device
-    bool fromMat;                   //!< created by Mat::getUMat: the content goes back to the Mat
-    const void* hostImport;         //!< imported host range reserved with Backend::reserveHostImport
-    bool idleGateHeld;              //!< the current mapping counts in IdleGate::cpuMappings
-    bool poisoned;                  //!< the device work that wrote the content failed
-    std::string poisonReason;
-    uint64 generation;              //!< incremented by every write
-    uint64 matGeneration;           //!< fromMat: the generation of the content copied from the Mat
+    bool dying;                     //!< no UMat refers to the view any more: it is being released
+    uint64 matGeneration;           //!< fromMat: the backing generation of the content copied from the Mat
     uint64 viewHash;                //!< OPENCV_ACCEL_VALIDATE: checksum of a read-only view when it opened
     bool viewHashed;
 };
@@ -423,7 +538,7 @@ enum DeviceMode
 {
     DEV_READ = 1,
     DEV_WRITE = 2,      //!< partial write: the rest of the buffer must stay intact
-    DEV_DISCARD = 4     //!< together with DEV_WRITE: the whole allocation is overwritten
+    DEV_DISCARD = 4     //!< together with DEV_WRITE: the whole view is overwritten
 };
 
 struct DeviceUse
@@ -434,14 +549,14 @@ struct DeviceUse
 
 /** The buffers one piece of device work uses, acquired together.
 
-acquire() takes them in one global order (by state address), so concurrent acquirers never
-wait for each other in a cycle, and a buffer added twice is acquired once with the union of
-the modes. Each buffer waits while a conflicting operation sits between acquire and record,
-gets its host copy uploaded when that is newer, and contributes the fences the work must
-wait for. If anything fails, or the object goes away before record(), every buffer acquired
-so far is released, so no path leaves a buffer acquired. A long hold (DeviceAccess) is
-remembered per thread, so that the same thread touching the buffer again gets an error
-instead of a deadlock. */
+acquire() takes their backings in one global order (by address), so concurrent acquirers never
+wait for each other in a cycle; views of one backing are acquired together, with the union of
+their modes, and a buffer added twice counts once. Each backing waits while a conflicting
+operation sits between acquire and record, its views get their host copies uploaded when
+those are newer, and it contributes the fences the work must wait for. If anything fails, or
+the object goes away before record(), every backing acquired so far is released, so no path
+leaves one acquired. A long hold (DeviceAccess) is remembered per thread, so that the same
+thread touching the memory again gets an error instead of a deadlock. */
 class DeviceAcquisition
 {
 public:
@@ -454,22 +569,49 @@ public:
     /** Returns false and holds nothing when a live Mat view conflicts with a use. Appends the
         fences that work enqueued on @p stream must wait for to @p waits. */
     bool acquire(const StreamPtr& stream, std::vector<FenceRef>& waits);
-    //! the work was enqueued: @p fence completes it; releases every buffer
+    //! the work was enqueued: @p fence completes it; releases everything
     void record(const FenceRef& fence);
-    /** The work failed after the backend may have queued part of it: every buffer takes
-        @p fence (empty: nothing runs any more) and the written ones are poisoned; releases
-        every buffer. */
+    /** The work failed after the backend may have queued part of it: every backing takes
+        @p fence (empty: nothing runs any more) and the views written are poisoned; releases
+        everything. */
     void fail(const FenceRef& fence, const std::string& reason);
-    //! nothing was enqueued; releases every buffer (safe to call more than once)
+    //! nothing was enqueued; releases everything (safe to call more than once)
     void abandon();
 
 private:
     DeviceAcquisition(const DeviceAcquisition&);
     DeviceAcquisition& operator=(const DeviceAcquisition&);
+    struct Group
+    {
+        PhysicalBacking* backing;
+        size_t first, count;    //!< uses_[first, first + count) are views of it
+        int mode;               //!< union of their DEV_READ / DEV_WRITE
+    };
+    void finish(const Group& g, const FenceRef* fence, const char* failure);
+    //! the views of memory with implicit fences, one per import, with the access of all their uses
+    std::vector<std::pair<const BufferState*, int> > externalUses() const;
+    void endExternalUses(const FenceRef& fence) CV_NOEXCEPT;
     std::vector<DeviceUse> uses_;
+    std::vector<Group> groups_;
     bool longHold_;
-    size_t acquired_;
+    size_t acquired_;           //!< groups acquired so far
     std::thread::id holder_;
+};
+
+//! what a wrap of external memory asks for (DeviceAllocator::wrap)
+struct WrapRequest
+{
+    WrapRequest() : readOnly(false), protectedRequired(false), allowExistingView(false)
+    {
+        memset(&ext, 0, sizeof(ext));
+        ext.struct_size = (uint32_t)sizeof(ext);
+    }
+    cvAccelExternalMemory ext;  //!< handle, offset and size of the bytes to view, layout
+    bool readOnly;              //!< the caller restricts itself to reading
+    bool protectedRequired;     //!< refused unless the backend attests protected content
+    /** the result may be a UMat over a view that already covers the bytes with a host copy
+        (otherwise such a wrap is refused, see BufferState) */
+    bool allowExistingView;
 };
 
 /** The allocator for one (backend, device, memory kind). It owns no state of its own: the
@@ -498,14 +640,15 @@ public:
     int device() const { return device_; }
     int kind() const { return kind_; }
 
-    /** Wraps external memory (wrapExternalMemory). When the memory is a range of a buffer that
-        core already holds, returns that buffer with one more UMat reference and its offset in
-        @p viewOffset; without @p viewOffset such an alias is refused. */
-    UMatData* wrap(const cvAccelExternalMemory& ext, size_t total, size_t* viewOffset = NULL) const;
+    /** Wraps external memory (wrapExternalMemory). Returns the UMatData to view it through and
+        the offset of the requested bytes in it. With @p referenced the UMatData is an existing
+        view, and one more UMat reference is taken on it; otherwise it is new and unreferenced. */
+    UMatData* wrap(const WrapRequest& req, size_t& viewOffset, bool& referenced) const;
 
 private:
-    UMatData* createState(UMatData* u, const cvAccelAllocation& a, bool imported) const;
     int kindFor(UMatUsageFlags usageFlags) const;
+    //! memory for @p total bytes from the backend (deferred releases collected once on OUT_OF_MEMORY)
+    cvAccelAllocation allocateMemory(uint64_t total, int kind) const;
 
     Backend* b_;
     int device_;
@@ -513,8 +656,41 @@ private:
     bool protected_;    //!< allocates protected memory (CV_ACCEL_MEMF_PROTECTED)
 };
 
-//! frees the backend memory of a released buffer and deletes @p st (fences must be complete)
-void destroyBufferState(BufferState* st);
+//! takes one more reference unless the count already dropped to zero (the owner is releasing)
+bool addRefIfAlive(int* counter);
+
+/** A view of all of the memory core just allocated in @p a (allocate, Mat::getUMat), set on
+    @p u. Takes ownership of @p a, also on failure. */
+BufferState* attachOwnedMemory(UMatData* u, Backend* b, int device, const cvAccelAllocation& a);
+
+/** Releases a view whose UMatData is gone: its host copy is freed once the device work that may
+    touch it completed, and the backing loses a reference (see releaseBacking). Never throws. */
+void releaseView(BufferState* v) CV_NOEXCEPT;
+
+/** Drops a reference to a backing. The last one retires it: memory that belongs to someone
+    else waits right here, without limit, until the device is done with it; core's own memory
+    is freed once its fences complete (collectRetired). Until then the backing stays findable,
+    so a wrap of the same memory revives it, fences included. Never throws. */
+void releaseBacking(PhysicalBacking* b) CV_NOEXCEPT;
+
+//! frees retired backings whose fences completed; with @p waitAll, waits for them first (bounded)
+void collectRetired(bool waitAll) CV_NOEXCEPT;
+
+//! release paths: the backing's fences all completed (a failed device counts as done)
+bool fencesSettledLocked(PhysicalBacking* b) CV_NOEXCEPT;
+
+//! frees the host copies of released views whose fences completed (with the backing's mutex held)
+void pruneRetiredLocked(PhysicalBacking* b) CV_NOEXCEPT;
+
+//! frees one host copy (fences complete, or the device stopped)
+void freeHostCopy(RetiredHostCopy& c) CV_NOEXCEPT;
+
+//! poisoned bytes of @p b overlapping [begin, begin + size), NULL when there are none (backing mutex held)
+const PoisonRange* findPoison(const PhysicalBacking* b, uint64_t begin, uint64_t size);
+//! marks [begin, begin + size) of @p b as written by failed work (backing mutex held)
+void addPoison(PhysicalBacking* b, uint64_t begin, uint64_t size, const std::string& reason);
+//! [begin, begin + size) was written whole: earlier failures there no longer matter (backing mutex held)
+void clearPoison(PhysicalBacking* b, uint64_t begin, uint64_t size);
 
 //! true for allocators of accelerator backends: their data must never move elsewhere silently
 bool isDeviceAllocator(const MatAllocator* a);

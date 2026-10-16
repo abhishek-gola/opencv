@@ -34,6 +34,12 @@
 #include <set>
 #include <thread>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace cv { namespace accel { namespace impl {
 
 namespace {
@@ -148,19 +154,22 @@ std::map<uintptr_t, EmuAlloc*>& ownedAllocations()
     static std::map<uintptr_t, EmuAlloc*>* m = new std::map<uintptr_t, EmuAlloc*>();
     return *m;
 }
-//! base address of the owned allocation that holds @p p (0 if none) and whether it is protected
-uintptr_t ownedBase(uintptr_t p, bool* isProtected = NULL)
+/** The owned allocation that holds [p, p + size): its base address and size, and whether it is
+    protected. False when no allocation holds the start, or the range runs past its end. */
+bool ownedAllocation(uintptr_t p, uint64_t size, uintptr_t& base, uint64_t& allocSize, bool& isProtected)
 {
     std::lock_guard<std::mutex> lk(ownedMutex());
     std::map<uintptr_t, EmuAlloc*>::const_iterator it = ownedAllocations().upper_bound(p);
     if (it == ownedAllocations().begin())
-        return 0;
+        return false;
     --it;
-    if (p >= it->first + (it->second->size ? it->second->size : 1))
-        return 0;
-    if (isProtected)
-        *isProtected = it->second->protectedMem;
-    return it->first;
+    const uint64_t offset = (uint64_t)(p - it->first);
+    if (offset >= (it->second->size ? it->second->size : 1) || size > it->second->size - offset)
+        return false;
+    base = it->first;
+    allocSize = it->second->size;
+    isProtected = it->second->protectedMem;
+    return true;
 }
 
 bool isScrambledDesc(const cvAccelMemoryDesc& d, int device)
@@ -215,12 +224,14 @@ struct EmuFence
     }
 };
 
-/** A simulated dma-buf shared with other drivers (emulatorCreateDmaBuf): its last writer, a
-    simulated camera or OpenCV, leaves an implicit fence that the next user waits for. */
+/** A simulated dma-buf shared with other drivers (emulatorCreateDmaBuf): shared memory behind a
+    real file descriptor (a memfd), so that it has an identity like a dma-buf's inode. Its last
+    writer, a simulated camera or OpenCV, leaves an implicit fence that the next user waits for. */
 struct FakeDmaBuf
 {
-    FakeDmaBuf(size_t size) : mem(size, 0), fence(0), attached(0) {}
-    std::vector<uchar> mem;
+    FakeDmaBuf() : size(0), mem(0), fence(0), attached(0) {}
+    size_t size;
+    uchar* mem;         //!< mapping of the whole buffer, shared with the "other drivers"
     std::mutex m;
     EmuFence* fence;    //!< last write, one reference held here; NULL if none
     int attached;       //!< fences attached by end_device_access
@@ -252,16 +263,35 @@ std::mutex& dmaBufsMutex()
     return *m;
 }
 
-std::map<int64_t, FakeDmaBuf*>& dmaBufs()   //!< never freed: test hooks only
+//! by the identity of the file behind the descriptor; never freed: test hooks only
+std::map<std::pair<uint64_t, uint64_t>, FakeDmaBuf*>& dmaBufs()
 {
-    static std::map<int64_t, FakeDmaBuf*>* b = new std::map<int64_t, FakeDmaBuf*>();
+    static std::map<std::pair<uint64_t, uint64_t>, FakeDmaBuf*>* b = new std::map<std::pair<uint64_t, uint64_t>, FakeDmaBuf*>();
     return *b;
+}
+
+//! the file identity of a descriptor (any descriptor of the buffer: dup'ed ones too)
+bool fileIdentity(int64_t fd, std::pair<uint64_t, uint64_t>& id)
+{
+#ifdef __linux__
+    struct stat st;
+    if (fstat((int)fd, &st) != 0)
+        return false;
+    id = std::make_pair((uint64_t)st.st_dev, (uint64_t)st.st_ino);
+    return true;
+#else
+    CV_UNUSED(fd); CV_UNUSED(id);
+    return false;
+#endif
 }
 
 FakeDmaBuf* findDmaBuf(int64_t fd)
 {
+    std::pair<uint64_t, uint64_t> id;
+    if (!fileIdentity(fd, id))
+        return 0;
     std::lock_guard<std::mutex> lk(dmaBufsMutex());
-    std::map<int64_t, FakeDmaBuf*>::const_iterator it = dmaBufs().find(fd);
+    std::map<std::pair<uint64_t, uint64_t>, FakeDmaBuf*>::const_iterator it = dmaBufs().find(id);
     return it == dmaBufs().end() ? 0 : it->second;
 }
 
@@ -550,6 +580,7 @@ cvAccelStatus CV_API_CALL emu_allocate(int device, uint64_t size, uint32_t kind,
         out->size = size;
         out->backend_data = a;
         out->backing_id = out->handle;  // its own base address (see backing_id)
+        out->backing_size = size;
         a->protectedMem = (d.flags & CV_ACCEL_MEMF_PROTECTED) != 0;
         {
             std::lock_guard<std::mutex> lk(ownedMutex());
@@ -595,11 +626,11 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
 {
     if (!ext || !out)
         return fail(CV_ACCEL_INVALID_ARGUMENT, "bad argument");
-    if (device == EMU_COHERENT && ext->type == CV_ACCEL_EXTMEM_DMABUF_FD)
+    if ((device == EMU_COHERENT || device == EMU_NONCOHERENT) && ext->type == CV_ACCEL_EXTMEM_DMABUF_FD)
     {
         // a simulated dma-buf: shared memory whose users order themselves through implicit fences
         FakeDmaBuf* buf = findDmaBuf(ext->handle);
-        if (!buf || ext->offset + ext->size > buf->mem.size())
+        if (!buf || ext->offset > buf->size || ext->size > buf->size - ext->offset)
             return fail(CV_ACCEL_INVALID_ARGUMENT, "unknown dma-buf, or a range outside it");
         try
         {
@@ -608,7 +639,7 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->device = device;
             a->kind = CV_ACCEL_MEM_SHARED;
             a->size = (size_t)ext->size;
-            a->mem = a->cpuView = buf->mem.data() + ext->offset;
+            a->mem = a->cpuView = buf->mem + ext->offset;
             a->dmabuf = buf;
             // a tiled or compressed layout has no linear CPU view
             const uint64_t modifier = ext->struct_size >= offsetof(cvAccelExternalMemory, layout_modifier) + sizeof(uint64_t)
@@ -618,12 +649,12 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             out->desc.host_access = modifier ? CV_ACCEL_HOST_ACCESS_NONE : CV_ACCEL_HOST_ACCESS_COHERENT;
             out->desc.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
             out->desc.layout_modifier = modifier;
+            // dma-bufs are coherent here (an I/O-coherent NPU on emulator:2)
             out->desc.flags = CV_ACCEL_MEMF_IMPORTED | CV_ACCEL_MEMF_EXTERNAL_SYNC | (ext->flags & CV_ACCEL_MEMF_READ_ONLY);
             out->handle = (uint64_t)(uintptr_t)a->mem;
             out->size = ext->size;
             out->backend_data = a;
-            out->backing_id = (1ull << 63) | (uint64_t)ext->handle;     // the dma-buf itself, like its inode
-            out->backing_offset = ext->offset;
+            // core identifies a dma-buf by its inode: no backing fields needed
             countAllocation(device, 1);
             return CV_ACCEL_OK;
         }
@@ -647,12 +678,21 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             a->owned = false;
             a->scrambled = true;
             a->cpuOpen = false;
-            // the backend, not the caller, attests protection: memory of a protected allocation
-            // (a secure decoder's frame, say) is protected, whatever the caller asked for
+            // The whole range must lie in the allocation it starts in, and the backend, not the
+            // caller, attests protection: memory of a protected allocation (a secure decoder's
+            // frame, say) is protected, whatever the caller asked for.
             bool prot = false;
-            const uintptr_t base = ownedBase((uintptr_t)(intptr_t)ext->handle + ext->offset, &prot);
+            uintptr_t base = 0;
+            uint64_t allocSize = 0;
+            if (!ownedAllocation((uintptr_t)(intptr_t)ext->handle + ext->offset, ext->size, base, allocSize, prot))
+            {
+                delete a;
+                return fail(CV_ACCEL_INVALID_ARGUMENT, "the range does not lie inside one device allocation");
+            }
             out->desc.device_index = (uint32_t)device;
             out->desc.kind = CV_ACCEL_MEM_DEVICE;
+            if (device == EMU_FAILING)
+                prot = false;   // like a backend that predates protected memory: never attests it
             out->desc.host_access = prot ? CV_ACCEL_HOST_ACCESS_NONE : CV_ACCEL_HOST_ACCESS_COPY;
             out->desc.handle_kind = CV_ACCEL_HANDLE_DEVICE_POINTER;
             out->desc.flags = CV_ACCEL_MEMF_IMPORTED | (ext->flags & CV_ACCEL_MEMF_READ_ONLY) |
@@ -661,11 +701,9 @@ cvAccelStatus CV_API_CALL emu_import_memory(int device, const cvAccelExternalMem
             out->size = ext->size;
             out->backend_data = a;
             a->protectedMem = prot;
-            if (base)   // the allocation it lies in
-            {
-                out->backing_id = (uint64_t)base;
-                out->backing_offset = (uint64_t)((uintptr_t)a->mem - base);
-            }
+            out->backing_id = (uint64_t)base;   // the allocation it lies in
+            out->backing_offset = (uint64_t)((uintptr_t)a->mem - base);
+            out->backing_size = allocSize;
             countAllocation(device, 1);
             return CV_ACCEL_OK;
         }
@@ -1204,11 +1242,25 @@ int64 emulatorAllocateExternal(int device, size_t size, int value, bool protecte
 
 int64 emulatorCreateDmaBuf(size_t size)
 {
-    static int64 next = 1000;
+#ifdef __linux__
+    CV_Assert(size > 0);
+    const int fd = memfd_create("opencv-accel-emulator-dmabuf", MFD_CLOEXEC);
+    CV_Assert(fd >= 0 && "memfd_create failed");
+    CV_Assert(ftruncate(fd, (off_t)size) == 0);
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CV_Assert(p != MAP_FAILED);
+    std::pair<uint64_t, uint64_t> id;
+    CV_Assert(impl::fileIdentity(fd, id));
+    impl::FakeDmaBuf* buf = new impl::FakeDmaBuf();
+    buf->size = size;
+    buf->mem = (uchar*)p;
     std::lock_guard<std::mutex> lk(impl::dmaBufsMutex());
-    const int64 fd = next++;
-    impl::dmaBufs()[fd] = new impl::FakeDmaBuf(size);
-    return fd;
+    impl::dmaBufs()[id] = buf;
+    return fd;  // like a buffer from a camera: never freed (test hooks only)
+#else
+    CV_UNUSED(size);
+    CV_Error(Error::StsNotImplemented, "accel(emulator): dma-bufs are emulated on Linux only");
+#endif
 }
 
 void emulatorDmaBufProduce(int64 fd, int value, int delayUs)
@@ -1220,7 +1272,7 @@ void emulatorDmaBufProduce(int64 fd, int value, int delayUs)
     buf->replace(f);                    // the other one: from now on users wait for this write
     std::thread([buf, f, value, delayUs]() {
         std::this_thread::sleep_for(std::chrono::microseconds(delayUs));
-        memset(buf->mem.data(), value, buf->mem.size());
+        memset(buf->mem, value, buf->size);
         f->signal();
         f->release();
     }).detach();

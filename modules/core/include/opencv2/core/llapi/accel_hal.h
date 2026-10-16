@@ -24,6 +24,12 @@ OpenCV core owns the coherence protocol (which copy is current, which fences mus
 waited for, when caches must be cleaned or invalidated). A backend never changes UMat
 state itself; it only executes the primitives it is asked to execute.
 
+Core keeps one state per piece of physical memory, whoever imported it: the same dma-buf
+imported by a GPU backend and by an NPU backend, two planes of one frame, or a UMat's memory
+wrapped again through its device pointer all share one ordering of device work, one record
+of failed writes and one CPU mapping. Core identifies dma-bufs and host memory itself; for
+other memory it uses the identity a backend reports (cvAccelAllocation::backing_id).
+
 Compatibility rules:
 - structs with a struct_size field grow at their end only. The side that fills one writes
   at most struct_size bytes of it, and the side that reads one reads only the fields that
@@ -94,8 +100,9 @@ extern "C" {
 #endif
 
 #define CV_ACCEL_ABI_VERSION 0
-//! 1: describe_allocation; 2: begin_device_access / end_device_access
-#define CV_ACCEL_API_VERSION 2
+/** 1: describe_allocation; 2: begin_device_access / end_device_access; 3: cvAccelAllocation
+    reports the size of the memory it lies in, and has reserved space */
+#define CV_ACCEL_API_VERSION 3
 
 //! same as cv::MatShape::MAX_DIMS
 #define CV_ACCEL_MAX_DIMS 10
@@ -204,7 +211,14 @@ typedef struct cvAccelMemoryDesc
     uint32_t reserved[6];       //!< zero; room for new fields (the size stays)
 } cvAccelMemoryDesc;
 
-/** @brief One physical allocation, filled in by the backend. */
+/** @brief One allocation or import, filled in by the backend.
+
+The backing fields tell core which physical memory the allocation lies in, so that every
+allocation and import of one memory shares one state in core. A backend that does not know
+leaves them zero, and the allocation is its own memory. When the size of the memory is known,
+core imports all of it once per backend and device, and passes ranges of that import to
+operations.
+*/
 typedef struct cvAccelAllocation
 {
     uint64_t handle;            //!< see cvAccelHandleKind; 64 bits so device addresses fit on 32-bit hosts
@@ -212,11 +226,12 @@ typedef struct cvAccelAllocation
     void* backend_data;         //!< private to the backend
     cvAccelMemoryDesc desc;
     /** identity of the physical memory: the same for every allocation and import that reach it
-        while it lives (its base address, a CUDA buffer id, a dma-buf's inode, ...); 0 when not
-        known. A wrap of memory that core already holds becomes a view of that buffer, so that
-        both share one synchronization state. */
+        while it lives (its base address in a flat device address space, a buffer id, ...), 0 when
+        not known. Ignored for dma-bufs and host memory, which core identifies itself. */
     uint64_t backing_id;
-    uint64_t backing_offset;    //!< where handle lies in that memory
+    uint64_t backing_offset;    //!< where byte 0 of this allocation lies in that memory
+    uint64_t backing_size;      //!< size of that memory (cuMemGetAddressRange, ...), 0 when not known
+    uint64_t reserved[5];       //!< zero; room for new fields (the size stays)
 } cvAccelAllocation;
 
 /** @brief An n-dimensional strided view into an allocation (an argument of an operation).
@@ -371,6 +386,9 @@ struct OpenCV_Core_Accel_API_v0_0_api_entries
     cvAccelStatus (CV_API_CALL *allocate)(int device, uint64_t size, uint32_t kind, uint32_t flags,
                                           cvAccelAllocation* out) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *deallocate)(cvAccelAllocation* alloc) CV_ACCEL_NOEXCEPT;
+    /** Imports [ext->offset, ext->offset + ext->size) of external memory without copying it.
+        The backend checks that the range lies inside the memory (for a device pointer, inside
+        the allocation it points into) and fails with CV_ACCEL_INVALID_ARGUMENT otherwise. */
     cvAccelStatus (CV_API_CALL *import_memory)(int device, const cvAccelExternalMemory* ext,
                                                cvAccelAllocation* out) CV_ACCEL_NOEXCEPT;
     cvAccelStatus (CV_API_CALL *export_memory)(const cvAccelAllocation* alloc, uint32_t type,

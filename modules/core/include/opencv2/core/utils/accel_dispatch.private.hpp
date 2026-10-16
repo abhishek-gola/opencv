@@ -56,10 +56,12 @@ The emulator runs on the CPU but behaves like six devices with different memory 
 "emulator:0" discrete (host access only through copies), "emulator:1" coherent shared
 memory, "emulator:2" shared memory without cache coherence (it keeps a separate CPU view
 that only begin/end_cpu_access synchronize, so a missing cache operation shows up as
-wrong data), "emulator:3" protected memory (no CPU access), "emulator:4" managed memory
-that the CPU may only touch while the device is idle, and "emulator:5", a discrete device
-that fails on request (emulatorInjectFailure). Work runs asynchronously on worker
-threads; OPENCV_ACCEL_EMULATOR_DELAY_US delays every task to expose missing waits.
+wrong data; dma-bufs it imports are coherent), "emulator:3" protected memory (no CPU
+access), "emulator:4" managed memory that the CPU may only touch while the device is idle,
+and "emulator:5", a discrete device that fails on request (emulatorInjectFailure) and, like
+a backend that predates protected memory, never attests protection of memory it imports.
+Work runs asynchronously on worker threads; OPENCV_ACCEL_EMULATOR_DELAY_US delays every task
+to expose missing waits.
 @return the backend id */
 CV_EXPORTS int registerEmulatorBackend();
 
@@ -91,6 +93,9 @@ CV_EXPORTS void emulatorInjectFailure(int status, int points = EMU_FAIL_FENCES);
 //! number of emulator fences alive right now (no reference released twice, none leaked)
 CV_EXPORTS int64 emulatorLiveFences();
 
+//! tests: an id of the physical memory behind @p m, the same for every UMat that reaches it (0: host memory)
+CV_EXPORTS uint64 backingId(const UMat& m);
+
 //! the kernels of @p device report NOT_IMPLEMENTED while @p disable holds (a device without the operation)
 CV_EXPORTS void emulatorDisableOps(int device, bool disable);
 
@@ -109,8 +114,8 @@ its device pointer for ExternalMemory::DEVICE_POINTER. With @p protectedContent 
 allocates it as protected memory and attests that when it is wrapped. Never freed. */
 CV_EXPORTS int64 emulatorAllocateExternal(int device, size_t size, int value, bool protectedContent);
 
-/** @brief A simulated dma-buf of @p size bytes, shared with other "drivers"; returns its fd for
-ExternalMemory::DMABUF_FD on "emulator:1". */
+/** @brief A simulated dma-buf of @p size bytes (a memfd), shared with other "drivers"; returns its
+fd for ExternalMemory::DMABUF_FD on "emulator:1" and "emulator:2". Linux only. */
 CV_EXPORTS int64 emulatorCreateDmaBuf(size_t size);
 //! another driver (a camera, say) writes @p value into the whole dma-buf @p delayUs from now; users wait for it
 CV_EXPORTS void emulatorDmaBufProduce(int64 fd, int value, int delayUs);
