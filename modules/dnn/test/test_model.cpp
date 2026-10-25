@@ -1196,6 +1196,58 @@ INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_YOLOv8n_ONNX,
                         testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
 
 
+// Same model/image as Reproducibility_YOLOv8n_ONNX, via DetectionModel's high-level API.
+// dog416.png is square, so default DNN_PMODE_NULL resize matches that test's plain resize.
+typedef testing::TestWithParam<Target> Test_DetectionModel_YOLOv8;
+TEST_P(Test_DetectionModel_YOLOv8, Accuracy)
+{
+    Target targetId = GetParam();
+    applyTestTag(targetId == DNN_TARGET_CPU ? CV_TEST_TAG_MEMORY_512MB : CV_TEST_TAG_MEMORY_1GB);
+    ASSERT_TRUE(ocl::useOpenCL() || targetId == DNN_TARGET_CPU || targetId == DNN_TARGET_CPU_FP16);
+
+    std::string modelname = _tf("yolov8n.onnx", false);
+    Net net = readNetFromONNX(modelname);
+
+    DetectionModel model(net);
+    model.setInputSize(640, 640).setInputScale(1.0 / 255.0).setInputSwapRB(true);
+    // Reference values below were generated with across-class NMS.
+    model.setNmsAcrossClasses(true);
+    model.setPreferableBackend(DNN_BACKEND_OPENCV);
+    model.setPreferableTarget(targetId);
+    if (targetId == DNN_TARGET_CPU_FP16)
+        model.enableWinograd(false);
+
+    Mat image = imread(_tf("dog416.png"));
+    ASSERT_TRUE(!image.empty());
+
+    std::vector<int> classIds;
+    std::vector<float> confidences;
+    std::vector<Rect> boxes;
+    model.detect(image, classIds, confidences, boxes, 0.25f, 0.45f);
+
+    std::vector<Rect2d> testBoxes;
+    for (const Rect& box : boxes)
+    {
+        testBoxes.emplace_back(box.x / (double)image.cols, box.y / (double)image.rows,
+                               box.width / (double)image.cols, box.height / (double)image.rows);
+    }
+
+    std::vector<int>    refClassIds  = {16, 1, 7};
+    std::vector<float>  refScores    = {0.827f, 0.809f, 0.544f};
+    std::vector<Rect2d> refBoxes     = {
+        Rect2d(0.171157, 0.386951, 0.231909, 0.551873),  // dog
+        Rect2d(0.160967, 0.234788, 0.577899, 0.495077),  // bicycle
+        Rect2d(0.608337, 0.130141, 0.291832, 0.167390),  // truck
+    };
+
+    normAssertDetections(refClassIds, refScores, refBoxes,
+                         classIds, confidences, testBoxes,
+                         "", 0.25f, /*scoreDiff=*/0.1, /*iouDiff=*/0.1);
+}
+INSTANTIATE_TEST_CASE_P(/**/, Test_DetectionModel_YOLOv8,
+                        testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
+
+
 typedef testing::TestWithParam<Target> Reproducibility_YOLOXS_ONNX;
 TEST_P(Reproducibility_YOLOXS_ONNX, Accuracy)
 {
